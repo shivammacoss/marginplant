@@ -167,10 +167,14 @@ function AdminPositionsInner() {
     });
   }, [rawRows, search]);
 
-  // PnL summary (today / current week / last week) — auto-refreshes with the table.
+  // PnL summary (today / current week / last week) — auto-refreshes with
+  // the table. Honours the user filter so the dashboard tiles narrow to
+  // the same user the per-row table is filtered to (otherwise the tile
+  // shows platform-wide totals while the table shows one user — a
+  // confusing mismatch the user repeatedly hit on the Closed tab).
   const { data: pnl } = useQuery({
-    queryKey: ["admin", "positions", "pnl-summary"],
-    queryFn: () => TradingAPI.pnlSummary(),
+    queryKey: ["admin", "positions", "pnl-summary", queryUserId],
+    queryFn: () => TradingAPI.pnlSummary(queryUserId ? { user_id: queryUserId } : undefined),
     refetchInterval: 10000,
   });
 

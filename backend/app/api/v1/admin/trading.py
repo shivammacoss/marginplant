@@ -586,6 +586,7 @@ async def admin_edit_position(
 @router.get("/positions/pnl-summary", response_model=APIResponse[dict])
 async def positions_pnl_summary(
     admin: CurrentAdmin,
+    user_id: str | None = None,
     _: None = Depends(require_perm("trading_view", "read")),
 ):
     """Aggregate PnL windows for the admin dashboard cards.
@@ -594,6 +595,10 @@ async def positions_pnl_summary(
                    positions, since IST midnight.
     week_pnl     — same, since the most recent IST Sunday 00:00.
     last_week_pnl — total realised P&L of the previous Sun→Sat window.
+
+    `user_id` (optional) narrows the aggregate to a single user's
+    positions only — passed by the admin Positions page when a user
+    filter is active so the tile matches the filtered table.
     """
     from datetime import datetime as _dt, timedelta as _td, timezone as _tz
 
@@ -639,6 +644,33 @@ async def positions_pnl_summary(
 
     # Scope user pool for sub-admins. None for SUPER_ADMIN = no filter.
     scope = await scoped_user_ids(admin)
+
+    # Optional per-user narrowing — used by the admin Positions page when
+    # a user filter is active so the dashboard cards match the table.
+    # We intersect with `scope` so a sub-admin can't query users outside
+    # their pool by guessing the user_id.
+    user_filter_oid: PydanticObjectId | None = None
+    if user_id:
+        try:
+            user_filter_oid = PydanticObjectId(user_id)
+        except Exception:
+            user_filter_oid = None
+        if user_filter_oid is not None:
+            if scope is not None and user_filter_oid not in scope:
+                # Out of scope → empty tile data (sub-admin probing
+                # a user_id outside their pool). Shape matches the
+                # normal return so the frontend never sees `undefined`.
+                return APIResponse(
+                    data={
+                        "today_pnl": 0.0,
+                        "today_realised": 0.0,
+                        "open_unrealised": 0.0,
+                        "week_pnl": 0.0,
+                        "week_realised": 0.0,
+                        "last_week_pnl": 0.0,
+                    }
+                )
+            scope = [user_filter_oid]
 
     # Sum charges (brokerage + other) across all trades that belong to a
     # given position. Mirrors the per-row attribution in the /positions
