@@ -88,17 +88,23 @@ function CloseReasonChip({ reason }: { reason?: string | null }) {
   );
 }
 
-function holdTime(v: string | Date | null | undefined): string {
+// "Opened" column now shows the absolute IST timestamp the trade actually
+// started, not the relative duration ("7m" / "13m") it had before. Admin
+// asked for "kab open hua, date ke saath" — so the cell renders as
+// "17 May, 22:34" (DD MMM, HH:mm in IST 24-h). Backend serialises
+// opened_at as naive UTC; parseDate() pins the `Z` so the conversion to
+// Asia/Kolkata happens correctly.
+function fmtOpenedAt(v: string | Date | null | undefined): string {
   const d = parseDate(v);
   if (!d) return "—";
-  const sec = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
-  if (sec < 60) return `${sec}s`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ${min % 60}m`;
-  const day = Math.floor(hr / 24);
-  return `${day}d ${hr % 24}h`;
+  return d.toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Kolkata",
+  });
 }
 
 export default function AdminPositionsPage() {
@@ -370,9 +376,13 @@ function AdminPositionsInner() {
     },
     { key: "margin_used", header: "Margin", align: "right", render: (r) => formatINR(r.margin_used) },
     {
-      key: "hold_time",
-      header: "Hold Time",
-      render: (r) => <span className="whitespace-nowrap font-tabular">{holdTime(r.opened_at)}</span>,
+      key: "opened_at",
+      header: "Opened",
+      render: (r) => (
+        <span className="whitespace-nowrap font-tabular">
+          {fmtOpenedAt(r.opened_at)}
+        </span>
+      ),
     },
     // Only meaningful for CLOSED rows. Renders the close_reason as a
     // color-coded chip so super-admins can spot at a glance which
