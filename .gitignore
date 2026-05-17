@@ -1,0 +1,73 @@
+# ─── Secrets / env (NEVER commit) ────────────────────────────────────
+.env
+.env.local
+.env.production
+.env.development
+.env.*.local
+backend/.env
+frontend-user/.env*
+frontend-admin/.env*
+!.env.example
+
+# ─── Python ──────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+backend/.venv/
+
+# ─── Node / Next.js ──────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+.turbo/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# ─── Build outputs ───────────────────────────────────────────────────
+dist/
+build/
+
+# ─── Local data / uploads ────────────────────────────────────────────
+dump.rdb
+*.rdb
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# ─── Editor / IDE ────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ─── Claude Code ─────────────────────────────────────────────────────
+.claude/
+
+# ─── OS ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Temp ────────────────────────────────────────────────────────────
+*.tmp
+*.temp
+.cache/
+setupfx_ind_apk

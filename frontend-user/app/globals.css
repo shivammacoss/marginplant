@@ -1,0 +1,330 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ────────────────────────────────────────────────────────────────────
+   Theme tokens
+   --------------------------------------------------------------------
+   Both palettes are exposed through the same set of CSS custom
+   properties so components can be written once and flip with the
+   `light` / `dark` class on <html> (driven by next-themes).
+   ──────────────────────────────────────────────────────────────────── */
+
+@layer base {
+  /* ── Light (default) ──────────────────────────────────────────────
+     Brand palette: Upstox-style deep purple #382F8B as primary, with
+     Zerodha-toned buy-green / sell-red so charts feel familiar to
+     Indian traders. */
+  :root {
+    --background: 240 10% 98%;            /* #f7f7fa — soft off-white */
+    --foreground: 247 24% 12%;            /* deep ink text */
+    --card: 0 0% 100%;
+    --card-foreground: 247 24% 12%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 247 24% 12%;
+    --muted: 240 12% 95%;                 /* #f0f0f5 */
+    --muted-foreground: 247 8% 42%;
+    --border: 240 10% 90%;
+    --input: 240 10% 90%;
+
+    /* Brand purple — #382F8B */
+    --ring: 247 49% 36%;
+    --primary: 247 49% 36%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 247 30% 96%;             /* lavender chip bg */
+    --secondary-foreground: 247 49% 36%;
+    --destructive: 354 70% 54%;
+    --destructive-foreground: 0 0% 100%;
+    --accent: 247 30% 96%;
+    --accent-foreground: 247 49% 36%;
+
+    /* Trading-domain semantic colors — Zerodha-tuned */
+    --buy: 142 65% 38%;                   /* #25a25a */
+    --sell: 354 70% 54%;                  /* #e04f5f */
+    --profit: 142 65% 38%;
+    --loss: 354 70% 54%;
+    --buy-foreground: 0 0% 100%;
+    --sell-foreground: 0 0% 100%;
+
+    /* "Trade" CTA — purple by default, matches brand */
+    --info: 247 49% 36%;
+    --info-foreground: 0 0% 100%;
+
+    /* ATM / warning highlight (option chain) */
+    --atm: 38 92% 50%;
+    --atm-foreground: 0 0% 9%;
+
+    /* Surface-on-surface tint */
+    --surface-hover: 240 12% 96%;
+
+    --radius: 0.75rem;                    /* softer rounding throughout */
+    color-scheme: light;
+  }
+
+  /* ── Dark — same purple, calmer surfaces ──────────────────────── */
+  .dark {
+    --background: 247 20% 8%;             /* #11101a */
+    --foreground: 240 10% 98%;
+    --card: 247 18% 12%;                  /* #1a1825 */
+    --card-foreground: 240 10% 98%;
+    --popover: 247 20% 10%;
+    --popover-foreground: 240 10% 98%;
+    --muted: 247 15% 18%;
+    --muted-foreground: 247 12% 68%;
+    --border: 247 15% 22%;
+    --input: 247 15% 22%;
+
+    /* Slightly brighter purple on dark for AA contrast */
+    --ring: 247 70% 65%;
+    --primary: 247 70% 65%;               /* #8e7df0 */
+    --primary-foreground: 247 24% 12%;
+
+    --secondary: 247 18% 22%;
+    --secondary-foreground: 247 70% 80%;
+    --destructive: 354 78% 62%;
+    --destructive-foreground: 0 0% 100%;
+    --accent: 247 18% 22%;
+    --accent-foreground: 247 70% 80%;
+
+    --buy: 142 60% 50%;                   /* #2bca6a */
+    --sell: 354 78% 62%;                  /* #ec5d6f */
+    --profit: 142 60% 50%;
+    --loss: 354 78% 62%;
+    --buy-foreground: 247 24% 12%;
+    --sell-foreground: 0 0% 100%;
+
+    --info: 247 70% 65%;
+    --info-foreground: 247 24% 12%;
+
+    --atm: 38 92% 60%;
+    --atm-foreground: 247 24% 12%;
+
+    --surface-hover: 247 18% 16%;
+
+    color-scheme: dark;
+  }
+
+  * { @apply border-border; }
+  html, body { @apply h-full; }
+  body {
+    @apply bg-background text-foreground antialiased;
+    /* Inter is now the primary font (loaded via next/font in layout.tsx).
+       Light contextual alts (`cv11`) give Inter a more open `1`/`l` for
+       financial UIs; `ss01` opens the storey of `a`/`g` so they don't
+       collide with adjacent glyphs at the small sizes we use in tables.
+       `tnum` is intentionally NOT global — we opt-in per cell so prose
+       (descriptions, news copy) keeps proportional spacing. Numeric
+       elements pick it up via the `.font-tabular` utility or any
+       Tailwind `font-mono` class. */
+    font-feature-settings: "cv11", "ss01", "ss03";
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* ── Heading rhythm ─────────────────────────────────────────────
+     Match the ChatGPT / Linear cadence: tight tracking on large
+     display sizes, neutral-to-positive tracking on labels. */
+  h1, h2, h3, h4 {
+    @apply font-bold tracking-tight text-foreground;
+    text-wrap: balance;
+  }
+}
+
+/* ── Utilities ───────────────────────────────────────────────────── */
+@layer utilities {
+  /* ── Numeric rendering ───────────────────────────────────────────
+     Aligned-digit numerics. Lining is the modern fintech default
+     (looks like the SVG ticker glyphs on Bloomberg / Robinhood).
+     Pair with a bold weight on prices / balances / P&L. */
+  .font-tabular { font-variant-numeric: tabular-nums lining-nums; }
+
+  /* font-mono in this codebase always means "I want lined-up digits",
+     not "I want a typewriter look" — so route mono through tabular-nums
+     too. Same end-effect as the explicit utility above. */
+  .font-mono { font-variant-numeric: tabular-nums lining-nums; }
+
+  /* ── Typography tokens (ChatGPT / Linear cadence) ────────────────
+     One canonical set of utility classes for every text role across
+     the app. Use them instead of ad-hoc `text-xl font-bold tracking-…`
+     stacks so the whole product moves together when we tune the type
+     scale. */
+  .typo-display {
+    @apply text-3xl font-bold tracking-tight leading-tight text-foreground;
+    letter-spacing: -0.02em;
+  }
+  .typo-heading {
+    @apply text-xl font-bold tracking-tight leading-tight text-foreground;
+    letter-spacing: -0.01em;
+  }
+  .typo-subheading {
+    @apply text-sm font-semibold text-foreground;
+    letter-spacing: 0.01em;
+  }
+  .typo-body {
+    @apply text-sm font-normal leading-normal text-foreground;
+  }
+  .typo-caption {
+    @apply text-xs font-medium text-muted-foreground;
+  }
+  .typo-label {
+    @apply text-[10px] font-semibold uppercase text-muted-foreground;
+    letter-spacing: 0.08em;
+  }
+  /* Numeric value — prices, balances, quantities, P&L. */
+  .typo-numeric {
+    @apply text-sm font-bold text-foreground;
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+  .typo-pnl-positive {
+    @apply text-sm font-bold text-buy;
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+  .typo-pnl-negative {
+    @apply text-sm font-bold text-sell;
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 3px;
+  }
+}
+
+/* ── Marketing hero animations ───────────────────────────────────────
+   Used by the homepage hero — pure CSS, no JS, GPU-accelerated.
+   Keep these in globals.css so server-rendered pages can use them
+   without hydration. */
+@layer utilities {
+  /* Slow rotating ring — orbits the core */
+  .mp-orbit-slow { animation: mp-orbit 28s linear infinite; }
+  .mp-orbit-mid  { animation: mp-orbit 18s linear infinite; }
+  .mp-orbit-fast { animation: mp-orbit 12s linear infinite reverse; }
+  /* Counter-rotate child so card text stays upright */
+  .mp-orbit-counter-slow { animation: mp-orbit-counter 28s linear infinite; }
+  .mp-orbit-counter-mid  { animation: mp-orbit-counter 18s linear infinite; }
+  .mp-orbit-counter-fast { animation: mp-orbit-counter 12s linear infinite reverse; }
+
+  .mp-pulse-ring { animation: mp-pulse-ring 3.6s cubic-bezier(.4,0,.2,1) infinite; }
+  .mp-pulse-ring-delay-1 { animation-delay: 1.2s; }
+  .mp-pulse-ring-delay-2 { animation-delay: 2.4s; }
+
+  .mp-float { animation: mp-float 6s ease-in-out infinite; }
+  .mp-float-delay-1 { animation-delay: 0.6s; }
+  .mp-float-delay-2 { animation-delay: 1.2s; }
+  .mp-float-delay-3 { animation-delay: 1.8s; }
+
+  .mp-shimmer {
+    background: linear-gradient(
+      110deg,
+      transparent 25%,
+      hsl(var(--primary) / 0.18) 50%,
+      transparent 75%
+    );
+    background-size: 200% 100%;
+    animation: mp-shimmer 4s linear infinite;
+  }
+
+  .mp-tick-up    { animation: mp-tick-up 2.4s ease-out infinite; }
+  .mp-tick-down  { animation: mp-tick-down 2.8s ease-out infinite; }
+  .mp-tick-delay-1 { animation-delay: 0.5s; }
+  .mp-tick-delay-2 { animation-delay: 1.0s; }
+  .mp-tick-delay-3 { animation-delay: 1.5s; }
+
+  .mp-beam { animation: mp-beam 3.2s ease-in-out infinite; }
+  .mp-beam-delay-1 { animation-delay: 0.8s; }
+  .mp-beam-delay-2 { animation-delay: 1.6s; }
+  .mp-beam-delay-3 { animation-delay: 2.4s; }
+
+  .mp-spark { animation: mp-spark 1.8s ease-in-out infinite; }
+
+  .mp-grid-pan { animation: mp-grid-pan 24s linear infinite; }
+
+  .mp-fade-up {
+    opacity: 0;
+    transform: translateY(14px);
+    animation: mp-fade-up 0.9s cubic-bezier(.4,0,.2,1) forwards;
+  }
+  .mp-fade-up-d1 { animation-delay: 0.15s; }
+  .mp-fade-up-d2 { animation-delay: 0.30s; }
+  .mp-fade-up-d3 { animation-delay: 0.45s; }
+  .mp-fade-up-d4 { animation-delay: 0.60s; }
+
+  .mp-gradient-text {
+    background: linear-gradient(
+      120deg,
+      hsl(var(--primary)) 0%,
+      #ff9933 45%,
+      #138808 100%
+    );
+    -webkit-background-clip: text;
+            background-clip: text;
+    color: transparent;
+  }
+}
+
+@keyframes mp-orbit {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes mp-orbit-counter {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(-360deg); }
+}
+@keyframes mp-pulse-ring {
+  0%   { transform: scale(0.4); opacity: 0.55; }
+  80%  { transform: scale(1.4); opacity: 0;    }
+  100% { transform: scale(1.4); opacity: 0;    }
+}
+@keyframes mp-float {
+  0%, 100% { transform: translateY(0) }
+  50%      { transform: translateY(-10px) }
+}
+@keyframes mp-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@keyframes mp-tick-up {
+  0%   { transform: translateY(8px);  opacity: 0; }
+  20%  { opacity: 1; }
+  80%  { transform: translateY(-10px); opacity: 1; }
+  100% { transform: translateY(-14px); opacity: 0; }
+}
+@keyframes mp-tick-down {
+  0%   { transform: translateY(-8px); opacity: 0; }
+  20%  { opacity: 1; }
+  80%  { transform: translateY(10px); opacity: 1; }
+  100% { transform: translateY(14px); opacity: 0; }
+}
+@keyframes mp-beam {
+  0%, 100% { opacity: 0.0; transform: scaleX(0.5); }
+  40%      { opacity: 0.85; transform: scaleX(1);   }
+  60%      { opacity: 0.85; transform: scaleX(1);   }
+}
+@keyframes mp-spark {
+  0%, 100% { opacity: 0.3; transform: scale(0.9); }
+  50%      { opacity: 1;   transform: scale(1.15); }
+}
+@keyframes mp-grid-pan {
+  from { background-position: 0 0; }
+  to   { background-position: 80px 80px; }
+}
+@keyframes mp-fade-up {
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mp-orbit-slow, .mp-orbit-mid, .mp-orbit-fast,
+  .mp-orbit-counter-slow, .mp-orbit-counter-mid, .mp-orbit-counter-fast,
+  .mp-pulse-ring, .mp-float, .mp-shimmer, .mp-tick-up, .mp-tick-down,
+  .mp-beam, .mp-spark, .mp-grid-pan {
+    animation: none !important;
+  }
+  .mp-fade-up { opacity: 1; transform: none; animation: none; }
+}

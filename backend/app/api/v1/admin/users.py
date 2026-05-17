@@ -1,0 +1,835 @@
+"""Admin user management — list, detail, create, update, block, wallet adjust, delete."""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from typing import Any
+
+from beanie import PydanticObjectId
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+from app.core.dependencies import (
+    CurrentAdmin,
+    assert_user_in_scope,
+    require_perm,
+    scoped_admin_filter,
+)
+from app.core.security import hash_password
+from app.models.audit_log import AuditAction
+from app.models.transaction import TransactionType
+from app.models.user import User, UserRole, UserStatus
+from app.schemas.admin.common import (
+    BlockUserRequest,
+    CreateUserRequest,
+    WalletAdjustRequest,
+)
+from app.schemas.common import APIResponse
+from app.services import user_service, wallet_service
+from app.services.audit_service import log_event
+from app.utils.decimal_utils import to_decimal128
+
+router = APIRouter(prefix="/users", tags=["admin-users"])
+
+
+def _ser(u: User) -> dict:
+    return {
+        "id": str(u.id),
+        "user_code": u.user_code,
+        "email": u.email,
+        "mobile": u.mobile,
+        "full_name": u.full_name,
+        "role": u.role.value,
+        "status": u.status.value,
+        "is_demo": u.is_demo,
+        "parent_id": str(u.parent_id) if u.parent_id else None,
+        "two_fa_enabled": u.two_fa_enabled,
+        "last_login_at": u.last_login_at,
+        "created_at": u.created_at,
+        # Owner badge fodder — the Users table renders "Self" or
+        # "Broker: <name>" / "Admin: <name>" based on these.
+        "assigned_admin_id": str(u.assigned_admin_id) if u.assigned_admin_id else None,
+        "assigned_broker_id": str(u.assigned_broker_id) if u.assigned_broker_id else None,
+    }
+
+
+async def _enrich_admin_broker_names(rows: list[dict]) -> None:
+    """Resolve the parent admin / broker name for each row so the table
+    can show 'Broker: Acme Trades' (or 'Sub-broker: …') instead of an id."""
+    admin_ids = list({r["assigned_admin_id"] for r in rows if r.get("assigned_admin_id")})
+    broker_ids = list({r["assigned_broker_id"] for r in rows if r.get("assigned_broker_id")})
+    admin_oids = [PydanticObjectId(i) for i in admin_ids]
+    broker_oids = [PydanticObjectId(i) for i in broker_ids]
+    admins = await User.find({"_id": {"$in": admin_oids}}).to_list() if admin_oids else []
+    brokers = await User.find({"_id": {"$in": broker_oids}}).to_list() if broker_oids else []
+    admin_name = {str(a.id): a.full_name for a in admins}
+    broker_name = {str(b.id): b.full_name for b in brokers}
+    # A broker is a sub-broker iff it itself sits under another broker.
+    broker_is_sub = {str(b.id): bool(b.assigned_broker_id) for b in brokers}
+    for r in rows:
+        r["assigned_admin_name"] = admin_name.get(r.get("assigned_admin_id") or "")
+        r["assigned_broker_name"] = broker_name.get(r.get("assigned_broker_id") or "")
+        r["assigned_broker_is_sub"] = broker_is_sub.get(
+            r.get("assigned_broker_id") or "", False
+        )
+
+
+@router.get("", response_model=APIResponse[dict])
+async def list_users(
+    admin: CurrentAdmin,
+    q: str | None = None,
+    role: str | None = None,
+    status: str | None = None,
+    parent_id: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    _: None = Depends(require_perm("users", "read")),
+):
+    query: dict[str, Any] = {}
+    # /admin/users is for trading users only. Sub-admins are listed at
+    # /admin/management/sub-admins (super-admin only). Reject role filters
+    # that would leak admin rows through this endpoint.
+    if role:
+        if role in {
+            UserRole.SUPER_ADMIN.value,
+            UserRole.ADMIN.value,
+            UserRole.BROKER.value,
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail="Admin/broker roles are listed at /admin/management/*",
+            )
+        query["role"] = role
+    else:
+        # Hide all admin-tier rows from the regular Users page — they live
+        # at /admin/management/sub-admins and /admin/management/brokers.
+        query["role"] = {
+            "$nin": [
+                UserRole.SUPER_ADMIN.value,
+                UserRole.ADMIN.value,
+                UserRole.BROKER.value,
+            ]
+        }
+    if status:
+        query["status"] = status
+    if parent_id:
+        query["parent_id"] = PydanticObjectId(parent_id)
+    if q:
+        regex = re.compile(re.escape(q.strip()), re.IGNORECASE)
+        query["$or"] = [
+            {"email": regex},
+            {"mobile": regex},
+            {"user_code": regex},
+            {"full_name": regex},
+        ]
+    # No-op for SUPER_ADMIN, restricts to {"assigned_admin_id": admin.id} for ADMIN
+    query.update(scoped_admin_filter(admin))
+
+    total = await User.find(query).count()
+    rows = (
+        await User.find(query)
+        .sort("-created_at")
+        .skip((page - 1) * page_size)
+        .limit(page_size)
+        .to_list()
+    )
+    items = [_ser(u) for u in rows]
+    await _enrich_admin_broker_names(items)
+    return APIResponse(
+        data={
+            "items": items,
+            "meta": {"page": page, "page_size": page_size, "total": total, "total_pages": (total + page_size - 1) // page_size},
+        }
+    )
+
+
+@router.get("/{user_id}", response_model=APIResponse[dict])
+async def get_user(
+    user_id: str,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("users", "read")),
+):
+    u = await assert_user_in_scope(admin, user_id)
+    detail = _ser(u)
+    detail.update(
+        {
+            "kyc": u.kyc.model_dump() if u.kyc else None,
+            "permissions": u.permissions.model_dump() if u.permissions else None,
+            "trading_hours": u.trading_hours.model_dump() if u.trading_hours else None,
+            "risk": u.risk.model_dump() if u.risk else None,
+            "communication": u.communication.model_dump() if u.communication else None,
+            "wallet": await wallet_service.summary(u.id),
+        }
+    )
+    return APIResponse(data=detail)
+
+
+@router.post("", response_model=APIResponse[dict])
+async def create_user(
+    payload: CreateUserRequest,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("users", "write")),
+):
+    # This endpoint only creates trading users (CLIENT). Sub-admins are
+    # minted via /api/v1/admin/management/sub-admins (super-admin only).
+    # Any other role from the legacy payload is rejected here.
+    target_role = UserRole(payload.role)
+    if target_role != UserRole.CLIENT:
+        raise HTTPException(
+            status_code=400,
+            detail="Only CLIENT users can be created here. Use /admin/management/sub-admins for sub-admins.",
+        )
+
+    # Resolve the ownership chain for the new client based on caller role.
+    #   SUPER_ADMIN   → platform pool (assigned_admin_id null, no broker)
+    #   ADMIN         → admin's pool (assigned_admin_id = admin.id)
+    #   BROKER        → broker's subtree (broker_ancestry includes broker.id);
+    #                   assigned_admin_id stays at broker's parent admin so
+    #                   the admin still sees this user in their lists.
+    assigned_admin_id: PydanticObjectId | None = None
+    assigned_broker_id: PydanticObjectId | None = None
+    broker_ancestry_for_new: list[PydanticObjectId] = []
+
+    if admin.role == UserRole.SUPER_ADMIN:
+        pass  # all None / empty
+    elif admin.role == UserRole.BROKER:
+        if payload.parent_id:
+            await assert_user_in_scope(admin, payload.parent_id)
+        assigned_admin_id = admin.assigned_admin_id  # inherit broker's top admin
+        assigned_broker_id = admin.id
+        broker_ancestry_for_new = list(admin.broker_ancestry or []) + [admin.id]
+    else:
+        # ADMIN
+        if payload.parent_id:
+            await assert_user_in_scope(admin, payload.parent_id)
+        assigned_admin_id = admin.id
+
+    user = await user_service.create_user(
+        email=payload.email,
+        mobile=payload.mobile,
+        password=payload.password,
+        full_name=payload.full_name,
+        role=target_role,
+        status=UserStatus.ACTIVE,
+        parent_id=PydanticObjectId(payload.parent_id) if payload.parent_id else None,
+        is_demo=payload.is_demo,
+        created_by=admin.id,
+        assigned_admin_id=assigned_admin_id,
+        assigned_broker_id=assigned_broker_id,
+        broker_ancestry=broker_ancestry_for_new,
+    )
+    if payload.initial_balance:
+        await wallet_service.adjust(
+            user.id,
+            payload.initial_balance,
+            transaction_type=TransactionType.ADJUSTMENT,
+            narration=f"Initial balance credit by {admin.user_code}",
+            actor_id=admin.id,
+        )
+    if payload.credit_limit:
+        from app.services import wallet_service as ws
+        wallet = await ws.get(user.id)
+        wallet.credit_limit = to_decimal128(payload.credit_limit)
+        await wallet.save()
+
+    await log_event(
+        action=AuditAction.CREATE,
+        entity_type="User",
+        entity_id=user.id,
+        actor_id=admin.id,
+        target_user_id=user.id,
+    )
+    return APIResponse(data=_ser(user))
+
+
+@router.put("/{user_id}", response_model=APIResponse[dict])
+async def update_user(
+    user_id: str,
+    payload: dict,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("users", "write")),
+):
+    u = await assert_user_in_scope(admin, user_id)
+    for k in ("full_name", "photo_url", "is_demo"):
+        if k in payload and payload[k] is not None:
+            setattr(u, k, payload[k])
+    if "permissions" in payload and payload["permissions"]:
+        for k, v in payload["permissions"].items():
+            if hasattr(u.permissions, k):
+                setattr(u.permissions, k, v)
+    if "risk" in payload and payload["risk"]:
+        for k, v in payload["risk"].items():
+            if hasattr(u.risk, k):
+                setattr(u.risk, k, v)
+    await u.save()
+    await log_event(
+        action=AuditAction.UPDATE, entity_type="User", entity_id=u.id, actor_id=admin.id, target_user_id=u.id
+    )
+    return APIResponse(data=_ser(u))
+
+
+@router.post("/{user_id}/block", response_model=APIResponse[dict])
+async def block(
+    user_id: str,
+    payload: BlockUserRequest,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("users", "write")),
+):
+    u = await assert_user_in_scope(admin, user_id)
+    u.status = UserStatus.BLOCKED
+    await u.save()
+    await log_event(
+        action=AuditAction.BLOCK,
+        entity_type="User",
+        entity_id=u.id,
+        actor_id=admin.id,
+        target_user_id=u.id,
+        metadata={"reason": payload.reason},
+    )
+    return APIResponse(data=_ser(u))
+
+
+@router.post("/{user_id}/unblock", response_model=APIResponse[dict])
+async def unblock(
+    user_id: str,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("users", "write")),
+):
+    u = await assert_user_in_scope(admin, user_id)
+    u.status = UserStatus.ACTIVE
+    u.failed_login_count = 0
+    u.locked_until = None
+    await u.save()
+    await log_event(
+        action=AuditAction.UNBLOCK, entity_type="User", entity_id=u.id, actor_id=admin.id, target_user_id=u.id
+    )
+    return APIResponse(data=_ser(u))
+
+
+@router.post("/{user_id}/reset-password", response_model=APIResponse[dict])
+async def admin_reset_password(
+    user_id: str,
+    payload: dict,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("users", "write")),
+):
+    new_pw = payload.get("new_password") or ""
+    if len(new_pw) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    u = await assert_user_in_scope(admin, user_id)
+    u.password_hash = hash_password(new_pw)
+    u.must_change_password = True
+    u.failed_login_count = 0
+    await u.save()
+    await log_event(
+        action=AuditAction.PASSWORD_RESET,
+        entity_type="User",
+        entity_id=u.id,
+        actor_id=admin.id,
+        target_user_id=u.id,
+    )
+    return APIResponse(data={"ok": True})
+
+
+@router.post("/{user_id}/wallet-adjust", response_model=APIResponse[dict])
+async def wallet_adjust(
+    user_id: str,
+    payload: WalletAdjustRequest,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("users", "write")),
+):
+    await assert_user_in_scope(admin, user_id)
+    txn = await wallet_service.adjust(
+        user_id,
+        payload.amount,
+        transaction_type=TransactionType(payload.transaction_type),
+        narration=payload.narration,
+        actor_id=admin.id,
+    )
+    await log_event(
+        action=AuditAction.WALLET_ADJUST,
+        entity_type="Wallet",
+        entity_id=str(txn.id),
+        actor_id=admin.id,
+        target_user_id=user_id,
+        metadata={"amount": str(payload.amount), "type": payload.transaction_type},
+    )
+    return APIResponse(data={"transaction_id": str(txn.id), "amount": str(txn.amount)})
+
+
+@router.delete("/{user_id}", response_model=APIResponse[dict])
+async def delete_user(
+    user_id: str,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("users", "write")),
+):
+    u = await assert_user_in_scope(admin, user_id)
+    if u.role == UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=400, detail="Super admin cannot be deleted")
+    # Sub-admins must not delete other admins via this generic endpoint.
+    if admin.role != UserRole.SUPER_ADMIN and u.role == UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Cannot delete an admin user")
+    u.status = UserStatus.CLOSED
+    await u.save()
+    await log_event(
+        action=AuditAction.DELETE, entity_type="User", entity_id=u.id, actor_id=admin.id, target_user_id=u.id
+    )
+    return APIResponse(data={"ok": True, "status": u.status.value})
+
+
+# ── Credit limit (Give / Take Credit) ───────────────────────────────
+@router.patch("/{user_id}/credit-limit", response_model=APIResponse[dict])
+async def update_credit_limit(
+    user_id: str,
+    payload: dict,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("users", "write")),
+):
+    """Adjust the user's credit_limit by `delta` (positive = give credit,
+    negative = take credit). The new total cannot go below 0."""
+    from bson import Decimal128
+    from decimal import Decimal
+
+    from app.utils.decimal_utils import to_decimal
+
+    delta_raw = payload.get("delta")
+    if delta_raw is None:
+        raise HTTPException(status_code=400, detail="delta is required")
+    try:
+        delta = to_decimal(delta_raw)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid delta value")
+    narration = (payload.get("narration") or "").strip() or "credit limit adjust"
+
+    await assert_user_in_scope(admin, user_id)
+    wallet = await wallet_service.get_or_create(user_id)
+    new_limit = to_decimal(wallet.credit_limit) + delta
+    if new_limit < Decimal("0"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Resulting credit limit would be negative (current ₹{wallet.credit_limit}, delta ₹{delta})",
+        )
+    wallet.credit_limit = Decimal128(str(new_limit))
+    wallet.version += 1
+    await wallet.save()
+
+    await log_event(
+        action=AuditAction.WALLET_ADJUST,
+        entity_type="Wallet",
+        entity_id=str(wallet.id),
+        actor_id=admin.id,
+        target_user_id=user_id,
+        metadata={"delta": str(delta), "new_credit_limit": str(new_limit), "narration": narration, "kind": "CREDIT_LIMIT"},
+    )
+    return APIResponse(
+        data={
+            "credit_limit": str(new_limit),
+            "delta": str(delta),
+            "narration": narration,
+        }
+    )
+
+
+# ── Kill Switch ─────────────────────────────────────────────────────
+@router.post("/{user_id}/kill-switch", response_model=APIResponse[dict])
+async def kill_switch(
+    user_id: str,
+    payload: dict,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("users", "write")),
+):
+    """Emergency stop for a user account:
+        1. Cancel all pending / open orders
+        2. Square off all open positions at market
+        3. Block the account (status = BLOCKED)
+
+    Idempotent — running it twice on a stopped user is a no-op.
+    """
+    from beanie import PydanticObjectId
+
+    from app.models._base import OrderAction, OrderType, ProductType
+    from app.models.order import Order, OrderStatus
+    from app.models.position import Position, PositionStatus
+    from app.services import order_service
+
+    u = await assert_user_in_scope(admin, user_id)
+    reason = (payload.get("reason") or "kill switch").strip()
+
+    # 1) Cancel pending orders — use a raw Mongo $in expression because
+    # Beanie's `Order.status.in_(...)` chain isn't supported on enum fields.
+    cancelled_count = 0
+    pending = await Order.find(
+        {
+            "user_id": PydanticObjectId(user_id),
+            "status": {
+                "$in": [
+                    OrderStatus.OPEN.value,
+                    OrderStatus.PENDING.value,
+                    OrderStatus.PARTIAL.value,
+                ]
+            },
+        }
+    ).to_list()
+    for o in pending:
+        try:
+            await order_service.admin_force_cancel(str(o.id), reason="KILL_SWITCH")
+            cancelled_count += 1
+        except Exception:
+            continue
+
+    # 2) Square off all open positions at market
+    open_positions = await Position.find(
+        Position.user_id == PydanticObjectId(user_id),
+        Position.status == PositionStatus.OPEN,
+    ).to_list()
+    squared_off = 0
+    for p in open_positions:
+        if p.quantity == 0:
+            continue
+        action = OrderAction.SELL if p.quantity > 0 else OrderAction.BUY
+        full_qty = abs(p.quantity)
+        full_lots = max(0.01, full_qty / max(1, p.instrument.lot_size or 1))
+        try:
+            # `force_quantity` + `is_squareoff` mirrors admin_squareoff —
+            # flattens the exact open size and bypasses validator caps so
+            # the kill switch works 24×7 (weekend / off-hours / margin).
+            await order_service.place_order(
+                user=u,
+                payload={
+                    "token": p.instrument.token,
+                    "action": action.value,
+                    "order_type": OrderType.MARKET.value,
+                    "product_type": p.product_type.value,
+                    "lots": full_lots,
+                    "force_quantity": full_qty,
+                    "placed_from": "ADMIN_KILL_SWITCH",
+                    "is_squareoff": True,
+                },
+            )
+            squared_off += 1
+        except Exception:
+            continue
+
+    # 3) Block the user
+    u.status = UserStatus.BLOCKED
+    await u.save()
+
+    await log_event(
+        action=AuditAction.SQUAREOFF_FORCE,
+        entity_type="User",
+        entity_id=u.id,
+        actor_id=admin.id,
+        target_user_id=u.id,
+        metadata={
+            "kind": "KILL_SWITCH",
+            "reason": reason,
+            "orders_cancelled": cancelled_count,
+            "positions_squared_off": squared_off,
+        },
+    )
+    return APIResponse(
+        data={
+            "ok": True,
+            "orders_cancelled": cancelled_count,
+            "positions_squared_off": squared_off,
+            "user_status": u.status.value,
+        }
+    )
+
+
+# ── Login As (impersonate) ──────────────────────────────────────────
+@router.post("/{user_id}/impersonate", response_model=APIResponse[dict])
+async def impersonate(user_id: str, admin: CurrentAdmin):
+    """Mint a user-side JWT pair for the target user. Admin-only.
+
+    The returned tokens hit the user app's /api/v1/user routes — admin pastes
+    them into the user app's localStorage (or the admin UI does it for them
+    with `window.open(...)`) and operates the user app as that user.
+    """
+    from app.core.config import settings as cfg
+    from app.core.redis_client import cache_set
+    from app.core.security import (
+        create_access_token,
+        create_refresh_token,
+        refresh_jti_key,
+        session_key,
+    )
+    from app.models.user import UserRole
+
+    target = await assert_user_in_scope(admin, user_id)
+    if target.role == UserRole.SUPER_ADMIN and admin.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Cannot impersonate a super admin")
+    # Sub-admin must not impersonate another admin.
+    if admin.role != UserRole.SUPER_ADMIN and target.role in {
+        UserRole.SUPER_ADMIN,
+        UserRole.ADMIN,
+    }:
+        raise HTTPException(status_code=403, detail="Cannot impersonate an admin")
+
+    target_id = str(target.id)  # always present after get_user_or_404
+    access = create_access_token(
+        user_id=target_id, role=target.role.value, extra={"impersonator": str(admin.id)}
+    )
+    refresh, jti = create_refresh_token(user_id=target_id, role=target.role.value)
+    await cache_set(
+        refresh_jti_key(str(target.id), jti),
+        {
+            "user_id": str(target.id),
+            "audience": "user",
+            "impersonator": str(admin.id),
+        },
+        ttl_sec=cfg.JWT_REFRESH_TTL_DAYS * 86400,
+    )
+    await cache_set(
+        session_key(str(target.id), jti),
+        {"audience": "user", "impersonator": str(admin.id)},
+        ttl_sec=cfg.JWT_REFRESH_TTL_DAYS * 86400,
+    )
+
+    await log_event(
+        action=AuditAction.IMPERSONATE,
+        entity_type="User",
+        entity_id=target.id,
+        actor_id=admin.id,
+        target_user_id=target.id,
+        metadata={"as_role": target.role.value},
+    )
+
+    return APIResponse(
+        data={
+            "access_token": access,
+            "refresh_token": refresh,
+            "expires_in": cfg.JWT_ACCESS_TTL_MIN * 60,
+            "user": {
+                "id": str(target.id),
+                "user_code": target.user_code,
+                "email": target.email,
+                "mobile": target.mobile,
+                "full_name": target.full_name,
+                "role": target.role.value,
+                "status": target.status.value,
+                "is_demo": target.is_demo,
+                "two_fa_enabled": target.two_fa_enabled,
+                "must_change_password": target.must_change_password,
+            },
+            # CORS_USER_ORIGIN may hold comma-separated origins (e.g.
+            # "https://setupfx.io,https://www.setupfx.io") — for the
+            # impersonation redirect we want the FIRST canonical origin
+            # only, otherwise the comma lands in the URL and the browser
+            # tries to resolve "setupfx.io,https://www.setupfx.io" as a
+            # hostname (DNS_PROBE_FINISHED_NXDOMAIN).
+            "user_app_url": cfg.CORS_USER_ORIGIN.split(",")[0].strip(),
+        }
+    )
+
+
+# ── Live Trade Stats ────────────────────────────────────────────────
+@router.get("/{user_id}/live-trade-stats", response_model=APIResponse[dict])
+async def live_trade_stats(user_id: str, admin: CurrentAdmin):
+    """Per-user live trading snapshot for the admin row dropdown.
+
+    Aggregates:
+      • floating_pnl     — open unrealised P&L (INR), close-side prices
+                           applied for USD-quoted segments
+      • margin_used      — wallet.used_margin (currently locked)
+      • equity           — available + used + floating P&L
+      • cf_total_eod     — sum of overnight margin needed for every
+                           currently-open MIS/NRML position at EOD rates
+      • cf_extra_needed  — max(0, cf_total_eod − wallet free balance)
+      • weekly_net_pnl   — realised P&L this IST week
+      • weekly_trades    — closed-position count this IST week
+                           (also split into wins / losses)
+      • closed_pnl_all   — realised P&L lifetime
+      • all_time_trades  — closed-position count lifetime
+      • open_positions   — list of currently-open positions (symbol,
+                           qty, avg, ltp, floating P&L per row)
+    """
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from decimal import Decimal
+
+    from app.models.position import Position, PositionStatus
+    from app.services import (
+        market_data_service,
+        netting_service,
+        position_service,
+    )
+    from app.utils.decimal_utils import to_decimal
+
+    target = await assert_user_in_scope(admin, user_id)
+    wallet = await wallet_service.get_or_create(target.id)
+
+    available = float(str(wallet.available_balance))
+    used_margin = float(str(wallet.used_margin))
+    credit_limit = float(str(wallet.credit_limit))
+
+    IST = _tz(_td(hours=5, minutes=30))
+    now_ist_dt = _dt.now(IST)
+    today_start = now_ist_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    days_back = (now_ist_dt.weekday() + 1) % 7  # Sun = 0
+    week_start_ist = today_start - _td(days=days_back)
+    week_start = week_start_ist.astimezone(_tz.utc)
+
+    usd_inr = market_data_service.get_usd_inr_rate()
+
+    def _is_usd(p) -> bool:
+        return market_data_service.is_usd_quoted_segment(p.segment_type) or (
+            p.instrument
+            and market_data_service.is_usd_quoted_segment(p.instrument.segment)
+        )
+
+    def _realised_inr(p) -> float:
+        raw = float(str(p.realized_pnl))
+        if not _is_usd(p):
+            return raw
+        # User-side trade history bakes FX at CLOSE time (matching_engine
+        # stamps `trade.pnl_inr` using the close-time USDINR), so the same
+        # rate must be used here for admin numbers to match what the user
+        # sees. Fall back to open rate for positions that were only
+        # partially closed (no `close_usd_inr_rate` set yet), then to the
+        # current spot for the rare row that has neither rate snapshot.
+        rate = (
+            float(str(p.close_usd_inr_rate))
+            if p.close_usd_inr_rate is not None
+            else float(str(p.open_usd_inr_rate))
+            if p.open_usd_inr_rate is not None
+            else usd_inr
+        )
+        return raw * rate
+
+    # Closed positions: this IST week + all-time
+    weekly_closed = await Position.find(
+        {
+            "user_id": target.id,
+            "status": PositionStatus.CLOSED.value,
+            "closed_at": {"$gte": week_start},
+        }
+    ).to_list()
+    all_closed = await Position.find(
+        {
+            "user_id": target.id,
+            "status": PositionStatus.CLOSED.value,
+        }
+    ).to_list()
+
+    weekly_realised = sum(_realised_inr(p) for p in weekly_closed)
+    weekly_wins = sum(1 for p in weekly_closed if _realised_inr(p) > 0)
+    weekly_losses = sum(1 for p in weekly_closed if _realised_inr(p) < 0)
+    all_realised = sum(_realised_inr(p) for p in all_closed)
+    all_wins = sum(1 for p in all_closed if _realised_inr(p) > 0)
+    all_losses = sum(1 for p in all_closed if _realised_inr(p) < 0)
+
+    # Open positions: floating P&L + carry-forward requirement
+    open_positions = await Position.find(
+        {"user_id": target.id, "status": PositionStatus.OPEN.value}
+    ).to_list()
+
+    open_rows: list[dict[str, Any]] = []
+    floating_pnl = 0.0
+    cf_total_eod = 0.0
+
+    # Parallel LTP fan-out (see /admin/positions for rationale). The
+    # user-detail page hits this on every navigation from the sidebar
+    # so the serial loop was adding ~100 ms × N positions to the
+    # response time — multi-second blank state on a busy account.
+    unique_tokens = list({p.instrument.token for p in open_positions})
+    ltp_results = await asyncio.gather(
+        *[market_data_service.get_ltp(tok) for tok in unique_tokens],
+        return_exceptions=True,
+    )
+    ltp_map: dict[str, Any] = {}
+    for tok, res in zip(unique_tokens, ltp_results):
+        ltp_map[tok] = res if not isinstance(res, BaseException) else None
+
+    for p in open_positions:
+        # Refresh live LTP + recompute unrealised so this snapshot
+        # reflects the same number the user side sees right now.
+        try:
+            cached = ltp_map.get(p.instrument.token)
+            if cached is None:
+                raise RuntimeError("ltp feed miss")
+            ltp = cached
+            await position_service.refresh_unrealized_pnl(p, ltp)
+        except Exception:
+            ltp = to_decimal(p.ltp or 0)
+
+        avg = float(str(p.avg_price))
+        ltp_native = float(str(p.ltp or 0))
+        qty = float(p.quantity)
+        raw = (ltp_native - avg) * qty
+        if _is_usd(p):
+            raw *= usd_inr
+        floating_pnl += raw
+
+        # Compute carry-forward (NRML) margin needed for this open
+        # position via the same resolver order_validator uses.
+        try:
+            resolved = await netting_service.get_effective_settings(
+                target.id,
+                p.instrument.segment,
+                action="BUY" if qty >= 0 else "SELL",
+                option_type=None,
+                product_type="NRML",
+                symbol=p.instrument.symbol,
+            )
+            s = resolved.get("settings") or {}
+            mode = (s.get("margin_calc_mode") or "").lower()
+            stored_lot = max(1, int(p.instrument.lot_size or 1))
+            abs_qty = abs(qty)
+            notional = avg * abs_qty
+            if mode == "fixed" and float(s.get("fixed_margin_per_lot") or 0) > 0:
+                lots = abs_qty / stored_lot
+                nrml_margin = float(s.get("fixed_margin_per_lot")) * lots
+            else:
+                pct = float(s.get("margin_percentage") or 100.0) / 100.0
+                lev = float(s.get("leverage") or 1.0) or 1.0
+                nrml_margin = (notional * pct) / lev
+                if _is_usd(p):
+                    nrml_margin *= usd_inr
+            cf_total_eod += nrml_margin
+        except Exception:
+            pass
+
+        open_rows.append(
+            {
+                "symbol": p.instrument.symbol,
+                "exchange": str(p.instrument.exchange),
+                "segment": p.instrument.segment,
+                "instrument_token": p.instrument.token,
+                "product_type": p.product_type.value,
+                "quantity": qty,
+                "lots": qty / stored_lot if stored_lot > 0 else qty,
+                "avg_price": avg,
+                "ltp": ltp_native,
+                "unrealized_pnl_inr": round(raw, 2),
+                "is_usd": bool(_is_usd(p)),
+            }
+        )
+
+    free_balance = available + credit_limit
+    cf_extra_needed = max(0.0, cf_total_eod - free_balance)
+    equity = available + used_margin + floating_pnl
+
+    return APIResponse(
+        data={
+            "user_id": str(target.id),
+            "user_code": target.user_code,
+            "full_name": target.full_name,
+            "floating_pnl": round(floating_pnl, 2),
+            "margin_used": round(used_margin, 2),
+            "available_balance": round(available, 2),
+            "credit_limit": round(credit_limit, 2),
+            "equity": round(equity, 2),
+            "cf_total_eod": round(cf_total_eod, 2),
+            "cf_extra_needed": round(cf_extra_needed, 2),
+            "weekly_net_pnl": round(weekly_realised, 2),
+            "weekly_trades": len(weekly_closed),
+            "weekly_wins": weekly_wins,
+            "weekly_losses": weekly_losses,
+            "closed_pnl_all_time": round(all_realised, 2),
+            "all_time_trades": len(all_closed),
+            "all_time_wins": all_wins,
+            "all_time_losses": all_losses,
+            "open_positions": open_rows,
+            "usd_inr_rate": round(usd_inr, 4),
+        }
+    )
