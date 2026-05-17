@@ -360,11 +360,28 @@ function AdminPositionsInner() {
       key: "realized_pnl",
       header: "Realized",
       align: "right",
-      // Only meaningful for closed positions; for open ones the realized
-      // bucket is whatever has been booked from partial closes so far.
-      render: (r) => (
-        <span className={pnlColor(r.realized_pnl)}>{formatINR(r.realized_pnl)}</span>
-      ),
+      // NET realised — gross realized_pnl minus the brokerage / other
+      // charges stamped on this position's lifecycle trades. The
+      // backend ships both fields; we subtract here so the admin and
+      // the user's APK card show IDENTICAL ₹ amounts on the same
+      // trade (APK has been net-of-charges since the user-facing
+      // /positions/closed endpoint started subtracting them — see
+      // backend/app/api/v1/user/positions.py:closed_positions).
+      // Hover-title carries the gross + charges decomposition so
+      // admins can still see the underlying components when reconciling.
+      render: (r) => {
+        const gross = Number(r.realized_pnl ?? 0);
+        const charges = Number(r.charges ?? 0);
+        const net = gross - charges;
+        return (
+          <span
+            className={pnlColor(net)}
+            title={`Gross ${formatINR(gross)} − Charges ${formatINR(charges)}`}
+          >
+            {formatINR(net)}
+          </span>
+        );
+      },
     },
     {
       key: "unrealized_pnl",

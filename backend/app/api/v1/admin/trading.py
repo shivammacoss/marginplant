@@ -286,6 +286,48 @@ async def list_positions(
         except Exception:
             ltp_map[tok] = 0.0
 
+    # Bulk-fetch every trade that touches these positions so we can attach
+    # a per-position `charges` total without an N+1 query. Mirrors the
+    # bucketing user-facing /positions/closed uses (start − slack ≤
+    # executed_at ≤ end + slack) so charges land on the right position
+    # lifecycle even when two CLOSED rows share (user, token, product).
+    # Same key the user endpoint uses keeps the math aligned across views.
+    from datetime import timedelta as _td_charges
+
+    by_charges_key: dict[tuple[str, str, str], list[Trade]] = {}
+    if rows:
+        user_ids_for_trades = list({r.user_id for r in rows})
+        trade_q: dict[str, Any] = {
+            "user_id": {"$in": user_ids_for_trades},
+            "instrument.token": {"$in": unique_tokens},
+        }
+        oldest_open = min((r.opened_at for r in rows if r.opened_at), default=None)
+        if oldest_open is not None:
+            trade_q["executed_at"] = {"$gte": oldest_open - _td_charges(seconds=5)}
+        trade_rows = await Trade.find(trade_q).sort("+executed_at").to_list()
+        for t in trade_rows:
+            key = (str(t.user_id), t.instrument.token, t.product_type.value)
+            by_charges_key.setdefault(key, []).append(t)
+
+    def _charges_for(p: Position) -> float:
+        key = (str(p.user_id), p.instrument.token, p.product_type.value)
+        bucket = by_charges_key.get(key, [])
+        if not bucket:
+            return 0.0
+        if not p.opened_at:
+            return sum(
+                float(str(getattr(t, "total_charges", None) or t.brokerage or 0))
+                for t in bucket
+            )
+        start = p.opened_at
+        end = p.closed_at or p.opened_at
+        slack = _td_charges(seconds=5)
+        return sum(
+            float(str(getattr(t, "total_charges", None) or t.brokerage or 0))
+            for t in bucket
+            if (start - slack) <= t.executed_at <= (end + slack)
+        )
+
     out = []
     for r in rows:
         ltp = ltp_map.get(r.instrument.token, 0.0)
@@ -368,6 +410,15 @@ async def list_positions(
                 # P&L + margin are always INR (wallet currency).
                 "unrealized_pnl": f"{unrealized_pnl_inr:.2f}",
                 "realized_pnl": f"{realized_pnl_inr:.2f}",
+                # Sum of brokerage + every other charge stamped on this
+                # position's lifecycle trades. Admin frontend subtracts
+                # this from `realized_pnl` so the displayed P&L matches
+                # the NET number the user sees on their APK (which the
+                # user-facing /closed endpoint already nets — see
+                # user/positions.py:closed_positions). Without this the
+                # admin and user views always disagreed by the brokerage
+                # amount on every closed trade.
+                "charges": f"{_charges_for(r):.2f}",
                 "margin_used": f"{margin_inr:.2f}",
                 # Currency tag so the UI can prefix avg/ltp with $ instead of ₹
                 "currency_quote": "USD" if is_usd else "INR",
@@ -589,6 +640,55 @@ async def positions_pnl_summary(
     # Scope user pool for sub-admins. None for SUPER_ADMIN = no filter.
     scope = await scoped_user_ids(admin)
 
+    # Sum charges (brokerage + other) across all trades that belong to a
+    # given position. Mirrors the per-row attribution in the /positions
+    # endpoint so the aggregate tile and the per-row table never disagree.
+    # Without this, the dashboard's "This Week's Closed PNL" stayed at
+    # gross while every trade card on the APK showed net — the difference
+    # equalled the brokerage bill for the week.
+    from datetime import timedelta as _td_sum
+
+    async def _charges_for_positions(positions: list[Position]) -> dict[str, float]:
+        if not positions:
+            return {}
+        user_ids = list({p.user_id for p in positions})
+        tokens = list({p.instrument.token for p in positions})
+        oldest = min((p.opened_at for p in positions if p.opened_at), default=None)
+        tq: dict[str, Any] = {
+            "user_id": {"$in": user_ids},
+            "instrument.token": {"$in": tokens},
+        }
+        if oldest is not None:
+            tq["executed_at"] = {"$gte": oldest - _td_sum(seconds=5)}
+        trades = await Trade.find(tq).sort("+executed_at").to_list()
+        bucket: dict[tuple[str, str, str], list[Trade]] = {}
+        for t in trades:
+            bucket.setdefault(
+                (str(t.user_id), t.instrument.token, t.product_type.value), []
+            ).append(t)
+        slack = _td_sum(seconds=5)
+        out: dict[str, float] = {}
+        for p in positions:
+            key = (str(p.user_id), p.instrument.token, p.product_type.value)
+            ts = bucket.get(key, [])
+            if not ts:
+                out[str(p.id)] = 0.0
+                continue
+            if not p.opened_at:
+                out[str(p.id)] = sum(
+                    float(str(getattr(t, "total_charges", None) or t.brokerage or 0))
+                    for t in ts
+                )
+                continue
+            start = p.opened_at
+            end = p.closed_at or p.opened_at
+            out[str(p.id)] = sum(
+                float(str(getattr(t, "total_charges", None) or t.brokerage or 0))
+                for t in ts
+                if (start - slack) <= t.executed_at <= (end + slack)
+            )
+        return out
+
     async def _realised_in(window_start, window_end=None):
         rng: dict[str, Any] = {"$gte": window_start}
         if window_end is not None:
@@ -599,7 +699,14 @@ async def positions_pnl_summary(
                 return 0.0
             query["user_id"] = {"$in": scope}
         rows = await Position.find(query).to_list()
-        return sum(_realised_inr(p) for p in rows)
+        gross = sum(_realised_inr(p) for p in rows)
+        charges_map = await _charges_for_positions(rows)
+        total_charges = sum(charges_map.values())
+        # Net = gross realised − brokerage/charges. Same definition the
+        # APK card uses (user/positions.py:closed_positions subtracts
+        # the same charges before serialising realized_pnl), so the
+        # dashboard tile and the per-trade APK cards stay in lockstep.
+        return gross - total_charges
 
     today_realised = await _realised_in(today_start)
     week_realised = await _realised_in(week_start)
