@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────
-#  SetupFX Broker — production deploy script
+#  MarginPlant Broker — production deploy script
 #  Runs on the EC2 host. Invoked by GitHub Actions over SSH; can also
 #  be run manually:
-#      cd /opt/setupfx && bash scripts/deploy.sh
+#      cd /opt/marginplant && bash scripts/deploy.sh
 #
 #  Smart-rebuild: figures out what actually changed between the previous
 #  HEAD and the new origin/main, then rebuilds only the affected piece.
@@ -11,7 +11,7 @@
 # ─────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-REPO_DIR="/opt/setupfx"
+REPO_DIR="/opt/marginplant"
 BACKEND_DIR="$REPO_DIR/backend"
 USER_DIR="$REPO_DIR/frontend-user"
 ADMIN_DIR="$REPO_DIR/frontend-admin"
@@ -20,7 +20,7 @@ VENV="$BACKEND_DIR/.venv"
 cd "$REPO_DIR"
 
 echo "═══════════════════════════════════════════════════════════════"
-echo "  SetupFX deploy — $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+echo "  MarginPlant deploy — $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 echo "═══════════════════════════════════════════════════════════════"
 
 # ── 1) Pull latest ─────────────────────────────────────────────────
@@ -80,8 +80,8 @@ if [ "$backend_changed" = "1" ]; then
     "$VENV/bin/pip" install --quiet --upgrade pip
     "$VENV/bin/pip" install --quiet -r "$BACKEND_DIR/requirements.txt"
   fi
-  echo "  restarting setupfx-backend.service…"
-  sudo systemctl restart setupfx-backend
+  echo "  restarting marginplant-backend.service…"
+  sudo systemctl restart marginplant-backend
 fi
 
 # ── 3) Frontend user ───────────────────────────────────────────────
@@ -95,8 +95,8 @@ if [ "$user_changed" = "1" ]; then
   echo "  building…"
   rm -rf .next
   npm run build
-  echo "  reloading PM2 setupfx-user…"
-  pm2 reload setupfx-user --update-env
+  echo "  reloading PM2 marginplant-user…"
+  pm2 reload marginplant-user --update-env
 fi
 
 # ── 4) Frontend admin ──────────────────────────────────────────────
@@ -110,14 +110,14 @@ if [ "$admin_changed" = "1" ]; then
   echo "  building…"
   rm -rf .next
   npm run build
-  echo "  reloading PM2 setupfx-admin…"
-  pm2 reload setupfx-admin --update-env
+  echo "  reloading PM2 marginplant-admin…"
+  pm2 reload marginplant-admin --update-env
 fi
 
 # ── 5) Nginx config sync (if tracked nginx config changed) ─────────
-if [ "$nginx_changed" = "1" ] && [ -f "$REPO_DIR/deploy/nginx/setupfx.conf" ]; then
+if [ "$nginx_changed" = "1" ] && [ -f "$REPO_DIR/deploy/nginx/marginplant.conf" ]; then
   echo "── Nginx config ──"
-  sudo cp "$REPO_DIR/deploy/nginx/setupfx.conf" /etc/nginx/sites-available/setupfx
+  sudo cp "$REPO_DIR/deploy/nginx/marginplant.conf" /etc/nginx/sites-available/marginplant
   sudo nginx -t
   sudo systemctl reload nginx
 fi
@@ -131,7 +131,7 @@ if [ "$backend_code" = "401" ] || [ "$backend_code" = "200" ]; then
 else
   echo "  ✗ backend FAIL ($backend_code)"
   echo "  Last 20 log lines:"
-  sudo journalctl -u setupfx-backend --no-pager -n 20 | sed 's/^/    /'
+  sudo journalctl -u marginplant-backend --no-pager -n 20 | sed 's/^/    /'
   exit 1
 fi
 

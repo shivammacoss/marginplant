@@ -52,6 +52,10 @@ dump.rdb
 backend/uploads/*
 !backend/uploads/.gitkeep
 
+# Celery beat runtime state (SQLite + WAL/SHM). Regenerated on every
+# beat start; checking it in causes cross-host clock collisions.
+backend/celerybeat-schedule*
+
 # ─── Editor / IDE ────────────────────────────────────────────────────
 .idea/
 .vscode/
