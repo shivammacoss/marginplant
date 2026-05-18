@@ -243,6 +243,57 @@ async def test_settle_period_fails_on_insufficient_balance(
     assert settlement.settled_at is None
 
 
+async def test_settle_period_debits_admin_credits_broker_when_client_wins(
+    db,
+    admin_user,
+    broker_user,
+    client_user,
+    agreement,
+    admin_wallet,
+    broker_wallet,
+):
+    """Client gained 5000, brokerage 200.
+    Broker net = -5000 + 200 = -4800.
+    Admin share 30% = -1500 (PNL) + 60 (BKG) = -1440.
+    Admin pays broker 1440. Broker wallet 100000 -> 101440, admin 100000 -> 98560.
+    """
+    period_start = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+    period_end = datetime(2026, 5, 31, 23, 59, 59, tzinfo=UTC)
+
+    # Client WON (positive realized_pnl) → broker loses → admin shares the loss
+    await _make_position(
+        user_id=client_user.id,
+        realized_pnl="5000",
+        closed_at=datetime(2026, 5, 18, 12, 0, tzinfo=UTC),
+    )
+    await _make_brokerage_tx(
+        user_id=client_user.id,
+        amount="-200",
+        created_at=datetime(2026, 5, 18, 12, 0, 1, tzinfo=UTC),
+    )
+
+    settlement = await svc.settle_period(
+        agreement_id=agreement.id,
+        period_start=period_start,
+        period_end=period_end,
+        cadence=SettlementCadence.MONTHLY,
+        triggered_by="MANUAL",
+        actor=admin_user,
+    )
+
+    assert settlement.status == SharingSettlementStatus.SETTLED
+    assert Decimal(str(settlement.sharing_total_inr)) == Decimal("-1440.00")
+    assert settlement.transaction_ref_admin is not None
+    assert settlement.transaction_ref_broker is not None
+    assert settlement.settled_at is not None
+    assert settlement.settled_by == admin_user.id
+
+    aw = await Wallet.find_one(Wallet.user_id == admin_user.id)
+    bw = await Wallet.find_one(Wallet.user_id == broker_user.id)
+    assert Decimal(str(aw.available_balance)) == Decimal("98560.00")
+    assert Decimal(str(bw.available_balance)) == Decimal("101440.00")
+
+
 async def test_settle_period_zero_amount_no_wallet_calls(
     db,
     admin_user,

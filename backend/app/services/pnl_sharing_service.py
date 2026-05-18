@@ -44,6 +44,11 @@ IST = ZoneInfo("Asia/Kolkata")
 UTC = ZoneInfo("UTC")
 
 
+def _d128(value: Decimal) -> Decimal128:
+    """Decimal → Decimal128 with str conversion (BSON safest path)."""
+    return Decimal128(str(value))
+
+
 def _as_ist(dt: datetime) -> datetime:
     """Treat naive datetimes as IST; convert tz-aware to IST."""
     if dt.tzinfo is None:
@@ -466,28 +471,49 @@ async def settle_period(
             period_start=period_start,
             period_end=period_end,
             cadence=cadence,
-            net_client_pnl_inr=Decimal128(str(snap.net_client_pnl_inr)),
-            net_client_bkg_inr=Decimal128(str(snap.net_client_bkg_inr)),
-            total_of_both_inr=Decimal128(str(snap.total_of_both_inr)),
-            actual_pnl_inr=Decimal128(str(snap.actual_pnl_inr)),
+            net_client_pnl_inr=_d128(snap.net_client_pnl_inr),
+            net_client_bkg_inr=_d128(snap.net_client_bkg_inr),
+            total_of_both_inr=_d128(snap.total_of_both_inr),
+            actual_pnl_inr=_d128(snap.actual_pnl_inr),
             share_pct_snapshot=agreement.share_pct,
-            sharing_pnl_inr=Decimal128(str(snap.sharing_pnl_inr)),
-            sharing_bkg_inr=Decimal128(str(snap.sharing_bkg_inr)),
-            sharing_total_inr=Decimal128(str(snap.sharing_total_inr)),
+            sharing_pnl_inr=_d128(snap.sharing_pnl_inr),
+            sharing_bkg_inr=_d128(snap.sharing_bkg_inr),
+            sharing_total_inr=_d128(snap.sharing_total_inr),
             status=SharingSettlementStatus.PENDING,
         )
-        await row.insert()
+        try:
+            await row.insert()
+        except DuplicateKeyError:
+            # Another concurrent call inserted the row first. Re-read and proceed
+            # via the retry path (snapshot refresh + wallet attempt).
+            row = await PnlSharingSettlement.find_one(
+                PnlSharingSettlement.agreement_id == agreement_id,
+                PnlSharingSettlement.period_start == period_start,
+            )
+            if row is None:
+                raise  # paranoid: should not happen given unique index
+            if row.status == SharingSettlementStatus.SETTLED:
+                return row
+            row.retry_count += 1
+            # Refresh snapshot fields on the now-existing row
+            row.net_client_pnl_inr = _d128(snap.net_client_pnl_inr)
+            row.net_client_bkg_inr = _d128(snap.net_client_bkg_inr)
+            row.total_of_both_inr = _d128(snap.total_of_both_inr)
+            row.actual_pnl_inr = _d128(snap.actual_pnl_inr)
+            row.sharing_pnl_inr = _d128(snap.sharing_pnl_inr)
+            row.sharing_bkg_inr = _d128(snap.sharing_bkg_inr)
+            row.sharing_total_inr = _d128(snap.sharing_total_inr)
     else:
         row = existing
         row.retry_count += 1
         # Refresh snapshot fields in case data has changed since FAILED state
-        row.net_client_pnl_inr = Decimal128(str(snap.net_client_pnl_inr))
-        row.net_client_bkg_inr = Decimal128(str(snap.net_client_bkg_inr))
-        row.total_of_both_inr = Decimal128(str(snap.total_of_both_inr))
-        row.actual_pnl_inr = Decimal128(str(snap.actual_pnl_inr))
-        row.sharing_pnl_inr = Decimal128(str(snap.sharing_pnl_inr))
-        row.sharing_bkg_inr = Decimal128(str(snap.sharing_bkg_inr))
-        row.sharing_total_inr = Decimal128(str(snap.sharing_total_inr))
+        row.net_client_pnl_inr = _d128(snap.net_client_pnl_inr)
+        row.net_client_bkg_inr = _d128(snap.net_client_bkg_inr)
+        row.total_of_both_inr = _d128(snap.total_of_both_inr)
+        row.actual_pnl_inr = _d128(snap.actual_pnl_inr)
+        row.sharing_pnl_inr = _d128(snap.sharing_pnl_inr)
+        row.sharing_bkg_inr = _d128(snap.sharing_bkg_inr)
+        row.sharing_total_inr = _d128(snap.sharing_total_inr)
 
     amount = snap.sharing_total_inr
     tx_admin: WalletTransaction | None = None
@@ -555,4 +581,28 @@ async def settle_period(
         row.failure_reason = f"unexpected: {type(e).__name__}: {str(e)[:400]}"
 
     await row.save()
+
+    audit_action = (
+        AuditAction.PNL_SHARING_SETTLEMENT_SETTLED
+        if row.status == SharingSettlementStatus.SETTLED
+        else AuditAction.PNL_SHARING_SETTLEMENT_FAILED
+    )
+    await log_event(
+        action=audit_action,
+        entity_type="PnlSharingSettlement",
+        entity_id=row.id,
+        actor_id=actor.id if actor else None,
+        target_user_id=row.broker_id,
+        new_values={
+            "agreement_id": str(row.agreement_id),
+            "period_start": row.period_start.isoformat(),
+            "period_end": row.period_end.isoformat(),
+            "cadence": row.cadence.value,
+            "sharing_total_inr": str(row.sharing_total_inr),
+            "status": row.status.value,
+            "retry_count": row.retry_count,
+            "triggered_by": triggered_by,
+            "failure_reason": row.failure_reason,
+        },
+    )
     return row
