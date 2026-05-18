@@ -125,6 +125,12 @@ export function OrderPanel({ instrument, ltp, bid, ask, fxRate }: Props) {
   // `minLots` = min lots per order, `orderLots` = max lots per order.
   const minLot = Number(effSettings?.min_lot ?? 1) || 1;
   const maxLotPerOrder = Number(effSettings?.order_lot ?? 0) || 0; // 0 = no cap
+  // Per-instrument cap on the running net position (= maxLots/script in
+  // the admin matrix). Mirrors the validator's MAX_EACH_EXCEEDED check
+  // so the optimistic insert below never sees a value the server is
+  // about to reject — without this the user briefly saw the position
+  // size tick up to N+1 before the rejection rolled it back ~1 s later.
+  const maxLotsPerScript = Number(effSettings?.max_each_lot ?? 0) || 0;
   // Stepper increment: when the segment's minimum is fractional (MCX 0.1,
   // crypto 0.001, forex 0.01) the +/− buttons should walk in the same units.
   // A hard-coded step of 1 made it impossible to go 0.1 → 0.2 → 0.3 from the
@@ -513,6 +519,37 @@ export function OrderPanel({ instrument, ltp, bid, ask, fxRate }: Props) {
       if (intradayMargin > 0 && total < intradayMargin) {
         toast.error(
           `Insufficient balance — need ${formatINR(intradayMargin)}, have ${formatINR(total)}`,
+        );
+        return;
+      }
+    }
+
+    // ── Per-instrument cap pre-check (MAX_EACH_EXCEEDED) ──────────────
+    // Mirrors validator.py's `max_each` check. Without this, a follow-up
+    // order that would push the position past the admin's
+    // `maxLots/script` cap is sent to the server, the optimistic insert
+    // briefly tickets the position size up, and ~1 s later the server
+    // rejection rolls it back — the user-reported "1 sec ke liye size
+    // badh jata hai" flicker. Computing the projected net here keeps
+    // the rejected click invisible to the UI.
+    if (maxLotsPerScript > 0) {
+      const openPositions =
+        (qc.getQueryData<any[]>(["positions", "open"]) as any[] | undefined) ||
+        [];
+      const existing = openPositions.find(
+        (p) =>
+          p &&
+          p.instrument_token === instrument.token &&
+          p.product_type === productType,
+      );
+      const heldQty = Number(existing?.quantity ?? 0);
+      const heldLots = lotSize > 0 ? heldQty / lotSize : 0;
+      const deltaLots = side === "BUY" ? lots : -lots;
+      const projectedNet = heldLots + deltaLots;
+      const isReducing = Math.abs(projectedNet) < Math.abs(heldLots);
+      if (!isReducing && Math.abs(projectedNet) > maxLotsPerScript) {
+        toast.error(
+          `Per-instrument cap reached: would hold ${Math.abs(projectedNet)} > ${maxLotsPerScript} lot(s)`,
         );
         return;
       }
