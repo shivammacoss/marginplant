@@ -963,11 +963,18 @@ async def delete_sub_admin_segment_override(
 
 async def _invalidate_pool_netting_cache(sub_admin_id: PydanticObjectId) -> None:
     """Wipes the per-user `netting_eff:<uid>:*` cache for every user
-    assigned to this sub-admin."""
+    assigned to this sub-admin, plus the segment-wide `spread:*` cache.
+    The spread cache is segment+symbol keyed (not user-keyed), so a single
+    wipe makes any spread edit visible to the live market-tick overlay
+    within the next 250 ms broadcast — without this admins saw the
+    typed-in spread sit in `SuperAdminSegmentOverride` while the live
+    feed kept using the previous value for up to 30 s (the spread
+    cache's TTL)."""
     coll = User.get_motor_collection()
     cursor = coll.find({"assigned_admin_id": sub_admin_id}, {"_id": 1})
     async for doc in cursor:
         await cache_delete_pattern(f"netting_eff:{doc['_id']}:*")
+    await cache_delete_pattern("spread:*")
 
 
 # ── Super-admin segment defaults (super-admin's own pool) ────────────
@@ -1023,7 +1030,12 @@ async def delete_super_admin_segment_override(
 
 async def _invalidate_super_admin_pool_netting_cache() -> None:
     """Wipes per-user netting cache for every user in the super-admin's
-    pool (i.e. ``assigned_admin_id IS NULL`` AND no broker)."""
+    pool (i.e. ``assigned_admin_id IS NULL`` AND no broker), plus the
+    segment-wide `spread:*` cache. The spread cache is keyed by
+    (segment, symbol) — not user — so a single wipe makes any spread
+    edit visible to the next 250 ms market-tick broadcast. Without this
+    the live feed kept using the previous spread for up to 30 s (the
+    cache's TTL) even after the override was saved."""
     coll = User.get_motor_collection()
     cursor = coll.find(
         {"assigned_admin_id": None, "assigned_broker_id": None},
@@ -1031,6 +1043,7 @@ async def _invalidate_super_admin_pool_netting_cache() -> None:
     )
     async for doc in cursor:
         await cache_delete_pattern(f"netting_eff:{doc['_id']}:*")
+    await cache_delete_pattern("spread:*")
 
 
 # ── Broker segment defaults (broker's own pool) ──────────────────────
@@ -1084,11 +1097,14 @@ async def delete_broker_segment_override(
 
 async def _invalidate_broker_pool_netting_cache(broker_id: PydanticObjectId) -> None:
     """Wipes per-user netting cache for every user whose
-    ``assigned_broker_id`` matches this broker (the broker's direct clients)."""
+    ``assigned_broker_id`` matches this broker (the broker's direct clients),
+    plus the segment-wide `spread:*` cache so spread edits land on the
+    live tick overlay within the next 250 ms broadcast."""
     coll = User.get_motor_collection()
     cursor = coll.find({"assigned_broker_id": broker_id}, {"_id": 1})
     async for doc in cursor:
         await cache_delete_pattern(f"netting_eff:{doc['_id']}:*")
+    await cache_delete_pattern("spread:*")
 
 
 # ── Per-user segment overrides ────────────────────────────────────

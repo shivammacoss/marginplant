@@ -107,6 +107,31 @@ function fmtOpenedAt(v: string | Date | null | undefined): string {
   });
 }
 
+/** Human-readable duration between two timestamps. Used by the Closed
+ *  Trades tab's "Holding Time" column so admins can spot positions that
+ *  were squared off in seconds (likely a misclick) vs ones held for
+ *  hours/days. Granularity adapts to magnitude: seconds → "<1m",
+ *  minutes → "Xm", under a day → "Xh Ym", longer → "Xd Yh". */
+function fmtHoldingTime(
+  opened: string | Date | null | undefined,
+  closed: string | Date | null | undefined,
+): string {
+  const a = parseDate(opened);
+  const b = parseDate(closed);
+  if (!a || !b) return "—";
+  const ms = b.getTime() - a.getTime();
+  if (ms < 0) return "—";
+  if (ms < 60_000) return "<1m";
+  const totalMin = Math.floor(ms / 60_000);
+  if (totalMin < 60) return `${totalMin}m`;
+  const totalHr = Math.floor(totalMin / 60);
+  const minPart = totalMin % 60;
+  if (totalHr < 24) return minPart > 0 ? `${totalHr}h ${minPart}m` : `${totalHr}h`;
+  const days = Math.floor(totalHr / 24);
+  const hrPart = totalHr % 24;
+  return hrPart > 0 ? `${days}d ${hrPart}h` : `${days}d`;
+}
+
 export default function AdminPositionsPage() {
   // useSearchParams must sit inside Suspense for the static prerender
   // to succeed (Next 14 App Router contract).
@@ -345,9 +370,11 @@ function AdminPositionsInner() {
     {
       // For closed positions, `ltp` was set to the actual close price by
       // position_service.apply_trade — so the same field doubles as "Close".
-      // Header reflects whichever flavour the row is.
+      // Header swaps too so the Closed Trades tab reads just "Close"
+      // (user feedback: "close price likho bs upar me") and the Open
+      // Trades tab still reads "LTP" since that's the live mark.
       key: "ltp",
-      header: "LTP / Close",
+      header: tab === "closed" ? "Close" : "LTP",
       align: "right",
       render: (r) => (
         <span title={r.status === "CLOSED" ? "Closing price" : "Live LTP"}>
@@ -417,6 +444,26 @@ function AdminPositionsInner() {
         </span>
       ),
     },
+    // Holding Time — only meaningful on the Closed Trades tab where
+    // both ends of the window exist. Helps the admin spot 30-second
+    // misclicks vs multi-hour intentional holds at a glance.
+    ...(tab === "closed"
+      ? [
+          {
+            key: "holding_time",
+            header: "Holding Time",
+            align: "right" as const,
+            render: (r: any) => (
+              <span
+                className="whitespace-nowrap font-tabular text-muted-foreground"
+                title={r.closed_at ?? undefined}
+              >
+                {fmtHoldingTime(r.opened_at, r.closed_at)}
+              </span>
+            ),
+          },
+        ]
+      : []),
     // Only meaningful for CLOSED rows. Renders the close_reason as a
     // color-coded chip so super-admins can spot at a glance which
     // closes were user-initiated vs bracket auto-fires vs stop-outs.
@@ -466,7 +513,15 @@ function AdminPositionsInner() {
         </div>
       ),
     },
-  ];
+  ].filter(
+    // Defensive belt-and-braces filter: even if the conditional spread
+    // above (which inserts the M2M col only on the open tab) ever
+    // regresses, this guarantees the M2M column never reaches the
+    // table on the Closed Trades tab. User explicitly asked for the
+    // column to disappear there twice — keeping both gates ensures
+    // a single stray rewrite can't bring it back.
+    (c) => !(tab === "closed" && c.key === "unrealized_pnl"),
+  );
 
   return (
     <div className="space-y-4">
