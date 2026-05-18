@@ -226,8 +226,80 @@ async def list_transactions(
 
 
 async def summary(user_id: str | PydanticObjectId) -> dict[str, Any]:
+    """Wallet summary in Dabba/CFD presentation:
+        - bal              = main_balance display (available + used, since
+                             margin is internally "locked" but conceptually
+                             still part of the user's wallet)
+        - margin           = locked margin against open positions
+        - unrealized_pnl   = sum of floating PnL across open positions
+        - equity           = bal + unrealized_pnl
+        - free             = equity − margin (what's deployable on a new
+                             trade after honouring current float losses)
+        - margin_level_pct = equity / margin × 100 (the stop-out gauge;
+                             None when no positions are open)
+
+    Legacy fields (available_balance / used_margin) stay on the payload
+    so older APK / web clients keep working through one rollout window.
+    """
+    from app.models.position import Position, PositionStatus
+
     w = await get_or_create(user_id)
+
+    # Float PnL across this user's open positions. Stored on Position by
+    # risk_enforcer.refresh_unrealized_pnl every tick, so reading is cheap.
+    open_positions = await Position.find(
+        Position.user_id == PydanticObjectId(user_id)
+        if not isinstance(user_id, PydanticObjectId)
+        else Position.user_id == user_id,
+        Position.status == PositionStatus.OPEN,
+    ).to_list()
+    float_pnl = ZERO
+    open_margin_sum = ZERO
+    for p in open_positions:
+        try:
+            float_pnl = add(float_pnl, to_decimal(p.unrealized_pnl))
+        except Exception:
+            pass
+        try:
+            open_margin_sum = add(open_margin_sum, to_decimal(p.margin_used))
+        except Exception:
+            pass
+
+    avail = to_decimal(w.available_balance)
+    used = to_decimal(w.used_margin)
+    credit = to_decimal(w.credit_limit)
+
+    # Bal = the wallet "wealth at rest" — what the user sees as their
+    # account balance regardless of how much is currently locked as
+    # margin. Internally this equals (available + used) because the
+    # legacy block_margin() shuffles cash between those two fields; in
+    # the Dabba presentation we add them back to show one number.
+    bal = add(avail, used)
+    equity = add(bal, float_pnl)
+
+    # `open_margin_sum` SHOULD equal `used` in steady state, but the
+    # per-position field is the authoritative truth (the wallet field is
+    # legacy from when margin was tracked centrally). Prefer the position
+    # sum when they disagree — that's what every order touched.
+    margin = open_margin_sum if open_margin_sum > ZERO else used
+
+    free = sub(equity, margin)
+    margin_level_pct: float | None = None
+    if margin > ZERO:
+        try:
+            margin_level_pct = float(equity / margin * to_decimal(100))
+        except Exception:
+            margin_level_pct = None
+
     return {
+        # ── Dabba-style KPIs (preferred) ────────────────────────────
+        "bal": str(bal),
+        "equity": str(equity),
+        "margin": str(margin),
+        "free": str(free),
+        "margin_level_pct": margin_level_pct,
+        "open_unrealized_pnl": str(float_pnl),
+        # ── Legacy fields (kept for backward compat) ────────────────
         "available_balance": str(w.available_balance),
         "used_margin": str(w.used_margin),
         "realized_pnl": str(w.realized_pnl),

@@ -52,14 +52,25 @@ export function WalletStrip({
     enabled: openPnL === undefined,
   });
 
-  const available = Number(wallet?.available_balance ?? 0);
-  const used = Number(wallet?.used_margin ?? 0);
+  // Dabba / CFD KPI strip — Bal · Equity · Margin · Free + live Open P/L.
+  // Backend's /wallet/summary now ships these as first-class fields. Legacy
+  // `available_balance + used_margin` math kept as a fallback so the strip
+  // doesn't blank out if an older API rolls back.
+  const bal = Number(
+    wallet?.bal ??
+      Number(wallet?.available_balance ?? 0) + Number(wallet?.used_margin ?? 0),
+  );
+  const margin = Number(wallet?.margin ?? wallet?.used_margin ?? 0);
+  // Prefer the parent's live `openPnL` (matches per-row P/L in the table)
+  // over the wallet's `open_unrealized_pnl` (uses mid-LTP, off by a tick
+  // on wide-spread instruments).
   const openUnrl =
     openPnL !== undefined
       ? openPnL
-      : Number(pnl?.open_unrealised ?? pnl?.unrealized_pnl ?? 0);
-  const totalBalance = available + used;
-  const equity = totalBalance + openUnrl;
+      : Number(pnl?.open_unrealised ?? pnl?.unrealized_pnl ?? wallet?.open_unrealized_pnl ?? 0);
+  const equity = bal + openUnrl;
+  const free = equity - margin;
+  const marginLevel = margin > 0 ? (equity / margin) * 100 : null;
 
   return (
     <div
@@ -68,16 +79,36 @@ export function WalletStrip({
         className,
       )}
     >
-      <Stat label="Total Balance" value={formatINR(totalBalance)} />
+      <Stat label="Bal" value={formatINR(bal)} />
       <Sep />
-      <Stat label="Equity" value={formatINR(equity)} />
+      <Stat label="Equity" value={formatINR(equity)} valueClass={pnlColor(openUnrl)} />
       <Sep />
-      <Stat label="Used Margin" value={formatINR(used)} />
-      <Sep />
-      <Stat label="Available" value={formatINR(available)} />
+      <Stat label="Margin" value={formatINR(margin)} />
       <Sep />
       <Stat
-        label="Open P/L"
+        label="Free"
+        value={formatINR(free)}
+        valueClass={free < 0 ? "text-red-500" : undefined}
+      />
+      {marginLevel !== null && (
+        <>
+          <Sep />
+          <Stat
+            label="ML"
+            value={`${marginLevel.toFixed(1)}%`}
+            valueClass={
+              marginLevel <= 100
+                ? "text-red-500"
+                : marginLevel <= 200
+                  ? "text-amber-500"
+                  : "text-emerald-500"
+            }
+          />
+        </>
+      )}
+      <Sep />
+      <Stat
+        label="P/L"
         value={`${openUnrl >= 0 ? "+" : ""}${formatINR(openUnrl)}`}
         valueClass={pnlColor(openUnrl)}
       />
