@@ -387,14 +387,26 @@ function AdminPositionsInner() {
         );
       },
     },
-    {
-      key: "unrealized_pnl",
-      header: "M2M",
-      align: "right",
-      render: (r) => (
-        <span className={pnlColor(r.unrealized_pnl)}>{formatINR(r.unrealized_pnl)}</span>
-      ),
-    },
+    // M2M column is only meaningful on OPEN positions (mark-to-market on
+    // the still-live price). For CLOSED rows it's mathematically 0 by
+    // definition (qty = 0), so we hide the column entirely on the Closed
+    // Trades tab — user explicitly asked for it removed there ("close
+    // trade se m2m bhi remove kar dena"). The realised number on the
+    // closed row already tells the full story.
+    ...(tab === "closed"
+      ? []
+      : [
+          {
+            key: "unrealized_pnl",
+            header: "M2M",
+            align: "right" as const,
+            render: (r: any) => (
+              <span className={pnlColor(r.unrealized_pnl)}>
+                {formatINR(r.unrealized_pnl)}
+              </span>
+            ),
+          },
+        ]),
     { key: "margin_used", header: "Margin", align: "right", render: (r) => formatINR(r.margin_used) },
     {
       key: "opened_at",
