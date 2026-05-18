@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Any
 
 from beanie.operators import Or
@@ -34,6 +35,85 @@ def infer_instrument_type_from_symbol(symbol: str | None) -> str | None:
         if s.endswith("PE"):
             return "PE"
     return None
+
+
+_MONTH_BY_ABBR = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+# Approximate per-segment expiry-day-of-month, used only as a fallback when
+# the stored Instrument.expiry is None. NSE/BSE F&O expire on the last
+# Thursday of the month — derived dynamically (any other day in that month
+# is wrong). MCX commodities vary by underlying (CRUDEOIL/NATGAS on 19th,
+# SILVER/GOLD end-of-month-ish, COPPER 25th), so we pick a generic "near
+# end of month" date — better than `None` for the expiry-day rule even
+# if off by a few days.
+_LAST_THURSDAY_SEGMENTS = ("NSE_FUT", "NSE_OPT", "BSE_FUT", "BSE_OPT", "NFO_FUT", "NFO_OPT", "BFO_FUT", "BFO_OPT")
+
+
+def _last_thursday_of_month(year: int, month: int) -> date:
+    from calendar import monthrange
+    _, last_day = monthrange(year, month)
+    d = date(year, month, last_day)
+    # Thursday weekday() == 3
+    while d.weekday() != 3:
+        d = d.replace(day=d.day - 1)
+    return d
+
+
+_SYMBOL_EXPIRY_RE = re.compile(r"^([A-Z]+?)(\d{2})([A-Z]{3})(\d+(?:CE|PE)?|FUT)$")
+
+
+def derive_expiry_from_symbol(symbol: str | None, segment: str | None = None) -> date | None:
+    """Best-effort recovery of an instrument's expiry date from its
+    Kite-style trading symbol. Only used as a runtime fallback when the
+    stored `Instrument.expiry` is `None` (data-quality gap from the
+    Zerodha sync) — otherwise the stored field always wins.
+
+    Examples:
+        CRUDEOIL26JULFUT          → 2026-07-{last-thursday/19} (MCX)
+        NIFTY26JANFUT             → 2026-01-{last-thursday}    (NFO)
+        NIFTY26JAN22500CE         → 2026-01-{last-thursday}    (NFO)
+
+    Returns `None` when the symbol doesn't match the YY-MMM pattern or
+    the month abbreviation is unknown. Callers must treat a non-None
+    return as approximate (off by ≤ a week for MCX) and prefer the
+    stored expiry whenever it's populated.
+    """
+    s = (symbol or "").upper()
+    m = _SYMBOL_EXPIRY_RE.match(s)
+    if not m:
+        return None
+    _, yy, mmm, _ = m.groups()
+    month = _MONTH_BY_ABBR.get(mmm)
+    if month is None:
+        return None
+    try:
+        year = 2000 + int(yy)
+    except ValueError:
+        return None
+    seg_up = (segment or "").upper()
+    if any(seg_up.startswith(p) for p in _LAST_THURSDAY_SEGMENTS) or "_FNO" in seg_up:
+        return _last_thursday_of_month(year, month)
+    # MCX_FUT / MCX_OPT (and any unknown segment): use the 19th — close to
+    # CRUDEOIL/NATGAS expiry (19th) and within a week of GOLD/SILVER (end
+    # of month). Worst case the expiry-day rule fires a few days off.
+    return date(year, month, 19)
+
+
+def effective_expiry(instrument) -> date | None:
+    """Return `instrument.expiry` when populated, else a best-effort
+    derivation from the symbol. Centralises the fallback so callers
+    (validator, segment-settings preview, expiry-cleanup loop) all see
+    the same date for instruments with missing data."""
+    stored = getattr(instrument, "expiry", None)
+    if stored:
+        return stored
+    symbol = getattr(instrument, "symbol", None)
+    segment = getattr(instrument, "segment", None)
+    seg_val = getattr(segment, "value", segment)
+    return derive_expiry_from_symbol(symbol, seg_val)
 
 
 def display_name(

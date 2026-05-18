@@ -54,7 +54,48 @@ async def get_effective_for_instrument(
         symbol=instrument.symbol,
     )
 
-    s = resolved["settings"]
+    s = dict(resolved["settings"])
+
+    # Expiry-day override — mirror the mode-aware translation the validator
+    # does at order time so the APK / web KPI tile + pre-flight check see
+    # the SAME margin number the server will enforce. Without this the
+    # panel showed e.g. ₹2,068 for CRUDEOIL26MAYFUT on its expiry day
+    # while the server actually enforced ~₹51L (notional × 5 from the
+    # old expiry-bug). Even after the validator fix this endpoint still
+    # needs to surface the expiry-day numbers so admins who set a
+    # stricter `expiryDayIntradayMargin` see it reflected on the panel.
+    from app.services.instrument_service import effective_expiry as _effective_expiry
+    from app.utils.time_utils import now_ist as _now_ist
+
+    _expiry = _effective_expiry(instrument)
+    is_expiry_today = bool(_expiry and _expiry == _now_ist().date())
+    if is_expiry_today:
+        expiry_value = float(
+            s.get("expiry_intraday_margin")
+            or s.get("margin_percentage")
+            or s.get("leverage")
+            or 100.0
+        )
+        expiry_as_percent = bool(s.get("expiry_margin_as_percent", True))
+        seg_mode = (s.get("margin_calc_mode") or "").lower()
+        if not expiry_as_percent:
+            s["margin_calc_mode"] = "fixed"
+            s["fixed_margin_per_lot"] = expiry_value
+            s["margin_percentage"] = 0.0
+            s["leverage"] = 1.0
+        elif seg_mode == "times":
+            s["leverage"] = max(1.0, expiry_value)
+            s["margin_percentage"] = 100.0
+            s["fixed_margin_per_lot"] = 0.0
+        elif seg_mode == "fixed":
+            s["margin_calc_mode"] = "fixed"
+            s["fixed_margin_per_lot"] = expiry_value
+            s["margin_percentage"] = 0.0
+            s["leverage"] = 1.0
+        else:
+            s["margin_percentage"] = expiry_value
+            s["leverage"] = 1.0
+            s["fixed_margin_per_lot"] = 0.0
 
     # Lot size resolution — canonical tables win over whatever's on the
     # Instrument row. Two sources depending on segment family:
@@ -144,13 +185,16 @@ async def get_effective_for_instrument(
         "selling_overnight": s.get("selling_overnight"),
         # Source attribution so the UI can show "Override applied"
         "sources": resolved.get("sources", {}),
+        # Expiry-day flag — frontend can tag the margin tile with a
+        # warning when today's number differs from the usual tier.
+        "is_expiry_today": is_expiry_today,
         # ── Diagnostic: prove which build/resolution is running ───────
         # Lets the user (or us) inspect in DevTools whether the backend
         # actually applied the Times-mode-symmetric-leverage patch. If
         # `times_mode_symmetric_leverage` is missing from the payload, the
         # running process is on an OLD build — frontend reload alone won't
         # fix the margin, the Python service has to be restarted.
-        "_resolver_build": "times_mode_symmetric_leverage_v2",
+        "_resolver_build": "times_mode_symmetric_leverage_v3_expiry_aware",
     }
     return APIResponse(data=out)
 

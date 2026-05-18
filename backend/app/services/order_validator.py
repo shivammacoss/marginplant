@@ -564,7 +564,15 @@ async def validate(
     #     follows the segment's `margin_calc_mode`). Lets admin run
     #     normal trading on, say, Times-leverage and still impose a
     #     punitive flat ₹ on expiry.
-    is_expiry_today = bool(instrument.expiry and instrument.expiry == now_ist().date())
+    # Use `effective_expiry` so instruments whose stored `expiry` is None
+    # (data-quality gap from Zerodha sync) still get the expiry-day rule
+    # applied based on a symbol-derived fallback date. Without this,
+    # rows like CRUDEOIL26JULFUT with a null `expiry` skipped the rule
+    # entirely and traded at the regular tier on their actual expiry day.
+    from app.services.instrument_service import effective_expiry as _effective_expiry
+
+    _expiry = _effective_expiry(instrument)
+    is_expiry_today = bool(_expiry and _expiry == now_ist().date())
     if is_expiry_today:
         expiry_margin = float(
             s.get("expiry_intraday_margin")

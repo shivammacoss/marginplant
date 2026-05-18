@@ -341,6 +341,38 @@ async def _find_or_create_from_zerodha(token: str) -> Instrument | None:
                     await inst.save()
                 except Exception:
                     pass
+
+        # On-demand Zerodha WS subscribe for derivatives. Without this an
+        # instrument that exists in MongoDB (auto-mirrored from a CSV sync
+        # or admin bulk subscribe) but isn't actively on a WS connection
+        # returns no LTP — the user sees "—" on the market list and the
+        # trade panel, even though the contract IS tradable. Fire-and-
+        # forget so we don't block the detail/effective-settings response;
+        # the panel's next poll (1-2 s) picks up live ticks. Skips
+        # Infoway-mirrored tokens (non-numeric) — those carry their own
+        # feed lifecycle.
+        if inst.instrument_type in (InstrumentType.CE, InstrumentType.PE, InstrumentType.FUT):
+            try:
+                token_int = int(token)
+            except (TypeError, ValueError):
+                token_int = None
+            if token_int is not None:
+                import asyncio as _asyncio
+
+                from app.services.zerodha_service import zerodha as _zerodha
+
+                ex_val_sub = (
+                    inst.exchange.value if hasattr(inst.exchange, "value") else str(inst.exchange)
+                )
+                try:
+                    _asyncio.create_task(
+                        _zerodha.subscribe_tokens_on_demand(
+                            [token_int],
+                            symbols={token_int: {"symbol": inst.symbol, "exchange": ex_val_sub}},
+                        )
+                    )
+                except Exception:
+                    logger.debug("zerodha_on_demand_subscribe_failed", extra={"token": token})
     return inst
 
 
