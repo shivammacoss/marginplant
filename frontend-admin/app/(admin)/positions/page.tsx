@@ -362,8 +362,30 @@ function AdminPositionsInner() {
       },
     },
     {
+      // Lot count column — derives lots from contracts so admins reading the
+      // blotter don't have to mental-math QTY/lot_size for every segment
+      // (NIFTY OPT lot=75, BANKNIFTY 35, CRUDEOIL 100, MCXM ones smaller,
+      // etc.). Falls back to "—" when lot_size is missing or 1 (equities).
+      key: "lots",
+      header: "Lots",
+      align: "right" as const,
+      render: (r: any) => {
+        const isClosed = r.status === "CLOSED";
+        const rawQty = isClosed
+          ? Math.abs(Number(r.opening_quantity ?? 0))
+          : Math.abs(Number(r.quantity));
+        const lotSize = Number(r.lot_size ?? r.instrument?.lot_size ?? 1) || 1;
+        if (lotSize <= 1 || rawQty <= 0) return <span>—</span>;
+        const lots = rawQty / lotSize;
+        // Show whole lots when divisible, else 2-decimal (for fractional
+        // forex/crypto). Tabular nums keep the column aligned across rows.
+        const text = Number.isInteger(lots) ? String(lots) : lots.toFixed(2);
+        return <span className="tabular-nums">{text}</span>;
+      },
+    },
+    {
       key: "avg_price",
-      header: "Avg",
+      header: "Open Price",
       align: "right" as const,
       render: (r: any) => fmtFeedPrice(r.avg_price, r.currency_quote),
     },
