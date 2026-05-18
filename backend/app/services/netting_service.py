@@ -118,6 +118,7 @@ async def _wipe_eff_cache_debounced() -> None:
         # (this is one key, not a pattern, but `cache_delete_pattern`
         # handles single-key wipes fine).
         await cache_delete_pattern("inactive_admin_rows")
+        await cache_delete_pattern("inactive_admin_rows:*")
     except Exception:
         logger.warning("netting_cache_invalidation_failed_redis_down")
 
@@ -682,25 +683,31 @@ async def _wipe_spread_cache_debounced() -> None:
         logger.warning("spread_cache_invalidation_failed_redis_down")
 
 
-async def inactive_admin_rows() -> set[str]:
+async def inactive_admin_rows(
+    user_id: str | PydanticObjectId | None = None,
+) -> set[str]:
     """Names of admin matrix rows currently flagged `isActive = false`.
 
-    Used by the user-side instrument search to *hide* every instrument that
-    belongs to a disabled segment — the user shouldn't see prices or
-    candidates for a segment they can't trade. Validator still has its own
-    server-side gate as a belt-and-braces check.
+    Tier resolution (highest wins — same chain as the rest of segment
+    settings):
+      1. Base NettingSegment.isActive  (platform seed default = True)
+      2. SuperAdminSegmentOverride     (platform-wide)
+      3. **Pool-tier override for THIS user** when `user_id` is given:
+            • broker override if user has `assigned_broker_id`
+            • sub-admin override if user has `assigned_admin_id`
+         A pool-tier `isActive = True` UN-hides a segment blocked at a
+         lower tier; `isActive = False` hides it.
 
-    Resolution (highest wins — same chain as the rest of segment settings):
-      1. Base NettingSegment.isActive (platform seed default = True)
-      2. SuperAdminSegmentOverride.isActive (platform-wide override)
-      3. Sub-admin / broker overrides are pool-scoped, NOT consulted here
-         because this function returns a GLOBAL "hidden everywhere" list.
-         Per-pool blocking still works via the validator's effective-
-         settings check, which IS tier-aware.
-
-    Cached in Redis for 30 s; admin save flow wipes this key.
+    Without `user_id` (admin / global) → returns only base + super-admin.
+    With `user_id` (user-side) → adds that user's sub-admin or broker
+    pool overrides so a sub-admin's "Block → No" reaches their pool
+    members without accidentally hiding the segment for OTHER pools.
     """
-    cache_key = "inactive_admin_rows"
+    cache_key = (
+        f"inactive_admin_rows:{user_id}"
+        if user_id is not None
+        else "inactive_admin_rows"
+    )
     try:
         cached = await cache_get(cache_key)
         if cached is not None and isinstance(cached, list):
@@ -708,37 +715,81 @@ async def inactive_admin_rows() -> set[str]:
     except Exception:
         pass
 
-    # Start with base segments flagged inactive in the seed row.
+    # Layer 1: base seed
     base_rows = await NettingSegment.find({"isActive": False}).to_list()
     names = {r.name for r in base_rows if r.name}
 
-    # Super-admin's platform-wide override sits above the seed. The admin
-    # UI's "Block → Is Active = No" toggle writes to SuperAdminSegmentOverride
-    # (not the base row) so without this merge the toggle never reached the
-    # user-side instrument list — the segment chip + every instrument under
-    # it stayed visible after save. User report: "block kar diya hu lekin
-    # user side me dikha raha hai".
+    # Layer 2: super-admin override (platform-wide)
     try:
         sa_id = await _resolve_super_admin_id()
         if sa_id is not None:
             sa_overrides = await SuperAdminSegmentOverride.find(
                 SuperAdminSegmentOverride.super_admin_id == sa_id,
-                {"isActive": False},
             ).to_list()
             for row in sa_overrides:
-                if row.segment_name:
+                if not row.segment_name:
+                    continue
+                if row.isActive is False:
                     names.add(row.segment_name)
-            # A super-admin override that EXPLICITLY sets isActive = True
-            # should UN-hide a segment that's blocked at base level. Rare
-            # but keeps the semantics symmetric.
-            sa_unblock = await SuperAdminSegmentOverride.find(
-                SuperAdminSegmentOverride.super_admin_id == sa_id,
-                {"isActive": True},
-            ).to_list()
-            for row in sa_unblock:
-                names.discard(row.segment_name)
+                elif row.isActive is True:
+                    names.discard(row.segment_name)
     except Exception:
         logger.debug("inactive_admin_rows_super_admin_lookup_failed", exc_info=True)
+
+    # Layer 3: user's pool-tier override (broker > sub-admin).
+    # Same priority chain as get_effective_risk / get_effective_settings
+    # so block semantics stay consistent across the platform. Only one
+    # tier per user — never both.
+    #
+    # Layer 4: per-user override (UserSegmentOverride). Highest priority
+    # — admin can pause a segment for ONE user without touching the
+    # whole sub-admin pool. `isActive = False` on the user override hides
+    # the segment for that user; `isActive = True` un-hides it even if a
+    # higher tier blocked it.
+    if user_id is not None:
+        try:
+            uid = (
+                user_id
+                if isinstance(user_id, PydanticObjectId)
+                else PydanticObjectId(user_id)
+            )
+            user_doc = await User.get(uid)
+            if user_doc is not None:
+                pool_rows: list = []
+                broker_anc = user_doc.broker_ancestry or []
+                if broker_anc:
+                    broker_id = broker_anc[-1]
+                    pool_rows = await BrokerSegmentOverride.find(
+                        BrokerSegmentOverride.broker_id == broker_id,
+                    ).to_list()
+                elif user_doc.assigned_admin_id is not None:
+                    pool_rows = await SubAdminSegmentOverride.find(
+                        SubAdminSegmentOverride.sub_admin_id
+                        == user_doc.assigned_admin_id,
+                    ).to_list()
+                for row in pool_rows:
+                    if not row.segment_name:
+                        continue
+                    if row.isActive is False:
+                        names.add(row.segment_name)
+                    elif row.isActive is True:
+                        names.discard(row.segment_name)
+
+            # Layer 4: per-user overrides
+            user_overrides = await UserSegmentOverride.find(
+                UserSegmentOverride.user_id == uid,
+            ).to_list()
+            for row in user_overrides:
+                if not row.segment_name:
+                    continue
+                if row.isActive is False:
+                    names.add(row.segment_name)
+                elif row.isActive is True:
+                    names.discard(row.segment_name)
+        except Exception:
+            logger.debug(
+                "inactive_admin_rows_pool_lookup_failed", exc_info=True
+            )
 
     try:
         await cache_set(cache_key, sorted(names), ttl_sec=30)
@@ -747,11 +798,17 @@ async def inactive_admin_rows() -> set[str]:
     return names
 
 
-async def inactive_instrument_segments() -> set[str]:
+async def inactive_instrument_segments(
+    user_id: str | PydanticObjectId | None = None,
+) -> set[str]:
     """Translate inactive admin-row names back into the SegmentType values
     instruments are tagged with — so the user search can filter by
-    `instrument.segment NOT IN this_set`."""
-    admin_rows = await inactive_admin_rows()
+    `instrument.segment NOT IN this_set`.
+
+    Pass `user_id` to include the user's sub-admin / broker pool block
+    overrides; omit for the global (super-admin-only) view.
+    """
+    admin_rows = await inactive_admin_rows(user_id=user_id)
     if not admin_rows:
         return set()
     out: set[str] = set()
@@ -1027,6 +1084,7 @@ async def _invalidate_pool_netting_cache(sub_admin_id: PydanticObjectId) -> None
         await cache_delete_pattern(f"netting_eff:{doc['_id']}:*")
     await cache_delete_pattern("spread:*")
     await cache_delete_pattern("inactive_admin_rows")
+    await cache_delete_pattern("inactive_admin_rows:*")
 
 
 # ── Super-admin segment defaults (super-admin's own pool) ────────────
@@ -1099,6 +1157,7 @@ async def _invalidate_super_admin_pool_netting_cache() -> None:
         await cache_delete_pattern(f"netting_eff:{doc['_id']}:*")
     await cache_delete_pattern("spread:*")
     await cache_delete_pattern("inactive_admin_rows")
+    await cache_delete_pattern("inactive_admin_rows:*")
 
 
 # ── Broker segment defaults (broker's own pool) ──────────────────────
@@ -1162,6 +1221,7 @@ async def _invalidate_broker_pool_netting_cache(broker_id: PydanticObjectId) -> 
         await cache_delete_pattern(f"netting_eff:{doc['_id']}:*")
     await cache_delete_pattern("spread:*")
     await cache_delete_pattern("inactive_admin_rows")
+    await cache_delete_pattern("inactive_admin_rows:*")
 
 
 # ── Per-user segment overrides ────────────────────────────────────
@@ -1190,8 +1250,12 @@ async def upsert_user_override(
         if k in NETTING_FIELDS:
             setattr(existing, k, v)
     await existing.save()
-    # Wipe per-user effective-settings cache so next read reflects this override.
+    # Wipe per-user effective-settings + per-user inactive-rows cache so
+    # next read reflects this override. `isActive` is in NETTING_FIELDS,
+    # so a per-user "Block → No" lands on UserSegmentOverride and must
+    # immediately re-resolve the user's inactive-set on next poll.
     await cache_delete_pattern(f"netting_eff:{uid}:*")
+    await cache_delete_pattern(f"inactive_admin_rows:{uid}")
     return existing
 
 
@@ -1208,6 +1272,7 @@ async def delete_user_override(
         UserSegmentOverride.symbol == sym,
     ).delete()
     await cache_delete_pattern(f"netting_eff:{uid}:*")
+    await cache_delete_pattern(f"inactive_admin_rows:{uid}")
 
 
 # ── Effective resolver (legacy field-name shim for order_validator) ─

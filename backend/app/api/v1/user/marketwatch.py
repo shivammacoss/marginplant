@@ -178,14 +178,15 @@ async def list_segment_items(segment_name: str, user: CurrentUser):
         raise HTTPException(status_code=400, detail=f"Unsupported segment: {segment_name}")
 
     # If the bucket itself is paused, return nothing — same effect as
-    # the search filter hiding the chip.
+    # the search filter hiding the chip. User-scoped so sub-admin pool
+    # blocks reach their members.
     from app.services.netting_service import inactive_admin_rows, inactive_instrument_segments
 
-    inactive_admin = await inactive_admin_rows()
+    inactive_admin = await inactive_admin_rows(user_id=user.id)
     if seg in inactive_admin:
         return APIResponse(data=[])
 
-    inactive_segs = await inactive_instrument_segments()
+    inactive_segs = await inactive_instrument_segments(user_id=user.id)
 
     wl = await _get_or_create_segment_watchlist(user.id, seg)
     items = (

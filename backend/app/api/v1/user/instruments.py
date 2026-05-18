@@ -182,9 +182,11 @@ async def search(
 
     # Admin-side "Block → isActive = No" → segment is hidden from user
     # search entirely. Resolved once per request; the netting service
-    # caches the set for 30 s so this is cheap.
-    inactive_admin = await inactive_admin_rows()
-    inactive_segs = await inactive_instrument_segments()
+    # caches the set for 30 s per user so this is cheap. `user.id` is
+    # passed so a sub-admin's pool-tier block reaches their members'
+    # search (super-admin / global only would miss sub-admin overrides).
+    inactive_admin = await inactive_admin_rows(user_id=user.id)
+    inactive_segs = await inactive_instrument_segments(user_id=user.id)
 
     def _kite_row_admin_row(row: dict) -> str | None:
         ex = (row.get("exchange") or "").upper()
@@ -548,7 +550,7 @@ async def get_instrument(token: str, user: CurrentUser):
 
     from app.services.netting_service import inactive_instrument_segments
 
-    inactive_segs = await inactive_instrument_segments()
+    inactive_segs = await inactive_instrument_segments(user_id=user.id)
     if inactive_segs and i.segment in inactive_segs:
         raise HTTPException(
             status_code=403,
