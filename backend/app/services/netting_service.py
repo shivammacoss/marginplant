@@ -672,9 +672,15 @@ async def inactive_admin_rows() -> set[str]:
     candidates for a segment they can't trade. Validator still has its own
     server-side gate as a belt-and-braces check.
 
-    Cached in Redis for 30 s under a single key — admins toggling Block
-    fields propagate to the next user search within one tick after Save
-    (the existing eff-cache wipe drops this key too).
+    Resolution (highest wins — same chain as the rest of segment settings):
+      1. Base NettingSegment.isActive (platform seed default = True)
+      2. SuperAdminSegmentOverride.isActive (platform-wide override)
+      3. Sub-admin / broker overrides are pool-scoped, NOT consulted here
+         because this function returns a GLOBAL "hidden everywhere" list.
+         Per-pool blocking still works via the validator's effective-
+         settings check, which IS tier-aware.
+
+    Cached in Redis for 30 s; admin save flow wipes this key.
     """
     cache_key = "inactive_admin_rows"
     try:
@@ -683,8 +689,39 @@ async def inactive_admin_rows() -> set[str]:
             return set(cached)
     except Exception:
         pass
-    rows = await NettingSegment.find({"isActive": False}).to_list()
-    names = {r.name for r in rows if r.name}
+
+    # Start with base segments flagged inactive in the seed row.
+    base_rows = await NettingSegment.find({"isActive": False}).to_list()
+    names = {r.name for r in base_rows if r.name}
+
+    # Super-admin's platform-wide override sits above the seed. The admin
+    # UI's "Block → Is Active = No" toggle writes to SuperAdminSegmentOverride
+    # (not the base row) so without this merge the toggle never reached the
+    # user-side instrument list — the segment chip + every instrument under
+    # it stayed visible after save. User report: "block kar diya hu lekin
+    # user side me dikha raha hai".
+    try:
+        sa_id = await _resolve_super_admin_id()
+        if sa_id is not None:
+            sa_overrides = await SuperAdminSegmentOverride.find(
+                SuperAdminSegmentOverride.super_admin_id == sa_id,
+                {"isActive": False},
+            ).to_list()
+            for row in sa_overrides:
+                if row.segment_name:
+                    names.add(row.segment_name)
+            # A super-admin override that EXPLICITLY sets isActive = True
+            # should UN-hide a segment that's blocked at base level. Rare
+            # but keeps the semantics symmetric.
+            sa_unblock = await SuperAdminSegmentOverride.find(
+                SuperAdminSegmentOverride.super_admin_id == sa_id,
+                {"isActive": True},
+            ).to_list()
+            for row in sa_unblock:
+                names.discard(row.segment_name)
+    except Exception:
+        logger.debug("inactive_admin_rows_super_admin_lookup_failed", exc_info=True)
+
     try:
         await cache_set(cache_key, sorted(names), ttl_sec=30)
     except Exception:
@@ -963,18 +1000,15 @@ async def delete_sub_admin_segment_override(
 
 async def _invalidate_pool_netting_cache(sub_admin_id: PydanticObjectId) -> None:
     """Wipes the per-user `netting_eff:<uid>:*` cache for every user
-    assigned to this sub-admin, plus the segment-wide `spread:*` cache.
-    The spread cache is segment+symbol keyed (not user-keyed), so a single
-    wipe makes any spread edit visible to the live market-tick overlay
-    within the next 250 ms broadcast — without this admins saw the
-    typed-in spread sit in `SuperAdminSegmentOverride` while the live
-    feed kept using the previous value for up to 30 s (the spread
-    cache's TTL)."""
+    assigned to this sub-admin, plus the segment-wide `spread:*` and
+    `inactive_admin_rows` caches so segment-block toggles take effect
+    on the user-side instrument search within the next poll."""
     coll = User.get_motor_collection()
     cursor = coll.find({"assigned_admin_id": sub_admin_id}, {"_id": 1})
     async for doc in cursor:
         await cache_delete_pattern(f"netting_eff:{doc['_id']}:*")
     await cache_delete_pattern("spread:*")
+    await cache_delete_pattern("inactive_admin_rows")
 
 
 # ── Super-admin segment defaults (super-admin's own pool) ────────────
@@ -1031,11 +1065,13 @@ async def delete_super_admin_segment_override(
 async def _invalidate_super_admin_pool_netting_cache() -> None:
     """Wipes per-user netting cache for every user in the super-admin's
     pool (i.e. ``assigned_admin_id IS NULL`` AND no broker), plus the
-    segment-wide `spread:*` cache. The spread cache is keyed by
-    (segment, symbol) — not user — so a single wipe makes any spread
-    edit visible to the next 250 ms market-tick broadcast. Without this
-    the live feed kept using the previous spread for up to 30 s (the
-    cache's TTL) even after the override was saved."""
+    segment-wide `spread:*` cache and the GLOBAL `inactive_admin_rows`
+    cache. The spread + inactive caches are keyed by segment (not user)
+    so a single wipe makes any tier-override edit visible to the next
+    user search / market-tick broadcast. Without these the live feed
+    kept using the previous values for up to 30 s (the cache TTL) even
+    after the override was saved — the user-reported "block kar diya
+    par dikha raha hai" bug."""
     coll = User.get_motor_collection()
     cursor = coll.find(
         {"assigned_admin_id": None, "assigned_broker_id": None},
@@ -1044,6 +1080,7 @@ async def _invalidate_super_admin_pool_netting_cache() -> None:
     async for doc in cursor:
         await cache_delete_pattern(f"netting_eff:{doc['_id']}:*")
     await cache_delete_pattern("spread:*")
+    await cache_delete_pattern("inactive_admin_rows")
 
 
 # ── Broker segment defaults (broker's own pool) ──────────────────────
@@ -1098,13 +1135,15 @@ async def delete_broker_segment_override(
 async def _invalidate_broker_pool_netting_cache(broker_id: PydanticObjectId) -> None:
     """Wipes per-user netting cache for every user whose
     ``assigned_broker_id`` matches this broker (the broker's direct clients),
-    plus the segment-wide `spread:*` cache so spread edits land on the
-    live tick overlay within the next 250 ms broadcast."""
+    plus the segment-wide `spread:*` and `inactive_admin_rows` caches so
+    spread + block-toggle edits land on the live overlay / instrument
+    search within the next 250 ms broadcast / poll."""
     coll = User.get_motor_collection()
     cursor = coll.find({"assigned_broker_id": broker_id}, {"_id": 1})
     async for doc in cursor:
         await cache_delete_pattern(f"netting_eff:{doc['_id']}:*")
     await cache_delete_pattern("spread:*")
+    await cache_delete_pattern("inactive_admin_rows")
 
 
 # ── Per-user segment overrides ────────────────────────────────────
