@@ -118,10 +118,24 @@ async def validate(
             UserPositionTracker.segment_type == segment_type,
             UserPositionTracker.instrument_token == instrument.token,
         ),
+        # IMPORTANT: lookup keys must match the matching_engine's
+        # `existing_pos` query (services/matching_engine.py) — they
+        # work as a pair (validator caps the order, matching_engine
+        # merges the fill into the same position row). Previously the
+        # validator filtered by `segment_type` while the engine filtered
+        # by `product_type`, so a position opened under an older
+        # segment-name spelling (e.g. CRYPTO_PERPETUAL renamed to
+        # CRYPTO) was invisible to the validator's `signed_held` /
+        # `projected_net` calc — every follow-up order saw "no existing
+        # position", passed the `max_each_lot` cap on its own lots, and
+        # the engine merrily pyramided into the existing row. End-user
+        # symptom: lots stop at the per-order cap but the position size
+        # keeps climbing past `maxLots/script` (the user-reported "size
+        # badhate ja raha hai" bug).
         Position.find_one(
             Position.user_id == user.id,
             Position.instrument.token == instrument.token,
-            Position.segment_type == segment_type,
+            Position.product_type == product_type,
             Position.status == PositionStatus.OPEN,
         ),
         market_data_service.get_ltp(instrument.token),
