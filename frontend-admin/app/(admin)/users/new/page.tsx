@@ -1,10 +1,12 @@
 "use client";
 
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
+import { Eye, EyeOff } from "lucide-react";
 import { UsersAPI } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,20 +17,31 @@ import { PageHeader } from "@/components/common/PageHeader";
 // This page creates regular trading users (CLIENT). Sub-admins are minted
 // from /management/sub-admins (super-admin only) — role is therefore not
 // exposed here.
-const schema = z.object({
-  full_name: z.string().min(2),
-  email: z.string().email(),
-  mobile: z.string().regex(/^[6-9]\d{9}$/, "10-digit Indian mobile"),
-  password: z.string().min(8),
-  is_demo: z.boolean(),
-  initial_balance: z.coerce.number().min(0).default(0),
-  credit_limit: z.coerce.number().min(0).default(0),
-  pan: z.string().optional(),
-});
+const schema = z
+  .object({
+    full_name: z.string().min(2),
+    email: z.string().email(),
+    mobile: z.string().regex(/^[6-9]\d{9}$/, "10-digit Indian mobile"),
+    password: z.string().min(8),
+    // Confirmation field — added after a sub-admin typo'd the initial
+    // password (Prachi / 18-May-2026) and the new user couldn't log in.
+    // Backend never gets this field; the schema-level `refine` below
+    // catches the mismatch client-side before submit.
+    confirm_password: z.string().min(8),
+    is_demo: z.boolean(),
+    initial_balance: z.coerce.number().min(0).default(0),
+    credit_limit: z.coerce.number().min(0).default(0),
+    pan: z.string().optional(),
+  })
+  .refine((v) => v.password === v.confirm_password, {
+    path: ["confirm_password"],
+    message: "Passwords don't match",
+  });
 type Values = z.infer<typeof schema>;
 
 export default function NewUserPage() {
   const router = useRouter();
+  const [showPassword, setShowPassword] = useState(false);
   const form = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: {
@@ -36,6 +49,7 @@ export default function NewUserPage() {
       email: "",
       mobile: "",
       password: "",
+      confirm_password: "",
       is_demo: false,
       initial_balance: 0,
       credit_limit: 0,
@@ -44,8 +58,13 @@ export default function NewUserPage() {
   });
 
   async function onSubmit(v: Values) {
+    // confirm_password is a client-only guard — strip before the POST so
+    // the backend's CreateUserRequest schema (which doesn't know about
+    // this field) doesn't reject the request as `extra=forbid`.
+    const { confirm_password: _confirm, ...payload } = v;
+    void _confirm;
     try {
-      const created = await UsersAPI.create({ ...v, role: "CLIENT" });
+      const created = await UsersAPI.create({ ...payload, role: "CLIENT" });
       toast.success(`Created ${created.user_code}`);
       router.push(`/users/${created.id}`);
     } catch (e: any) {
@@ -74,7 +93,31 @@ export default function NewUserPage() {
               <Input maxLength={10} {...form.register("mobile")} />
             </Field>
             <Field label="Initial password" error={form.formState.errors.password?.message}>
-              <Input type="password" {...form.register("password")} />
+              <div className="relative">
+                <Input
+                  type={showPassword ? "text" : "password"}
+                  className="pr-10"
+                  {...form.register("password")}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((s) => !s)}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  title={showPassword ? "Hide password" : "Show password"}
+                  className="absolute inset-y-0 right-0 grid w-10 place-items-center text-muted-foreground hover:text-foreground"
+                >
+                  {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                </button>
+              </div>
+            </Field>
+            <Field
+              label="Confirm password"
+              error={form.formState.errors.confirm_password?.message}
+            >
+              <Input
+                type={showPassword ? "text" : "password"}
+                {...form.register("confirm_password")}
+              />
             </Field>
             <Field label="PAN (optional)">
               <Input className="uppercase" maxLength={10} {...form.register("pan")} />
