@@ -411,8 +411,29 @@ async def trigger_pending_orders() -> int:
     # the first worker to claim the order_id key proceeds; the rest skip.
     from app.core.redis_client import idempotency_check_and_set
 
+    # Market-closed gate — mirror of the risk_enforcer one. The poller
+    # ticks even when the exchange is shut, but the cached LTP is the
+    # last open-market tick. Firing a LIMIT / SL-M against that stale
+    # value books a phantom fill at a price nobody traded at — the same
+    # class of bug as auto-firing brackets after close. Skip orders whose
+    # segment is past close; let them sit until reopen.
+    from app.utils.time_utils import is_after_close, is_weekend, now_ist as _now_ist_pend
+
+    _now_pend = _now_ist_pend()
+    _is_weekend_pend = is_weekend(_now_pend.date())
+
+    def _order_segment_closed(seg: str | None) -> bool:
+        if not seg:
+            return False
+        if _is_weekend_pend and seg.startswith(("NSE_", "BSE_", "MCX_", "NFO_", "BFO_")):
+            return True
+        return is_after_close(seg, _now_pend)
+
     for o in rows:
         try:
+            seg = getattr(o.instrument, "segment", None)
+            if _order_segment_closed(str(seg) if seg else None):
+                continue
             ltp = ltp_map.get(o.instrument.token)
             if ltp is None:
                 continue
