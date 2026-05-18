@@ -165,16 +165,55 @@ async def _get_or_create_segment_watchlist(
 async def list_segment_items(segment_name: str, user: CurrentUser):
     """Return only the instruments THIS user has explicitly added under
     the given Indian-segment chip (NSE_EQ, MCX_OPT, etc.). Empty list on
-    first access — the user adds items via the search-and-add flow."""
+    first access — the user adds items via the search-and-add flow.
+
+    Block-aware: when the admin has paused the segment, returns an empty
+    list so the favourite tile renders empty + the chip itself is hidden
+    by the InstrumentsPanel filter. Also auto-hides any stored items
+    whose instrument's CURRENT segment is in the inactive set (covers
+    cross-segment items added under a different bucket).
+    """
     seg = segment_name.upper()
     if seg not in _ALLOWED_SEG_NAMES:
         raise HTTPException(status_code=400, detail=f"Unsupported segment: {segment_name}")
+
+    # If the bucket itself is paused, return nothing — same effect as
+    # the search filter hiding the chip.
+    from app.services.netting_service import inactive_admin_rows, inactive_instrument_segments
+
+    inactive_admin = await inactive_admin_rows()
+    if seg in inactive_admin:
+        return APIResponse(data=[])
+
+    inactive_segs = await inactive_instrument_segments()
+
     wl = await _get_or_create_segment_watchlist(user.id, seg)
     items = (
         await WatchlistItem.find(WatchlistItem.watchlist_id == wl.id)
         .sort("sort_order")
         .to_list()
     )
+
+    # Cross-segment hide: if any stored item points at an instrument
+    # whose segment is now inactive, drop it from the response so the
+    # tile cleans itself up on the next poll. Auditing the DB row is
+    # left to a periodic background sweep; this filter is the user-
+    # facing zero-cost path.
+    if inactive_segs:
+        from app.models.instrument import Instrument
+
+        tokens = [it.instrument_token for it in items]
+        token_segs: dict[str, str] = {}
+        if tokens:
+            insts = await Instrument.find({"token": {"$in": tokens}}).to_list()
+            for inst in insts:
+                token_segs[inst.token] = str(inst.segment)
+        items = [
+            it
+            for it in items
+            if token_segs.get(it.instrument_token, "") not in inactive_segs
+        ]
+
     return APIResponse(
         data=[
             {

@@ -536,6 +536,25 @@ async def get_instrument(token: str, user: CurrentUser):
     if i is None:
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail=f"Instrument {token} not found")
+
+    # Segment-block gate: even direct-link / favourite-card access must
+    # be denied when the admin has paused the segment. User explicitly
+    # asked: "admin block kare to chart bhi open na ho, favourite me
+    # bhi remove ho jaye." Returning 403 here gives the terminal/chart
+    # a clear signal to redirect back to home; the watchlist
+    # endpoint filters items with the same gate so the entry disappears
+    # from the favourites list in the same poll window.
+    from fastapi import HTTPException
+
+    from app.services.netting_service import inactive_instrument_segments
+
+    inactive_segs = await inactive_instrument_segments()
+    if inactive_segs and i.segment in inactive_segs:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Segment {i.segment} is paused by admin — instrument unavailable",
+        )
+
     return APIResponse(data=_serialize(i))
 
 
