@@ -560,30 +560,57 @@ async def validate(
     #     picked earlier in the resolver) → the value to use today.
     #   • `expiry_margin_as_percent` → when False the value above is a
     #     flat ₹/lot (mirrors `margin_calc_mode = fixed`); when True
-    #     it's % of notional. Lets admin run normal trading on, say,
-    #     Times-leverage and still impose a punitive flat ₹ on expiry.
+    #     it's % of notional / a leverage multiplier (interpretation
+    #     follows the segment's `margin_calc_mode`). Lets admin run
+    #     normal trading on, say, Times-leverage and still impose a
+    #     punitive flat ₹ on expiry.
     is_expiry_today = bool(instrument.expiry and instrument.expiry == now_ist().date())
     if is_expiry_today:
         expiry_margin = float(
-            s.get("expiry_intraday_margin") or s.get("margin_percentage") or 100.0
+            s.get("expiry_intraday_margin")
+            or s.get("margin_percentage")
+            or s.get("leverage")
+            or 100.0
         )
         expiry_as_percent = bool(s.get("expiry_margin_as_percent", True))
-        if expiry_as_percent:
-            # Percent path — replace the segment's margin_percentage. The
-            # downstream calc continues through `notional × pct ÷ leverage`.
-            s["margin_percentage"] = expiry_margin
-            # Force `leverage = 1` so the value is consumed straight as
-            # % of notional even if the segment is in Times mode.
-            s["leverage"] = 1.0
-        else:
-            # Flat-₹-per-lot path — switch the calc into fixed mode for
-            # this order, with the expiry-day value as the per-lot rupee
-            # amount. Zero out percent/leverage so the downstream check
-            # falls into the fixed-margin branch below.
+        seg_mode = (s.get("margin_calc_mode") or "").lower()
+        if not expiry_as_percent:
+            # Admin explicitly opted for flat ₹/lot on expiry — switch
+            # the calc into fixed mode regardless of segment-default mode.
             s["margin_calc_mode"] = "fixed"
             s["fixed_margin_per_lot"] = expiry_margin
             s["margin_percentage"] = 0.0
             s["leverage"] = 1.0
+        elif seg_mode == "times":
+            # Times segment + percent expiry knob → admin's number is a
+            # LEVERAGE multiplier, same units as `intradayMargin` in Times
+            # mode (e.g. 500 means 500×). Previously the code force-set
+            # `leverage = 1` and stuffed the multiplier into
+            # `margin_percentage`, which turned a 500× setting into "500%
+            # of notional × ÷ 1" — i.e. 5× the notional locked. On a
+            # ₹10L crude lot that was ₹51L margin required and every
+            # expiry-day order failed with InsufficientFunds. Now we
+            # preserve the Times semantics so the user pays the same
+            # margin tier on expiry day unless admin explicitly changed
+            # `expiryDayIntradayMargin` to a stricter value.
+            s["leverage"] = max(1.0, expiry_margin)
+            s["margin_percentage"] = 100.0
+            s["fixed_margin_per_lot"] = 0.0
+        elif seg_mode == "fixed":
+            # Fixed segment + percent expiry knob → ambiguous (admin
+            # chose Fixed ₹/lot but didn't flip the `as_percent` flag).
+            # Honour the existing fixed semantics: the expiry value is
+            # ₹/lot.
+            s["margin_calc_mode"] = "fixed"
+            s["fixed_margin_per_lot"] = expiry_margin
+            s["margin_percentage"] = 0.0
+            s["leverage"] = 1.0
+        else:
+            # Legacy "percent" mode (or unknown) → preserve the original
+            # behaviour: value is a % of notional with leverage 1.
+            s["margin_percentage"] = expiry_margin
+            s["leverage"] = 1.0
+            s["fixed_margin_per_lot"] = 0.0
 
     # 9) margin check (all-Decimal arithmetic — never mix Decimal × float)
     margin_pct = to_decimal(s.get("margin_percentage") or 100.0) / to_decimal(100)
