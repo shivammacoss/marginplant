@@ -342,6 +342,43 @@ async def _find_or_create_from_zerodha(token: str) -> Instrument | None:
                 except Exception:
                     pass
 
+            # Stock F&O fallback — the `get_canonical_lot_size` table only
+            # covers INDEX futures (NIFTY / BANKNIFTY / FINNIFTY / …). Stock
+            # contracts (BOSCHLTD, HDFCBANK, RELIANCE, …) live entirely in
+            # the Zerodha CSV cache, with quarterly SEBI-driven lot
+            # revisions that the cache reflects. Without this lookup a
+            # contract first viewed BEFORE the CSV cache was warmed got
+            # stuck at fallback `lot_size = 1`, which then sent the trade
+            # panel's margin to ~₹74 instead of ~₹1,858 for a BOSCHLTD25
+            # lot — the user-reported "ek hi underlying ke alag expiry me
+            # lot_size alag a rahe hain" bug. Trust whatever the CSV says
+            # (including legitimate revisions across expiries).
+            if int(inst.lot_size or 0) <= 1:
+                try:
+                    token_int_csv = int(token)
+                except (TypeError, ValueError):
+                    token_int_csv = None
+                if token_int_csv is not None:
+                    from app.services.zerodha_service import zerodha as _zerodha_csv
+
+                    csv_lot = 0
+                    for _ex_key, _rows in _zerodha_csv._instruments_cache.items():
+                        for _r in _rows:
+                            try:
+                                if int(_r.get("token") or 0) == token_int_csv:
+                                    csv_lot = int(_r.get("lotSize") or 0)
+                                    break
+                            except Exception:
+                                continue
+                        if csv_lot > 0:
+                            break
+                    if csv_lot > 1:
+                        inst.lot_size = csv_lot
+                        try:
+                            await inst.save()
+                        except Exception:
+                            pass
+
         # On-demand Zerodha WS subscribe for derivatives. Without this an
         # instrument that exists in MongoDB (auto-mirrored from a CSV sync
         # or admin bulk subscribe) but isn't actively on a WS connection
