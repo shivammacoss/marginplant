@@ -13,14 +13,21 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from beanie import PydanticObjectId
+from bson import Decimal128
 
-from app.models.pnl_sharing import PnlSharingAgreement, SettlementCadence
+from app.models.pnl_sharing import (
+    AgreementStatus,
+    PnlSharingAgreement,
+    SettlementCadence,
+    SettlementMode,
+)
 from app.models.position import Position, PositionStatus
 from app.models.transaction import TransactionType, WalletTransaction
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.services import market_data_service
 from app.services.admin_settlement_service import _realised_inr
 from app.utils.decimal_utils import quantize_money, to_decimal
+from app.utils.time_utils import now_utc
 
 IST = ZoneInfo("Asia/Kolkata")
 UTC = ZoneInfo("UTC")
@@ -167,3 +174,163 @@ async def compute_sharing_snapshot(
         sharing_bkg_inr=sharing_bkg,
         sharing_total_inr=sharing_pnl + sharing_bkg,
     )
+
+
+# ── Agreement CRUD ───────────────────────────────────────────────────
+class AgreementValidationError(ValueError):
+    """Validation failure on agreement create/update."""
+
+
+class AgreementConflict(Exception):
+    """An ACTIVE/PAUSED agreement for (admin, broker) already exists."""
+
+
+async def create_agreement(
+    *,
+    actor: User,
+    admin_id: PydanticObjectId,
+    broker_id: PydanticObjectId,
+    share_pct: Decimal,
+    settlement_mode: SettlementMode,
+    settlement_cadence: SettlementCadence | None,
+) -> PnlSharingAgreement:
+    if not (Decimal("0") <= share_pct <= Decimal("100")):
+        raise AgreementValidationError("share_pct must be in [0, 100]")
+    if settlement_mode == SettlementMode.AUTO and settlement_cadence is None:
+        raise AgreementValidationError("AUTO mode requires cadence")
+    if settlement_mode == SettlementMode.MANUAL and settlement_cadence is not None:
+        raise AgreementValidationError("MANUAL mode must not set cadence")
+
+    admin = await User.get(admin_id)
+    if admin is None or admin.role != UserRole.ADMIN:
+        raise AgreementValidationError("admin_id is not a valid admin user")
+
+    broker = await User.get(broker_id)
+    if (
+        broker is None
+        or broker.role != UserRole.BROKER
+        or broker.assigned_admin_id != admin_id
+    ):
+        raise AgreementValidationError("broker_id is not a broker under admin_id")
+
+    existing = await PnlSharingAgreement.find_one(
+        PnlSharingAgreement.admin_id == admin_id,
+        PnlSharingAgreement.broker_id == broker_id,
+        PnlSharingAgreement.status != AgreementStatus.ENDED,
+    )
+    if existing is not None:
+        raise AgreementConflict(f"Active agreement already exists: {existing.id}")
+
+    a = PnlSharingAgreement(
+        admin_id=admin_id,
+        broker_id=broker_id,
+        share_pct=Decimal128(str(share_pct)),
+        settlement_mode=settlement_mode,
+        settlement_cadence=settlement_cadence,
+        status=AgreementStatus.ACTIVE,
+        effective_from=now_utc(),
+        created_by=actor.id,
+        last_modified_by=actor.id,
+    )
+    await a.insert()
+    return a
+
+
+async def update_agreement(
+    *,
+    actor: User,
+    agreement_id: PydanticObjectId,
+    share_pct: Decimal | None = None,
+    settlement_mode: SettlementMode | None = None,
+    settlement_cadence: SettlementCadence | None = None,
+) -> PnlSharingAgreement:
+    a = await PnlSharingAgreement.get(agreement_id)
+    if a is None:
+        raise AgreementValidationError("agreement not found")
+    if a.status == AgreementStatus.ENDED:
+        raise AgreementValidationError("cannot edit ENDED agreement")
+
+    if share_pct is not None:
+        if not (Decimal("0") <= share_pct <= Decimal("100")):
+            raise AgreementValidationError("share_pct must be in [0, 100]")
+        a.share_pct = Decimal128(str(share_pct))
+
+    if settlement_mode is not None:
+        a.settlement_mode = settlement_mode
+        if settlement_mode == SettlementMode.MANUAL:
+            a.settlement_cadence = None
+    if settlement_cadence is not None:
+        a.settlement_cadence = settlement_cadence
+
+    if a.settlement_mode == SettlementMode.AUTO and a.settlement_cadence is None:
+        raise AgreementValidationError("AUTO mode requires cadence")
+
+    a.last_modified_by = actor.id
+    await a.save()
+    return a
+
+
+async def pause_agreement(
+    *, actor: User, agreement_id: PydanticObjectId
+) -> PnlSharingAgreement:
+    a = await PnlSharingAgreement.get(agreement_id)
+    if a is None:
+        raise AgreementValidationError("agreement not found")
+    if a.status != AgreementStatus.ACTIVE:
+        raise AgreementValidationError(f"cannot pause from status {a.status}")
+    a.status = AgreementStatus.PAUSED
+    a.last_modified_by = actor.id
+    await a.save()
+    return a
+
+
+async def resume_agreement(
+    *, actor: User, agreement_id: PydanticObjectId
+) -> PnlSharingAgreement:
+    a = await PnlSharingAgreement.get(agreement_id)
+    if a is None:
+        raise AgreementValidationError("agreement not found")
+    if a.status != AgreementStatus.PAUSED:
+        raise AgreementValidationError(f"cannot resume from status {a.status}")
+    a.status = AgreementStatus.ACTIVE
+    a.last_modified_by = actor.id
+    await a.save()
+    return a
+
+
+async def end_agreement(
+    *, actor: User, agreement_id: PydanticObjectId
+) -> PnlSharingAgreement:
+    a = await PnlSharingAgreement.get(agreement_id)
+    if a is None:
+        raise AgreementValidationError("agreement not found")
+    if a.status == AgreementStatus.ENDED:
+        raise AgreementValidationError("already ended")
+    a.status = AgreementStatus.ENDED
+    a.effective_until = now_utc()
+    a.last_modified_by = actor.id
+    await a.save()
+    return a
+
+
+async def list_agreements_for_actor(
+    *,
+    actor: User,
+    status: AgreementStatus | None = None,
+    admin_id: PydanticObjectId | None = None,
+    broker_id: PydanticObjectId | None = None,
+    skip: int = 0,
+    limit: int = 50,
+) -> list[PnlSharingAgreement]:
+    q = PnlSharingAgreement.find()
+    if actor.role == UserRole.ADMIN:
+        q = q.find(PnlSharingAgreement.admin_id == actor.id)
+    elif actor.role == UserRole.BROKER:
+        q = q.find(PnlSharingAgreement.broker_id == actor.id)
+    if status is not None:
+        q = q.find(PnlSharingAgreement.status == status)
+    if admin_id is not None:
+        q = q.find(PnlSharingAgreement.admin_id == admin_id)
+    if broker_id is not None:
+        q = q.find(PnlSharingAgreement.broker_id == broker_id)
+    return await q.skip(skip).limit(limit).to_list()
