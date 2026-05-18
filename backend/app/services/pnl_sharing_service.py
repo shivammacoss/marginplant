@@ -14,7 +14,10 @@ from zoneinfo import ZoneInfo
 
 from beanie import PydanticObjectId
 from bson import Decimal128
+from pymongo.errors import DuplicateKeyError
 
+from app.core.exceptions import ConflictError, ValidationFailedError
+from app.models.audit_log import AuditAction
 from app.models.pnl_sharing import (
     AgreementStatus,
     PnlSharingAgreement,
@@ -26,6 +29,7 @@ from app.models.transaction import TransactionType, WalletTransaction
 from app.models.user import User, UserRole
 from app.services import market_data_service
 from app.services.admin_settlement_service import _realised_inr
+from app.services.audit_service import log_event
 from app.utils.decimal_utils import quantize_money, to_decimal
 from app.utils.time_utils import now_utc
 
@@ -177,11 +181,11 @@ async def compute_sharing_snapshot(
 
 
 # ── Agreement CRUD ───────────────────────────────────────────────────
-class AgreementValidationError(ValueError):
+class AgreementValidationError(ValidationFailedError):
     """Validation failure on agreement create/update."""
 
 
-class AgreementConflict(Exception):
+class AgreementConflict(ConflictError):
     """An ACTIVE/PAUSED agreement for (admin, broker) already exists."""
 
 
@@ -232,7 +236,32 @@ async def create_agreement(
         created_by=actor.id,
         last_modified_by=actor.id,
     )
-    await a.insert()
+    try:
+        await a.insert()
+    except DuplicateKeyError as e:
+        # Two parallel callers slipped past the find_one pre-check; the unique
+        # partial index in PnlSharingAgreement collapses the race into a clean
+        # conflict instead of a 500.
+        raise AgreementConflict(
+            f"Active agreement already exists for admin={admin_id} broker={broker_id}"
+        ) from e
+
+    await log_event(
+        action=AuditAction.PNL_SHARING_AGREEMENT_CREATE,
+        entity_type="PnlSharingAgreement",
+        entity_id=a.id,
+        actor_id=actor.id,
+        target_user_id=broker_id,
+        new_values={
+            "admin_id": str(admin_id),
+            "broker_id": str(broker_id),
+            "share_pct": str(share_pct),
+            "settlement_mode": settlement_mode.value,
+            "settlement_cadence": settlement_cadence.value
+            if settlement_cadence
+            else None,
+        },
+    )
     return a
 
 
@@ -249,6 +278,14 @@ async def update_agreement(
         raise AgreementValidationError("agreement not found")
     if a.status == AgreementStatus.ENDED:
         raise AgreementValidationError("cannot edit ENDED agreement")
+
+    old_values = {
+        "share_pct": str(a.share_pct),
+        "settlement_mode": a.settlement_mode.value,
+        "settlement_cadence": a.settlement_cadence.value
+        if a.settlement_cadence
+        else None,
+    }
 
     if share_pct is not None:
         if not (Decimal("0") <= share_pct <= Decimal("100")):
@@ -267,6 +304,21 @@ async def update_agreement(
 
     a.last_modified_by = actor.id
     await a.save()
+    await log_event(
+        action=AuditAction.PNL_SHARING_AGREEMENT_UPDATE,
+        entity_type="PnlSharingAgreement",
+        entity_id=a.id,
+        actor_id=actor.id,
+        target_user_id=a.broker_id,
+        old_values=old_values,
+        new_values={
+            "share_pct": str(a.share_pct),
+            "settlement_mode": a.settlement_mode.value,
+            "settlement_cadence": a.settlement_cadence.value
+            if a.settlement_cadence
+            else None,
+        },
+    )
     return a
 
 
@@ -281,6 +333,15 @@ async def pause_agreement(
     a.status = AgreementStatus.PAUSED
     a.last_modified_by = actor.id
     await a.save()
+    await log_event(
+        action=AuditAction.PNL_SHARING_AGREEMENT_PAUSE,
+        entity_type="PnlSharingAgreement",
+        entity_id=a.id,
+        actor_id=actor.id,
+        target_user_id=a.broker_id,
+        old_values={"status": AgreementStatus.ACTIVE.value},
+        new_values={"status": AgreementStatus.PAUSED.value},
+    )
     return a
 
 
@@ -295,6 +356,15 @@ async def resume_agreement(
     a.status = AgreementStatus.ACTIVE
     a.last_modified_by = actor.id
     await a.save()
+    await log_event(
+        action=AuditAction.PNL_SHARING_AGREEMENT_RESUME,
+        entity_type="PnlSharingAgreement",
+        entity_id=a.id,
+        actor_id=actor.id,
+        target_user_id=a.broker_id,
+        old_values={"status": AgreementStatus.PAUSED.value},
+        new_values={"status": AgreementStatus.ACTIVE.value},
+    )
     return a
 
 
@@ -306,10 +376,20 @@ async def end_agreement(
         raise AgreementValidationError("agreement not found")
     if a.status == AgreementStatus.ENDED:
         raise AgreementValidationError("already ended")
+    old_status = a.status
     a.status = AgreementStatus.ENDED
     a.effective_until = now_utc()
     a.last_modified_by = actor.id
     await a.save()
+    await log_event(
+        action=AuditAction.PNL_SHARING_AGREEMENT_END,
+        entity_type="PnlSharingAgreement",
+        entity_id=a.id,
+        actor_id=actor.id,
+        target_user_id=a.broker_id,
+        old_values={"status": old_status.value},
+        new_values={"status": AgreementStatus.ENDED.value},
+    )
     return a
 
 
