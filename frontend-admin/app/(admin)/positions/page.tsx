@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertOctagon, CalendarDays, Pencil, Search, TrendingDown, TrendingUp, Trash2, X, X as XIcon } from "lucide-react";
+import { AlertOctagon, CalendarDays, Info, Pencil, Search, TrendingDown, TrendingUp, Trash2, X, X as XIcon } from "lucide-react";
 import { TradingAPI, UsersAPI } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -395,8 +395,11 @@ function AdminPositionsInner() {
     {
       // Volume = total lot count (contracts ÷ lot_size). Renders "—" for
       // equity rows where lot_size is 1 (Qty already conveys the size).
-      // Tabular-nums alignment keeps a column of mixed integer/decimal
-      // values visually clean.
+      // Cell carries a small (i) icon as a visual affordance — clicking
+      // anywhere in the row opens the per-position Netting Entries
+      // breakdown, and admins were missing the click cue without an
+      // explicit indicator. Tabular-nums alignment keeps a column of
+      // mixed integer / decimal values visually clean.
       key: "volume",
       header: "Volume",
       align: "right" as const,
@@ -406,10 +409,28 @@ function AdminPositionsInner() {
           ? Math.abs(Number(r.opening_quantity ?? 0))
           : Math.abs(Number(r.quantity));
         const lotSize = Number(r.lot_size ?? r.instrument?.lot_size ?? 1) || 1;
-        if (lotSize <= 1 || rawQty <= 0) return <span>—</span>;
+        if (lotSize <= 1 || rawQty <= 0) {
+          return (
+            <span className="inline-flex items-center justify-end gap-1.5">
+              <span>—</span>
+              <Info
+                className="size-3 text-muted-foreground/60"
+                aria-label="Click row to view netting entries"
+              />
+            </span>
+          );
+        }
         const lots = rawQty / lotSize;
         const text = Number.isInteger(lots) ? String(lots) : lots.toFixed(2);
-        return <span className="tabular-nums">{text}</span>;
+        return (
+          <span
+            className="inline-flex items-center justify-end gap-1.5"
+            title="Click row to view netting entries"
+          >
+            <span className="tabular-nums">{text}</span>
+            <Info className="size-3 text-primary/70" />
+          </span>
+        );
       },
     },
     {
