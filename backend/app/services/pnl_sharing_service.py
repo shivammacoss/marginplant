@@ -35,21 +35,23 @@ def compute_period_bounds(
 
     if cadence == SettlementCadence.DAILY:
         start_ist = ref_ist.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_ist = start_ist.replace(hour=23, minute=59, second=59, microsecond=999_000)
+        end_ist = start_ist.replace(hour=23, minute=59, second=59, microsecond=999999)
     elif cadence == SettlementCadence.WEEKLY:
+        # Same Mon-Sun IST week as admin_settlement_service.ist_week_bounds —
+        # kept inline here so DAILY/WEEKLY/MONTHLY share one switch.
         days_since_monday = ref_ist.weekday()  # Mon=0
         monday_ist = (ref_ist - timedelta(days=days_since_monday)).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
         start_ist = monday_ist
         end_ist = (monday_ist + timedelta(days=6)).replace(
-            hour=23, minute=59, second=59, microsecond=999_000
+            hour=23, minute=59, second=59, microsecond=999999
         )
     elif cadence == SettlementCadence.MONTHLY:
         start_ist = ref_ist.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         last_day = calendar.monthrange(ref_ist.year, ref_ist.month)[1]
         end_ist = start_ist.replace(
-            day=last_day, hour=23, minute=59, second=59, microsecond=999_000
+            day=last_day, hour=23, minute=59, second=59, microsecond=999999
         )
     else:
         raise ValueError(f"Unknown cadence: {cadence}")
