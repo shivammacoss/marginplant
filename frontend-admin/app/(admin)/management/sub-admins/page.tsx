@@ -12,6 +12,7 @@ import {
   LogIn,
   MoreVertical,
   Eye,
+  EyeOff,
 } from "lucide-react";
 
 import { ManagementAPI, setTokens } from "@/lib/api";
@@ -305,14 +306,20 @@ function CreateSubAdminDialog({
     email: "",
     mobile: "",
     password: "",
+    confirm_password: "",
     pnl_share_pct: "0",
   });
   const [perms, setPerms] = useState<AdminPermissions>({ ...ALL_OFF });
   const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   async function submit() {
     if (form.password.length < 8) {
       toast.error("Password must be at least 8 characters");
+      return;
+    }
+    if (form.password !== form.confirm_password) {
+      toast.error("Passwords do not match");
       return;
     }
     setLoading(true);
@@ -327,7 +334,7 @@ function CreateSubAdminDialog({
       });
       toast.success("Sub-admin created");
       onOpenChange(false);
-      setForm({ full_name: "", email: "", mobile: "", password: "", pnl_share_pct: "0" });
+      setForm({ full_name: "", email: "", mobile: "", password: "", confirm_password: "", pnl_share_pct: "0" });
       setPerms({ ...ALL_OFF });
       onCreated();
     } catch (e: any) {
@@ -358,11 +365,33 @@ function CreateSubAdminDialog({
           </div>
           <div className="space-y-1.5">
             <Label>Password</Label>
+            <div className="relative">
+              <Input
+                type={showPassword ? "text" : "password"}
+                className="pr-10"
+                value={form.password}
+                onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((s) => !s)}
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                className="absolute inset-y-0 right-0 grid w-10 place-items-center text-muted-foreground hover:text-foreground"
+              >
+                {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+              </button>
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <Label>Confirm password</Label>
             <Input
-              type="password"
-              value={form.password}
-              onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
+              type={showPassword ? "text" : "password"}
+              value={form.confirm_password}
+              onChange={(e) => setForm((f) => ({ ...f, confirm_password: e.target.value }))}
             />
+            {form.confirm_password.length > 0 && form.password !== form.confirm_password ? (
+              <p className="text-xs text-destructive">Passwords do not match</p>
+            ) : null}
           </div>
           <div className="space-y-1.5">
             <Label>PNL share %</Label>
