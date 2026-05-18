@@ -37,6 +37,15 @@ from app.models.user import User
 logger = logging.getLogger(__name__)
 
 CACHE_TTL = 300
+# Risk gets a MUCH shorter TTL than the rest of netting cache. The
+# stop-out enforcer reads `get_effective_risk` every tick (1 s) and a
+# stale 5-minute snapshot meant an admin's "Stop-out 20 %" save took
+# up to 5 minutes to reach a user already holding an open position —
+# during which the enforcer kept reading the old `stop_pct = 0` and
+# silently never fired. With 5 s the change propagates by the time
+# the user's next price update lands, while still absorbing ~5 ticks
+# of DB load per cycle.
+RISK_CACHE_TTL = 5
 
 NETTING_FIELDS = list(NettingFieldsRequired.model_fields.keys())
 RISK_FIELDS = list(RiskSettingsRequired.model_fields.keys())
@@ -405,6 +414,13 @@ async def upsert_sub_admin_risk(
     await existing.save()
     # Invalidate effective-risk cache for every user assigned to this sub-admin.
     await _invalidate_pool_risk_cache(sid)
+    # Safety net: also wipe the whole risk:* namespace. The per-pool
+    # walk above only catches users whose `assigned_admin_id` exactly
+    # matches — users whose pool was just changed, or any indirection
+    # bugs, would otherwise carry a stale snapshot for up to
+    # RISK_CACHE_TTL seconds. The wildcard sweep is cheap (the cache
+    # is small and rebuilds per-user on the next enforcer tick).
+    await cache_delete_pattern("risk:*")
     return existing
 
 
@@ -451,6 +467,7 @@ async def upsert_super_admin_risk(
             )
     await existing.save()
     await _invalidate_super_admin_pool_risk_cache()
+    await cache_delete_pattern("risk:*")
     return existing
 
 
@@ -497,6 +514,7 @@ async def upsert_broker_risk(
             )
     await existing.save()
     await _invalidate_broker_pool_risk_cache(bid)
+    await cache_delete_pattern("risk:*")
     return existing
 
 
@@ -563,7 +581,7 @@ async def get_effective_risk(user_id: str | PydanticObjectId) -> dict[str, Any]:
                 sources[f] = "USER"
 
     payload = {"settings": merged, "sources": sources}
-    await cache_set(cache_key, payload, ttl_sec=CACHE_TTL)
+    await cache_set(cache_key, payload, ttl_sec=RISK_CACHE_TTL)
     return payload
 
 
