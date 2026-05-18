@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/dialog";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { NettingEntriesDialog } from "@/components/admin/NettingEntriesDialog";
 import { StatusPill } from "@/components/common/StatusPill";
 import { cn, formatINR, pnlColor } from "@/lib/utils";
 import { OwnerBadge } from "@/components/admin/OwnerBadge";
@@ -238,6 +239,10 @@ function AdminPositionsInner() {
 
   // ── Edit modal ────────────────────────────────────────────────────
   const [editing, setEditing] = useState<any | null>(null);
+  // Position-id of the row whose Netting Entries drilldown is open. `null`
+  // when the dialog is closed. Drives both Open + Closed tabs since the
+  // backend endpoint supports both.
+  const [nettingId, setNettingId] = useState<string | null>(null);
   const [form, setForm] = useState<{
     avg_price: string;
     quantity: string;
@@ -362,12 +367,12 @@ function AdminPositionsInner() {
       },
     },
     {
-      // Lot count column — derives lots from contracts so admins reading the
-      // blotter don't have to mental-math QTY/lot_size for every segment
-      // (NIFTY OPT lot=75, BANKNIFTY 35, CRUDEOIL 100, MCXM ones smaller,
-      // etc.). Falls back to "—" when lot_size is missing or 1 (equities).
-      key: "lots",
-      header: "Lots",
+      // Volume = total lot count (contracts ÷ lot_size). Renders "—" for
+      // equity rows where lot_size is 1 (Qty already conveys the size).
+      // Tabular-nums alignment keeps a column of mixed integer/decimal
+      // values visually clean.
+      key: "volume",
+      header: "Volume",
       align: "right" as const,
       render: (r: any) => {
         const isClosed = r.status === "CLOSED";
@@ -377,8 +382,6 @@ function AdminPositionsInner() {
         const lotSize = Number(r.lot_size ?? r.instrument?.lot_size ?? 1) || 1;
         if (lotSize <= 1 || rawQty <= 0) return <span>—</span>;
         const lots = rawQty / lotSize;
-        // Show whole lots when divisible, else 2-decimal (for fractional
-        // forex/crypto). Tabular nums keep the column aligned across rows.
         const text = Number.isInteger(lots) ? String(lots) : lots.toFixed(2);
         return <span className="tabular-nums">{text}</span>;
       },
@@ -503,20 +506,34 @@ function AdminPositionsInner() {
       key: "actions",
       header: "",
       align: "right" as const,
+      // `e.stopPropagation()` on every action button so clicking them
+      // doesn't also fire the row-level netting drilldown dialog (the
+      // <tr> has its own onClick now). Without this, "Close" would
+      // squareoff AND pop open the breakdown — visually noisy and the
+      // edit form would land on a faded background.
       render: (r: any) => (
-        <div className="flex items-center justify-end gap-1.5">
+        <div
+          className="flex items-center justify-end gap-1.5"
+          onClick={(e) => e.stopPropagation()}
+        >
           {r.status === "OPEN" && (
             <>
               <Button
                 size="sm"
-                onClick={() => setEditing(r)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setEditing(r);
+                }}
                 className="h-7 gap-1 rounded-md bg-blue-600 px-2.5 text-xs font-semibold text-white hover:bg-blue-700"
               >
                 <Pencil className="size-3.5" /> Edit
               </Button>
               <Button
                 size="sm"
-                onClick={() => squareoff(r.id)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  squareoff(r.id);
+                }}
                 className="h-7 gap-1 rounded-md bg-destructive px-2.5 text-xs font-semibold text-destructive-foreground hover:bg-destructive/90"
               >
                 <X className="size-3.5" /> Close
@@ -525,7 +542,10 @@ function AdminPositionsInner() {
           )}
           <Button
             size="sm"
-            onClick={() => remove(r.id, r.symbol)}
+            onClick={(e) => {
+              e.stopPropagation();
+              remove(r.id, r.symbol);
+            }}
             aria-label="Delete record"
             title="Delete record (no square-off)"
             className="size-7 rounded-md bg-destructive/15 p-0 text-destructive ring-1 ring-inset ring-destructive/30 hover:bg-destructive hover:text-destructive-foreground hover:ring-destructive"
@@ -659,6 +679,7 @@ function AdminPositionsInner() {
         rows={data}
         keyExtractor={(r) => r.id}
         loading={isFetching && !data}
+        onRowClick={(r: any) => setNettingId(String(r.id))}
         rowClassName={(r) =>
           tab === "open" && Number(r.unrealized_pnl) < -Number(r.margin_used) * 0.5
             ? "bg-destructive/5"
@@ -666,6 +687,14 @@ function AdminPositionsInner() {
               ? "bg-atm/5"
               : undefined
         }
+      />
+
+      {/* Row-click opens the per-position fill breakdown. Same dialog
+          serves Open + Closed tabs — the backend endpoint handles both
+          statuses and the modal renders identically. */}
+      <NettingEntriesDialog
+        positionId={nettingId}
+        onClose={() => setNettingId(null)}
       />
 
       <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
