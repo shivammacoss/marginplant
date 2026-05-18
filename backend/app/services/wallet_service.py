@@ -269,21 +269,31 @@ async def summary(user_id: str | PydanticObjectId) -> dict[str, Any]:
     used = to_decimal(w.used_margin)
     credit = to_decimal(w.credit_limit)
 
-    # Bal = the wallet "wealth at rest" — what the user sees as their
-    # account balance regardless of how much is currently locked as
-    # margin. Internally this equals (available + used) because the
-    # legacy block_margin() shuffles cash between those two fields; in
-    # the Dabba presentation we add them back to show one number.
+    # Bal = wallet "wealth at rest" — what the user sees as their main
+    # account balance, stable regardless of currently-locked margin
+    # (only brokerage + realised PnL move it). Internally this equals
+    # (available + used) because legacy block_margin() shuffles cash
+    # between those two fields; in the trader-facing presentation we
+    # add them back to show one number.
     bal = add(avail, used)
     equity = add(bal, float_pnl)
 
     # `open_margin_sum` SHOULD equal `used` in steady state, but the
-    # per-position field is the authoritative truth (the wallet field is
-    # legacy from when margin was tracked centrally). Prefer the position
-    # sum when they disagree — that's what every order touched.
+    # per-position field is the authoritative truth (the wallet field
+    # is legacy from when margin was tracked centrally). Prefer the
+    # position sum when they disagree — that's what every order touched.
     margin = open_margin_sum if open_margin_sum > ZERO else used
 
-    free = sub(equity, margin)
+    # Free = Bal − Margin (NOT Equity − Margin).
+    # User feedback: "free margin balance se calculate hoga, used hoga".
+    # The trader wants `Free` to represent "how much of my MAIN BALANCE
+    # is unlocked for a fresh trade right now", independent of whether
+    # open positions are currently in profit or loss. Float PnL is
+    # already surfaced via the Equity tile next door; double-counting it
+    # into Free made the number swing whenever the market ticked, which
+    # the trader found confusing on Indian brokers where Free is a
+    # margin-reservation gauge, not a P&L-net gauge.
+    free = sub(bal, margin)
     margin_level_pct: float | None = None
     if margin > ZERO:
         try:
