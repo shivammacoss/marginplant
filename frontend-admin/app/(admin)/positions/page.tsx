@@ -506,7 +506,28 @@ function AdminPositionsInner() {
             ),
           },
         ]),
-    { key: "margin_used", header: "Margin", align: "right" as const, render: (r: any) => formatINR(r.margin_used) },
+    {
+      // Total brokerage paid across this position's lifecycle (open
+      // leg + close leg if closed). Backend's `charges` field already
+      // sums every Trade row within the position's open-close window
+      // — see _charges_for() in admin/trading.py. User feedback:
+      // "margin column hata ke total close+open brokerage dikhao" —
+      // margin tells the admin nothing on the Closed tab (it's 0
+      // there anyway) and on the Open tab it duplicates info already
+      // visible in the user's wallet strip; total brokerage is what
+      // the admin actually audits.
+      key: "charges",
+      header: "Brokerage",
+      align: "right" as const,
+      render: (r: any) => (
+        <span
+          title="Total brokerage (open leg + close leg)"
+          className="tabular-nums"
+        >
+          {formatINR(Number(r.charges ?? 0))}
+        </span>
+      ),
+    },
     {
       key: "opened_at",
       header: "Opened",
