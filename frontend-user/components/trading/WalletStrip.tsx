@@ -70,7 +70,12 @@ export function WalletStrip({
       : Number(pnl?.open_unrealised ?? pnl?.unrealized_pnl ?? wallet?.open_unrealized_pnl ?? 0);
   const equity = bal + openUnrl;
   const free = equity - margin;
-  const marginLevel = margin > 0 ? (equity / margin) * 100 : null;
+
+  // Margin Level chip removed per user request — a residual ₹0.02 left
+  // over from a closed position made the ratio explode into a nonsense
+  // "40,005,950%" display whenever no real exposure was open. Bal /
+  // Equity / Margin / Free + Open P/L convey all the info admins and
+  // traders need anyway; the gauge lives in the backend stop-out check.
 
   return (
     <div
@@ -90,22 +95,6 @@ export function WalletStrip({
         value={formatINR(free)}
         valueClass={free < 0 ? "text-red-500" : undefined}
       />
-      {marginLevel !== null && (
-        <>
-          <Sep />
-          <Stat
-            label="ML"
-            value={`${marginLevel.toFixed(1)}%`}
-            valueClass={
-              marginLevel <= 100
-                ? "text-red-500"
-                : marginLevel <= 200
-                  ? "text-amber-500"
-                  : "text-emerald-500"
-            }
-          />
-        </>
-      )}
       <Sep />
       <Stat
         label="P/L"
