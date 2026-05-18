@@ -750,6 +750,17 @@ async def resolve_spread(segment_name: str, symbol: str | None) -> dict[str, Any
     `segment_name` must be the ADMIN-row name (NSE_EQ / FOREX / CRYPTO …),
     NOT the instrument SegmentType. Callers translate via _SEGMENT_NAME_MAP
     before reaching here.
+
+    Resolution order (highest wins):
+      1. Script-level override (NettingScriptOverride)
+      2. Super-admin's segment override (SuperAdminSegmentOverride)
+      3. Base NettingSegment seed defaults
+
+    Sub-admin / broker tier overrides are NOT consulted here because the
+    spread is applied to the shared market-tick broadcast (one quote
+    fans out to every connected user), not a per-user resolution. If
+    multi-pool spreads are needed in the future the WS pump will have
+    to publish per-pool channels.
     """
     seg_name = (segment_name or "").strip()
     sym_key = (symbol or "").strip().upper() or "_"
@@ -767,6 +778,32 @@ async def resolve_spread(segment_name: str, symbol: str | None) -> dict[str, Any
     if seg is not None:
         spread_type = str(getattr(seg, "spreadType", "fixed") or "fixed")
         spread_pips = float(getattr(seg, "spreadPips", 0.0) or 0.0)
+
+    # Super-admin's platform-wide override sits above the seed default. The
+    # admin Segment Settings page writes to `SuperAdminSegmentOverride` when
+    # the signed-in admin is SUPER_ADMIN — without consulting that table,
+    # every spread save was invisible to the resolver and the live overlay
+    # kept using the base 0.0 (the user-reported "spread save nahi ho raha"
+    # bug, where the admin form showed the typed value but BID/ASK never
+    # widened on the user feed).
+    try:
+        sa_id = await _resolve_super_admin_id()
+        if sa_id is not None:
+            sa_over = await SuperAdminSegmentOverride.find_one(
+                SuperAdminSegmentOverride.super_admin_id == sa_id,
+                SuperAdminSegmentOverride.segment_name == seg_name,
+            )
+            if sa_over is not None:
+                sa_type = getattr(sa_over, "spreadType", None)
+                sa_pips = getattr(sa_over, "spreadPips", None)
+                if sa_type is not None:
+                    spread_type = str(sa_type)
+                if sa_pips is not None:
+                    spread_pips = float(sa_pips)
+    except Exception:
+        # Super-admin lookup is best-effort — a missing tier override is
+        # always safe to fall back to the base seg row.
+        logger.debug("resolve_spread_super_admin_lookup_failed", exc_info=True)
 
     if symbol:
         # Same exact → pattern fallback as `get_effective_settings` so a
