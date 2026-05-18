@@ -340,6 +340,32 @@ function AdminPositionsInner() {
     { key: "symbol", header: "Symbol" },
     { key: "exchange", header: "Exch" },
     {
+      // Direction the user opened on. `opened_side` is stable across the
+      // position's lifecycle (preserved by position_service even after a
+      // full close drops `quantity` to 0), so the Closed Trades view shows
+      // the original BUY/SELL just as clearly as the Open Trades view.
+      key: "opened_side",
+      header: "Side",
+      render: (r: any) => {
+        const raw = (r.opened_side || (Number(r.quantity) >= 0 ? "BUY" : "SELL"))
+          .toString()
+          .toUpperCase();
+        const isBuy = raw === "BUY";
+        return (
+          <span
+            className={cn(
+              "inline-flex min-w-[44px] items-center justify-center rounded px-1.5 py-0.5 text-[11px] font-semibold",
+              isBuy
+                ? "bg-emerald-500/15 text-emerald-500"
+                : "bg-red-500/15 text-red-500",
+            )}
+          >
+            {raw}
+          </span>
+        );
+      },
+    },
+    {
       key: "quantity",
       header: "Qty",
       align: "right" as const,

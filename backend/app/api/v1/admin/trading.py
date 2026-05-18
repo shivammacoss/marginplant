@@ -408,6 +408,10 @@ async def list_positions(
                 "exchange": str(r.instrument.exchange),
                 "segment_type": r.segment_type,
                 "product_type": r.product_type.value,
+                # Lot size of the instrument at the time the position is
+                # observed. Lets the admin blotter compute Volume column
+                # (= qty/lot_size) without a separate /instruments lookup.
+                "lot_size": int(getattr(r.instrument, "lot_size", 0) or 0),
                 "quantity": qty,
                 # Original trade size at peak of this position's lifecycle.
                 # `quantity` drops to 0 on full close, so the Closed-tab UI
@@ -862,8 +866,19 @@ async def position_netting_entries(
     # Find every Trade that contributed to this position. `position_id` is
     # not stored on Trade, so we match by user + token + product_type +
     # time window. For a re-opened position (close then open again on the
-    # same instrument) the lower bound `opened_at` keeps us inside the
-    # CURRENT incarnation's fills.
+    # same instrument) the time bounds keep us inside the CURRENT
+    # incarnation's fills.
+    #
+    # Grace window: position.opened_at is stamped AFTER the opening
+    # Trade.insert() in position_service.apply_fill, so a millisecond of
+    # clock-skew between the two writes makes `executed_at >= opened_at`
+    # silently drop the opening Trade — exactly the user-reported "sirf
+    # ek entry dikh raha hai (Exit), Entry missing" bug. We widen the
+    # lower bound by 60 s to absorb any realistic skew without leaking
+    # in a previous closed-incarnation's fills (those would be hours/
+    # days earlier).
+    from datetime import timedelta as _td
+
     query: dict = {
         "user_id": p.user_id,
         "instrument.token": p.instrument.token,
@@ -871,9 +886,12 @@ async def position_netting_entries(
     }
     time_q: dict = {}
     if p.opened_at:
-        time_q["$gte"] = p.opened_at
+        time_q["$gte"] = p.opened_at - _td(seconds=60)
     if p.closed_at:
-        time_q["$lte"] = p.closed_at
+        # Same grace on the upper bound so a closing trade whose
+        # executed_at lands a few milliseconds AFTER position.closed_at
+        # still shows up.
+        time_q["$lte"] = p.closed_at + _td(seconds=60)
     if time_q:
         query["executed_at"] = time_q
 
