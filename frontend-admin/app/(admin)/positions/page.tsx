@@ -322,7 +322,7 @@ function AdminPositionsInner() {
     {
       key: "user",
       header: "User",
-      render: (r) => (
+      render: (r: any) => (
         <div className="flex flex-col leading-tight">
           <span className="text-sm">{r.user_name || "—"}</span>
           <span className="font-mono text-[10px] text-muted-foreground">
@@ -331,18 +331,18 @@ function AdminPositionsInner() {
         </div>
       ),
     },
-    { key: "owner", header: "Owner", render: (r) => <OwnerBadge row={r} me={me} /> },
+    { key: "owner", header: "Owner", render: (r: any) => <OwnerBadge row={r} me={me} /> },
     { key: "symbol", header: "Symbol" },
     { key: "exchange", header: "Exch" },
     {
       key: "quantity",
       header: "Qty",
-      align: "right",
+      align: "right" as const,
       // For CLOSED rows `quantity` is 0 (FIFO flattens it on the close leg).
       // `opening_quantity` is preserved by position_service — that's the size
       // the user actually traded. Direction comes from `opened_side` so the
       // colour stays correct even though the signed qty is 0.
-      render: (r) => {
+      render: (r: any) => {
         const isClosed = r.status === "CLOSED";
         const displayQty = isClosed
           ? Math.abs(Number(r.opening_quantity ?? 0))
@@ -364,8 +364,8 @@ function AdminPositionsInner() {
     {
       key: "avg_price",
       header: "Avg",
-      align: "right",
-      render: (r) => fmtFeedPrice(r.avg_price, r.currency_quote),
+      align: "right" as const,
+      render: (r: any) => fmtFeedPrice(r.avg_price, r.currency_quote),
     },
     {
       // For closed positions, `ltp` was set to the actual close price by
@@ -375,8 +375,8 @@ function AdminPositionsInner() {
       // Trades tab still reads "LTP" since that's the live mark.
       key: "ltp",
       header: tab === "closed" ? "Close" : "LTP",
-      align: "right",
-      render: (r) => (
+      align: "right" as const,
+      render: (r: any) => (
         <span title={r.status === "CLOSED" ? "Closing price" : "Live LTP"}>
           {fmtFeedPrice(r.ltp, r.currency_quote)}
         </span>
@@ -385,12 +385,12 @@ function AdminPositionsInner() {
     {
       key: "status",
       header: "Status",
-      render: (r) => <StatusPill status={r.status} />,
+      render: (r: any) => <StatusPill status={r.status} />,
     },
     {
       key: "realized_pnl",
       header: "Realized",
-      align: "right",
+      align: "right" as const,
       // NET realised — gross realized_pnl minus the brokerage / other
       // charges stamped on this position's lifecycle trades. The
       // backend ships both fields; we subtract here so the admin and
@@ -400,7 +400,7 @@ function AdminPositionsInner() {
       // backend/app/api/v1/user/positions.py:closed_positions).
       // Hover-title carries the gross + charges decomposition so
       // admins can still see the underlying components when reconciling.
-      render: (r) => {
+      render: (r: any) => {
         const gross = Number(r.realized_pnl ?? 0);
         const charges = Number(r.charges ?? 0);
         const net = gross - charges;
@@ -434,11 +434,11 @@ function AdminPositionsInner() {
             ),
           },
         ]),
-    { key: "margin_used", header: "Margin", align: "right", render: (r) => formatINR(r.margin_used) },
+    { key: "margin_used", header: "Margin", align: "right" as const, render: (r: any) => formatINR(r.margin_used) },
     {
       key: "opened_at",
       header: "Opened",
-      render: (r) => (
+      render: (r: any) => (
         <span className="whitespace-nowrap font-tabular">
           {fmtOpenedAt(r.opened_at)}
         </span>
@@ -470,7 +470,7 @@ function AdminPositionsInner() {
     {
       key: "close_reason",
       header: "Closed By",
-      render: (r) =>
+      render: (r: any) =>
         r.status === "CLOSED" ? (
           <CloseReasonChip reason={r.close_reason} />
         ) : (
@@ -480,8 +480,8 @@ function AdminPositionsInner() {
     {
       key: "actions",
       header: "",
-      align: "right",
-      render: (r) => (
+      align: "right" as const,
+      render: (r: any) => (
         <div className="flex items-center justify-end gap-1.5">
           {r.status === "OPEN" && (
             <>
