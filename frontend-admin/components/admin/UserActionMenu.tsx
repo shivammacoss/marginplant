@@ -28,13 +28,6 @@ import { cn } from "@/lib/utils";
 import { useMarketStream } from "@/lib/useMarketStream";
 import { useMemo } from "react";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -62,6 +55,7 @@ interface Props {
 export function UserActionMenu({ user, onChange }: Props) {
   const router = useRouter();
   const qc = useQueryClient();
+  const [menuOpen, setMenuOpen] = useState(false);
   const [action, setAction] = useState<ActionKind>(null);
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
@@ -72,6 +66,15 @@ export function UserActionMenu({ user, onChange }: Props) {
     setAmount("");
     setNote("");
     setBusy(false);
+  }
+
+  // Wrap any per-action handler so clicking a menu item closes the
+  // centered dialog menu before kicking off the action (which usually
+  // opens its own sub-dialog). Two stacked dialogs flicker on mobile,
+  // so we close-then-set-action in the same microtask.
+  function pick(next: () => void) {
+    setMenuOpen(false);
+    next();
   }
 
   function refresh() {
@@ -210,60 +213,125 @@ export function UserActionMenu({ user, onChange }: Props) {
 
   return (
     <>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label="More actions"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <MoreHorizontal className="size-4" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" sideOffset={4}>
-          <DropdownMenuItem onClick={() => router.push(`/users/${user.id}`)}>
-            <Eye /> View Profile
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => router.push(`/segment-settings?tab=users&user=${user.id}`)}>
-            <Settings2 /> Segment Overrides
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => router.push(`/risk-management?user=${user.id}`)}>
-            <ShieldCheck /> Risk Settings
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => setAction("stats")}>
-            <Activity /> Live Trade Stats
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={() => setAction("addFund")}>
-            <PlusCircle /> Add Fund
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => setAction("deductFund")}>
-            <MinusCircle /> Deduct Fund
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => setAction("giveCredit")}>
-            <CreditCard /> Give Credit
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => setAction("takeCredit")}>
-            <IndianRupee /> Take Credit
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem destructive onClick={() => setAction("ban")}>
-            {user.status === "BLOCKED" ? <CheckCircle2 /> : <Ban />}
-            {user.status === "BLOCKED" ? "Unblock User" : "Ban User"}
-          </DropdownMenuItem>
-          <DropdownMenuItem destructive onClick={() => setAction("kill")}>
-            <Power /> Kill Switch
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={runLoginAs}>
-            <LogIn /> Login As User
-          </DropdownMenuItem>
-          <DropdownMenuItem destructive onClick={() => setAction("delete")}>
-            <Trash2 /> Delete User
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label="More actions"
+        onClick={(e) => {
+          e.stopPropagation();
+          setMenuOpen(true);
+        }}
+      >
+        <MoreHorizontal className="size-4" />
+      </Button>
+
+      {/* Centered action picker — replaces the old Radix dropdown which
+          flipped above/below depending on the row's screen position
+          (bottom rows got cut off; rows near the top scrolled the row
+          itself out of view). A centered modal opens at the viewport's
+          middle regardless of which row was clicked, fits all 11
+          actions without measurement gymnastics, and works the same on
+          mobile + desktop. */}
+      <Dialog open={menuOpen} onOpenChange={setMenuOpen}>
+        <DialogContent className="max-w-sm p-0">
+          <DialogHeader className="px-4 pb-2 pt-4">
+            <DialogTitle className="text-base">
+              {user.user_code}
+              {user.full_name ? (
+                <span className="ml-2 text-xs font-normal text-muted-foreground">
+                  {user.full_name}
+                </span>
+              ) : null}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="max-h-[70vh] overflow-y-auto px-1 pb-3">
+            <MenuButton
+              icon={<Eye className="size-4" />}
+              label="View Profile"
+              onClick={() => pick(() => router.push(`/users/${user.id}`))}
+            />
+            <MenuButton
+              icon={<Settings2 className="size-4" />}
+              label="Segment Overrides"
+              onClick={() =>
+                pick(() =>
+                  router.push(`/segment-settings?tab=users&user=${user.id}`),
+                )
+              }
+            />
+            <MenuButton
+              icon={<ShieldCheck className="size-4" />}
+              label="Risk Settings"
+              onClick={() =>
+                pick(() => router.push(`/risk-management?user=${user.id}`))
+              }
+            />
+            <MenuButton
+              icon={<Activity className="size-4" />}
+              label="Live Trade Stats"
+              onClick={() => pick(() => setAction("stats"))}
+            />
+
+            <MenuSeparator />
+
+            <MenuButton
+              icon={<PlusCircle className="size-4" />}
+              label="Add Fund"
+              onClick={() => pick(() => setAction("addFund"))}
+            />
+            <MenuButton
+              icon={<MinusCircle className="size-4" />}
+              label="Deduct Fund"
+              onClick={() => pick(() => setAction("deductFund"))}
+            />
+            <MenuButton
+              icon={<CreditCard className="size-4" />}
+              label="Give Credit"
+              onClick={() => pick(() => setAction("giveCredit"))}
+            />
+            <MenuButton
+              icon={<IndianRupee className="size-4" />}
+              label="Take Credit"
+              onClick={() => pick(() => setAction("takeCredit"))}
+            />
+
+            <MenuSeparator />
+
+            <MenuButton
+              icon={
+                user.status === "BLOCKED" ? (
+                  <CheckCircle2 className="size-4" />
+                ) : (
+                  <Ban className="size-4" />
+                )
+              }
+              label={user.status === "BLOCKED" ? "Unblock User" : "Ban User"}
+              destructive
+              onClick={() => pick(() => setAction("ban"))}
+            />
+            <MenuButton
+              icon={<Power className="size-4" />}
+              label="Kill Switch"
+              destructive
+              onClick={() => pick(() => setAction("kill"))}
+            />
+
+            <MenuSeparator />
+
+            <MenuButton
+              icon={<LogIn className="size-4" />}
+              label="Login As User"
+              onClick={() => pick(runLoginAs)}
+            />
+            <MenuButton
+              icon={<Trash2 className="size-4" />}
+              label="Delete User"
+              destructive
+              onClick={() => pick(() => setAction("delete"))}
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* ── Dialogs ───────────────────────────────────────────── */}
       <AmountDialog
@@ -415,6 +483,39 @@ export function UserActionMenu({ user, onChange }: Props) {
       </Dialog>
     </>
   );
+}
+
+function MenuButton({
+  icon,
+  label,
+  destructive = false,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  destructive?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "flex w-full items-center gap-3 rounded-md px-3 py-2 text-left text-sm transition-colors",
+        "hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-none",
+        destructive
+          ? "text-destructive hover:bg-destructive/10 focus-visible:bg-destructive/10"
+          : "text-foreground",
+      )}
+    >
+      <span className="shrink-0 text-muted-foreground">{icon}</span>
+      <span className="flex-1">{label}</span>
+    </button>
+  );
+}
+
+function MenuSeparator() {
+  return <div className="my-1 h-px bg-border" />;
 }
 
 function AmountDialog({
