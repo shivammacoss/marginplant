@@ -92,10 +92,31 @@ async def get_user(
     await assert_user_in_scope(admin, user_id)
     doc = await svc.get_user_risk(user_id)
     glob = await svc.get_global_risk()
+    # `global_settings` powers the "inherits XXX" hint on the per-user
+    # override form. The user's real inherit value is what they'd get if
+    # the per-user override row were deleted — i.e. the GLOBAL → POOL
+    # merge (broker / sub-admin / super-admin), NOT just platform GLOBAL.
+    # Without this resolution a sub-admin whose pool default raised
+    # `stopOutPercent` to 50 would see the hint say "inherits 0" (the
+    # untouched platform seed), and the admin would assume the field is
+    # off when it's actually 50 in effect.
+    #
+    # `get_effective_risk` merges GLOBAL → POOL → USER. For any field where
+    # the user has no override the effective value IS the pool/global
+    # fallback (exactly what the hint wants). Where the user DOES override,
+    # we fall back to platform global — close enough for the hint without
+    # adding a separate pool-only resolver.
+    effective = await svc.get_effective_risk(user_id)
+    sources = effective.get("sources") or {}
+    settings = effective.get("settings") or {}
+    inherit_payload = glob.model_dump(exclude={"id", "revision_id"}) | {"id": str(glob.id)}
+    for f in svc.RISK_FIELDS:
+        if sources.get(f) != "USER" and f in settings:
+            inherit_payload[f] = settings[f]
     return APIResponse(
         data={
             "user_settings": (doc.model_dump(exclude={"id", "revision_id", "user_id"}) | {"id": str(doc.id), "user_id": str(doc.user_id)}) if doc else None,
-            "global_settings": glob.model_dump(exclude={"id", "revision_id"}) | {"id": str(glob.id)},
+            "global_settings": inherit_payload,
         }
     )
 
@@ -134,16 +155,24 @@ async def copy_from(
     _: None = Depends(require_perm("risk", "write")),
 ):
     """Clone source user's risk override onto this user. If source has no
-    override (inherits global), the destination's override is removed."""
+    override (inherits global), the destination's override is removed and
+    we return `{user_settings: None}` so the frontend knows the user is
+    now back to inheriting."""
     await assert_user_in_scope(admin, user_id)
     await assert_user_in_scope(admin, source_user_id)
     try:
         doc = await svc.copy_user_risk(source_user_id, user_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # `copy_user_risk` returns an UNSAVED placeholder when the source had
+    # no override (it deletes the destination row to revert to inherit).
+    # That placeholder has `doc.id is None` — detect and return null so
+    # the frontend doesn't render an empty override card.
+    if doc.id is None:
+        return APIResponse(data={"user_settings": None})
     return APIResponse(
         data=doc.model_dump(exclude={"id", "revision_id", "user_id"})
-        | {"id": str(doc.id) if doc.id else None, "user_id": str(doc.user_id)}
+        | {"id": str(doc.id), "user_id": str(doc.user_id)}
     )
 
 
@@ -163,7 +192,7 @@ async def list_users_with_overrides(
     _: None = Depends(require_perm("risk", "read")),
 ):
     """Distinct users with a UserRiskSettings override doc, plus a count of
-    how many of the 8 fields they actually customised. Powers the quick-pick
+    how many of the 5 fields they actually customised. Powers the quick-pick
     list on the admin Risk Management page so admins can see at a glance who
     has custom risk rules without having to search."""
     from app.models.netting import UserRiskSettings

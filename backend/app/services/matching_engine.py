@@ -186,11 +186,17 @@ async def execute_market_order(
     # Compute realized P&L in INR for closing legs and freeze it on the
     # trade row. Uses the existing position's avg_price, the fill price,
     # and the USD/INR rate as of NOW (snapshotted — never recomputed).
-    # Closing-leg brokerage is folded in here so the History tab's P&L
-    # column shows the user's true net cost (raw P&L − close brokerage),
-    # matching the user's mental model "close brokerage 20 + P&L −20 →
-    # total loss −40". Opening fills leave pnl_inr = None.
+    # Closing-leg brokerage is folded into `pnl_inr_dec` so the History
+    # tab's P&L column shows the user's true net cost (raw P&L − close
+    # brokerage), matching the user's mental model "close brokerage 20 +
+    # P&L −20 → total loss −40". `raw_pnl_inr_dec` keeps the un-folded
+    # raw realized PnL for the WALLET adjustment, because the closing-
+    # leg brokerage is already debited separately via the CHARGES line
+    # below — using `pnl_inr_dec` there would double-charge it (debiting
+    # the close brokerage once via CHARGES and again folded into PNL).
+    # Opening fills leave both = None.
     pnl_inr_dec: Decimal | None = None
+    raw_pnl_inr_dec: Decimal | None = None
     if is_closing and existing_pos is not None:
         cur_qty = to_decimal(existing_pos.quantity)
         avg = to_decimal(existing_pos.avg_price)
@@ -200,6 +206,7 @@ async def execute_market_order(
         if market_data_service.is_usd_quoted_segment(order.instrument.segment):
             fx = to_decimal(market_data_service.get_usd_inr_rate())
             raw_realized = raw_realized * fx
+        raw_pnl_inr_dec = quantize_money(raw_realized)
         pnl_inr_dec = quantize_money(raw_realized - to_decimal(charges.brokerage))
 
     trade = Trade(
@@ -278,17 +285,18 @@ async def execute_market_order(
     )
 
     # Realized P&L (signed, INR, already FX-converted for USD segments
-    # at line ~200) — credited on closing fills only. `pnl_inr_dec` was
-    # computed earlier from (close_price − avg_price) × closed_qty × side
-    # − closing brokerage, so a positive number means profit and a
-    # negative number means loss.
-    if pnl_inr_dec is not None and pnl_inr_dec != 0:
+    # at line ~200) — credited on closing fills only. Uses `raw_pnl_inr_dec`
+    # (NOT the brokerage-folded `pnl_inr_dec`) because the closing-leg
+    # brokerage is already debited separately via the CHARGES line above —
+    # using `pnl_inr_dec` here would double-debit it. `pnl_inr_dec` is
+    # kept only for `Trade.pnl_inr` (History tab display).
+    if raw_pnl_inr_dec is not None and raw_pnl_inr_dec != 0:
         await wallet_service.adjust(
             order.user_id,
-            pnl_inr_dec,
+            raw_pnl_inr_dec,
             transaction_type=TransactionType.PNL,
             narration=(
-                f"Realized {'profit' if pnl_inr_dec > 0 else 'loss'} "
+                f"Realized {'profit' if raw_pnl_inr_dec > 0 else 'loss'} "
                 f"on {order.instrument.symbol} close"
             ),
             reference_type="ORDER",

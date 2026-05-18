@@ -1,6 +1,7 @@
 """Risk Management background enforcer.
 
-Runs every 5 s. Implements the simplified spec:
+Runs every 1 s (see `risk_enforcer_loop` default). Implements the simplified
+spec:
 
     stopOutWarningPercent  — notify when (-total_pnl) / balance × 100 ≥ this %.
                              "balance" = wallet.available + used_margin + credit_limit

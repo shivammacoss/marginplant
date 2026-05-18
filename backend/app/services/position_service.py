@@ -359,8 +359,20 @@ async def list_closed_today(user_id: str | PydanticObjectId) -> list[Position]:
 
 
 async def refresh_unrealized_pnl(position: Position, ltp: Decimal) -> Position:
+    # USD-quoted segments (BTCUSD, EURUSD, XAUUSD, …) price in USD; the wallet
+    # is INR. Convert PnL at the current USD/INR before storing so the risk
+    # enforcer's loss_pct (which sums this field across positions and divides
+    # by an INR-denominated balance) compares like-for-like. Without the
+    # multiply, a $30 floating loss looked like ₹30 to the enforcer and
+    # stop-out / warning never fired on crypto / forex positions.
+    from app.services.market_data_service import get_usd_inr_rate, is_usd_quoted_segment
+
     position.ltp = Decimal128(str(ltp))
     pnl = (ltp - to_decimal(position.avg_price)) * to_decimal(position.quantity)
+    if is_usd_quoted_segment(position.segment_type) or is_usd_quoted_segment(
+        position.instrument.segment
+    ):
+        pnl = pnl * to_decimal(get_usd_inr_rate())
     position.unrealized_pnl = Decimal128(str(quantize_money(pnl)))
     return position
 

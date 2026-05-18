@@ -100,7 +100,7 @@ These are long-running asyncio tasks held on `app._*_task`. They must start and 
 |------|------|----------|--------------|
 | `market_tick` | `services/market_data_service.py` | 1 s | Mock/feed tick loop |
 | `pending_order_poller` | `services/matching_engine.py` | 1.5 s | Fires LIMIT/SL-M when trigger hits |
-| `risk_enforcer_loop` | `services/risk_enforcer.py` | 5 s | Margin-call / stop-out / ledger breach → notify or auto-squareoff |
+| `risk_enforcer_loop` | `services/risk_enforcer.py` | 1 s | Margin-call / stop-out / ledger breach → notify or auto-squareoff |
 | `expiry_cleanup_loop` | `services/expiry_cleanup.py` | 1 h | Drops day-after-expiry instruments from watchlists, Zerodha ticker, Instrument collection |
 | Zerodha boot | inline `_zerodha_boot` | once | Cache-warm NSE/NFO/MCX + connect WS pool |
 | Infoway start | inline | once | Forex/crypto/metals/energy feed; off unless `INFOWAY_API_KEY` set and `INFOWAY_AUTO_CONNECT=true` |
