@@ -262,9 +262,17 @@ class NettingFieldsRequired(BaseModel):
     # Expiry day
     expiryProfitHoldMinSeconds: int = 0
     expiryLossHoldMinSeconds: int = 0
-    expiryDayIntradayMargin: float = 100.0
-    expiryDayOptionBuyMargin: float = 100.0
-    expiryDayOptionSellMargin: float = 50.0
+    # Default = None so the resolver's "or effective_margin_pct" fallback
+    # makes expiry-day margin inherit the regular intraday tier when admin
+    # hasn't explicitly set a stricter value. Previously seeded to
+    # 100 / 100 / 50 which silently dropped Times-mode leverage on every
+    # contract's expiry day (e.g. MCX FUT 500× → 100× → 5× the margin).
+    # `heal_legacy_percent_seeds()` resets existing rows that still hold
+    # the legacy seed defaults to None on every boot. Admins who DO want
+    # a stricter expiry tier type the value explicitly; that wins.
+    expiryDayIntradayMargin: float | None = None
+    expiryDayOptionBuyMargin: float | None = None
+    expiryDayOptionSellMargin: float | None = None
     expiryDayMarginAsPercent: bool = True
 
 
