@@ -24,6 +24,7 @@ from app.models.pnl_sharing import (
 from app.models.position import Position
 from app.models.transaction import WalletTransaction
 from app.models.user import User, UserRole, UserStatus
+from app.models.wallet import Wallet
 
 
 @pytest_asyncio.fixture(scope="function")
@@ -36,6 +37,7 @@ async def db():
         document_models=[
             User,
             Position,
+            Wallet,
             WalletTransaction,
             PnlSharingAgreement,
             PnlSharingSettlement,

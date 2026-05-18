@@ -37,6 +37,8 @@ class TransactionType(StrEnum):
     PROMO = "PROMO"
     INTER_USER = "INTER_USER"
     REVERSAL = "REVERSAL"
+    PNL_SHARING_PAYOUT = "PNL_SHARING_PAYOUT"
+    PNL_SHARING_RECEIPT = "PNL_SHARING_RECEIPT"
 
 
 class TransactionStatus(StrEnum):

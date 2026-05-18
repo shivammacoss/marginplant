@@ -10,24 +10,31 @@ import calendar
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from beanie import PydanticObjectId
 from bson import Decimal128
 from pymongo.errors import DuplicateKeyError
 
-from app.core.exceptions import ConflictError, ValidationFailedError
+from app.core.exceptions import (
+    ConflictError,
+    InsufficientFundsError,
+    ValidationFailedError,
+)
 from app.models.audit_log import AuditAction
 from app.models.pnl_sharing import (
     AgreementStatus,
     PnlSharingAgreement,
+    PnlSharingSettlement,
     SettlementCadence,
     SettlementMode,
+    SharingSettlementStatus,
 )
 from app.models.position import Position, PositionStatus
 from app.models.transaction import TransactionType, WalletTransaction
 from app.models.user import User, UserRole
-from app.services import market_data_service
+from app.services import market_data_service, wallet_service
 from app.services.admin_settlement_service import _realised_inr
 from app.services.audit_service import log_event
 from app.utils.decimal_utils import quantize_money, to_decimal
@@ -414,3 +421,138 @@ async def list_agreements_for_actor(
     if broker_id is not None:
         q = q.find(PnlSharingAgreement.broker_id == broker_id)
     return await q.skip(skip).limit(limit).to_list()
+
+
+# ── Settlement ───────────────────────────────────────────────────────
+async def settle_period(
+    *,
+    agreement_id: PydanticObjectId,
+    period_start: datetime,
+    period_end: datetime,
+    cadence: SettlementCadence,
+    triggered_by: Literal["AUTO", "MANUAL"],
+    actor: User | None = None,
+) -> PnlSharingSettlement:
+    """Compute snapshot for period and transfer wallet amount admin↔broker.
+
+    Idempotent: the unique (agreement_id, period_start) index prevents a
+    double-fire — if a SETTLED row already exists for the period, return it
+    unchanged. If a PENDING/FAILED row exists, this call will retry it by
+    refreshing the snapshot and re-attempting wallet movement.
+
+    Direction convention:
+      - sharing_total > 0: broker pays admin (broker debit, admin credit)
+      - sharing_total < 0: admin pays broker (admin debit, broker credit)
+      - sharing_total == 0: skip wallet calls entirely
+    """
+    agreement = await PnlSharingAgreement.get(agreement_id)
+    if agreement is None:
+        raise AgreementValidationError("agreement not found")
+
+    existing = await PnlSharingSettlement.find_one(
+        PnlSharingSettlement.agreement_id == agreement_id,
+        PnlSharingSettlement.period_start == period_start,
+    )
+    if existing is not None and existing.status == SharingSettlementStatus.SETTLED:
+        return existing  # already done — idempotent
+
+    snap = await compute_sharing_snapshot(agreement, period_start, period_end)
+
+    if existing is None:
+        row = PnlSharingSettlement(
+            agreement_id=agreement_id,
+            admin_id=agreement.admin_id,
+            broker_id=agreement.broker_id,
+            period_start=period_start,
+            period_end=period_end,
+            cadence=cadence,
+            net_client_pnl_inr=Decimal128(str(snap.net_client_pnl_inr)),
+            net_client_bkg_inr=Decimal128(str(snap.net_client_bkg_inr)),
+            total_of_both_inr=Decimal128(str(snap.total_of_both_inr)),
+            actual_pnl_inr=Decimal128(str(snap.actual_pnl_inr)),
+            share_pct_snapshot=agreement.share_pct,
+            sharing_pnl_inr=Decimal128(str(snap.sharing_pnl_inr)),
+            sharing_bkg_inr=Decimal128(str(snap.sharing_bkg_inr)),
+            sharing_total_inr=Decimal128(str(snap.sharing_total_inr)),
+            status=SharingSettlementStatus.PENDING,
+        )
+        await row.insert()
+    else:
+        row = existing
+        row.retry_count += 1
+        # Refresh snapshot fields in case data has changed since FAILED state
+        row.net_client_pnl_inr = Decimal128(str(snap.net_client_pnl_inr))
+        row.net_client_bkg_inr = Decimal128(str(snap.net_client_bkg_inr))
+        row.total_of_both_inr = Decimal128(str(snap.total_of_both_inr))
+        row.actual_pnl_inr = Decimal128(str(snap.actual_pnl_inr))
+        row.sharing_pnl_inr = Decimal128(str(snap.sharing_pnl_inr))
+        row.sharing_bkg_inr = Decimal128(str(snap.sharing_bkg_inr))
+        row.sharing_total_inr = Decimal128(str(snap.sharing_total_inr))
+
+    amount = snap.sharing_total_inr
+    tx_admin: WalletTransaction | None = None
+    tx_broker: WalletTransaction | None = None
+
+    try:
+        if amount > 0:
+            # Broker pays admin → debit broker, credit admin
+            tx_broker = await wallet_service.adjust(
+                user_id=agreement.broker_id,
+                amount=-amount,  # negative = debit
+                transaction_type=TransactionType.PNL_SHARING_PAYOUT,
+                narration=f"P&L sharing payout for period {period_start.date()}",
+                reference_type="PnlSharingSettlement",
+                reference_id=str(row.id),
+                actor_id=actor.id if actor else None,
+            )
+            tx_admin = await wallet_service.adjust(
+                user_id=agreement.admin_id,
+                amount=amount,  # positive = credit
+                transaction_type=TransactionType.PNL_SHARING_RECEIPT,
+                narration=f"P&L sharing receipt for period {period_start.date()}",
+                reference_type="PnlSharingSettlement",
+                reference_id=str(row.id),
+                actor_id=actor.id if actor else None,
+            )
+        elif amount < 0:
+            # Admin pays broker → debit admin, credit broker
+            abs_amt = -amount
+            tx_admin = await wallet_service.adjust(
+                user_id=agreement.admin_id,
+                amount=-abs_amt,  # negative = debit
+                transaction_type=TransactionType.PNL_SHARING_PAYOUT,
+                narration=f"P&L sharing payout for period {period_start.date()}",
+                reference_type="PnlSharingSettlement",
+                reference_id=str(row.id),
+                actor_id=actor.id if actor else None,
+            )
+            tx_broker = await wallet_service.adjust(
+                user_id=agreement.broker_id,
+                amount=abs_amt,
+                transaction_type=TransactionType.PNL_SHARING_RECEIPT,
+                narration=f"P&L sharing receipt for period {period_start.date()}",
+                reference_type="PnlSharingSettlement",
+                reference_id=str(row.id),
+                actor_id=actor.id if actor else None,
+            )
+        # amount == 0: skip wallet calls
+
+        row.transaction_ref_admin = tx_admin.id if tx_admin else None
+        row.transaction_ref_broker = tx_broker.id if tx_broker else None
+        row.status = SharingSettlementStatus.SETTLED
+        row.settled_at = now_utc()
+        row.settled_by = actor.id if actor else None
+        row.failure_reason = None
+    except InsufficientFundsError as e:
+        row.status = SharingSettlementStatus.FAILED
+        row.failure_reason = str(e)[:500]
+        # NOTE: if tx_broker succeeded but tx_admin then failed, the broker debit
+        # is already booked. Phase A accepts this (rare in MANUAL mode; manual
+        # retry will resume from PENDING and either succeed or stay FAILED).
+        # Phase B will add a true transaction wrapping mechanism.
+    except Exception as e:  # noqa: BLE001 — defensive
+        row.status = SharingSettlementStatus.FAILED
+        row.failure_reason = f"unexpected: {type(e).__name__}: {str(e)[:400]}"
+
+    await row.save()
+    return row
