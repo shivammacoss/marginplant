@@ -169,7 +169,7 @@ async def heal_legacy_percent_seeds() -> int:
     """Idempotent boot heal — resets legacy seed values to NULL so the
     resolver's inheritance / inference paths take over.
 
-    Two things get reset:
+    Three things get reset:
 
     1. ``marginCalcMode == "percent"`` (the old seed default which is no
        longer a valid admin dropdown option). Setting to NULL lets the
@@ -183,6 +183,14 @@ async def heal_legacy_percent_seeds() -> int:
        NSE_OPT expecting all options to use 300, only to discover the
        option columns silently overrode it.
 
+    3. ``expiryDayIntradayMargin == 100.0`` / ``expiryDayOptionBuyMargin
+       == 100.0`` / ``expiryDayOptionSellMargin == 50.0`` (the seed
+       defaults from ``NettingFieldsRequired``). Setting to NULL signals
+       "inherit from regular intraday / option-side margin", so a Times
+       500× segment doesn't silently switch to 100× on every contract's
+       expiry day. Admins who DO want a stricter expiry-day tier set
+       the value explicitly and that wins over the inherit fallback.
+
     Safe to run on every boot — no-op once rows are cleaned. Returns the
     count of healed rows.
     """
@@ -190,6 +198,9 @@ async def heal_legacy_percent_seeds() -> int:
     SEED_INTRA = 100.0
     SEED_OPT_BUY = 100.0
     SEED_OPT_SELL = 15.0
+    SEED_EXPIRY_INTRA = 100.0
+    SEED_EXPIRY_OPT_BUY = 100.0
+    SEED_EXPIRY_OPT_SELL = 50.0
     healed = 0
     for seg in rows:
         changed = False
@@ -215,6 +226,20 @@ async def heal_legacy_percent_seeds() -> int:
             changed = True
         if float(getattr(seg, "optionSellOvernight", 0) or 0) == SEED_OPT_SELL:
             seg.optionSellOvernight = None
+            changed = True
+        # Reset expiry-day overrides when they're at seed defaults — same
+        # "inherit from segment" semantics as the option-side reset. Was
+        # the root cause of Times-mode segments (e.g. MCX FUT 500×)
+        # silently dropping to 100× on every contract's expiry day, which
+        # priced a 1-lot CRUDEOIL margin at ₹10,247 instead of ₹2,049.
+        if float(getattr(seg, "expiryDayIntradayMargin", 0) or 0) == SEED_EXPIRY_INTRA:
+            seg.expiryDayIntradayMargin = None
+            changed = True
+        if float(getattr(seg, "expiryDayOptionBuyMargin", 0) or 0) == SEED_EXPIRY_OPT_BUY:
+            seg.expiryDayOptionBuyMargin = None
+            changed = True
+        if float(getattr(seg, "expiryDayOptionSellMargin", 0) or 0) == SEED_EXPIRY_OPT_SELL:
+            seg.expiryDayOptionSellMargin = None
             changed = True
         if changed:
             try:
