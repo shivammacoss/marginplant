@@ -330,9 +330,20 @@ async def list_positions(
 
     out = []
     for r in rows:
-        ltp = ltp_map.get(r.instrument.token, 0.0)
+        # For CLOSED rows the price + P&L must be FROZEN — the user
+        # explicitly flagged this ("close trade me pnl move mat karna
+        # thoda sa bhi"). Use the close-price that
+        # position_service.apply_trade stamped onto `r.ltp` at the
+        # closing fill, never the live feed. For OPEN rows keep the
+        # live LTP so M2M ticks per refresh.
+        is_closed = r.status == PositionStatus.CLOSED
+        if is_closed:
+            stored_ltp = float(str(r.ltp)) if r.ltp is not None else 0.0
+            ltp_f = stored_ltp
+        else:
+            ltp = ltp_map.get(r.instrument.token, 0.0)
+            ltp_f = float(ltp)
         avg = float(str(r.avg_price))
-        ltp_f = float(ltp)
         qty = r.quantity
         margin = float(str(r.margin_used))
         realized = float(str(r.realized_pnl))
@@ -361,8 +372,13 @@ async def list_positions(
                 if r.close_usd_inr_rate is not None
                 else open_rate
             )
-            # Live FX for the unrealised leg — moves with USDINR every refresh.
-            unrealized_pnl_inr = (ltp_f - avg) * qty * current_usd_inr
+            # CLOSED → frozen 0 (qty is 0 anyway; making it explicit so
+            # any future code that touches this branch can't drift).
+            # OPEN → live FX × live LTP delta so M2M ticks per refresh.
+            if is_closed:
+                unrealized_pnl_inr = 0.0
+            else:
+                unrealized_pnl_inr = (ltp_f - avg) * qty * current_usd_inr
             realized_pnl_inr = realized * close_rate
             # margin_used was locked from the wallet at order time (validator
             # computed it as a wallet-currency number), so DON'T re-apply FX
@@ -370,7 +386,7 @@ async def list_positions(
             # wallet's used_margin.
             margin_inr = margin
         else:
-            unrealized_pnl_inr = (ltp_f - avg) * qty
+            unrealized_pnl_inr = 0.0 if is_closed else (ltp_f - avg) * qty
             realized_pnl_inr = realized
             margin_inr = margin
             open_rate = 1.0
