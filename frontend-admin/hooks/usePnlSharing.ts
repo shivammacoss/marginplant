@@ -3,6 +3,7 @@ import {
   PnlSharingAPI,
   type SettlementCadence,
   type AgreementStatus,
+  type AgreementType,
   type SharingSettlementStatus,
 } from "@/lib/api/pnl-sharing";
 
@@ -19,6 +20,7 @@ const KEYS = {
 
 export function useAgreements(filters?: {
   status?: AgreementStatus;
+  agreement_type?: AgreementType;
   admin_id?: string;
   broker_id?: string;
   skip?: number;

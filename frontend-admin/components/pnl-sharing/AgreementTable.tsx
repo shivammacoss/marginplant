@@ -36,6 +36,7 @@ export function AgreementTable({
             <th className="px-4 py-2 text-left">Mode</th>
             <th className="px-4 py-2 text-left">Cadence</th>
             <th className="px-4 py-2 text-left">Status</th>
+            <th className="px-4 py-2 text-left">Type</th>
             {hasActions && <th className="px-4 py-2 text-right">Actions</th>}
           </tr>
         </thead>
@@ -43,7 +44,7 @@ export function AgreementTable({
           {agreements.length === 0 && (
             <tr>
               <td
-                colSpan={showAdminColumn ? (hasActions ? 7 : 6) : hasActions ? 6 : 5}
+                colSpan={showAdminColumn ? (hasActions ? 8 : 7) : hasActions ? 7 : 6}
                 className="px-4 py-8 text-center text-muted-foreground"
               >
                 No agreements
@@ -91,6 +92,19 @@ export function AgreementTable({
                   }
                 >
                   {a.status}
+                </span>
+              </td>
+              <td className="px-4 py-2">
+                <span
+                  className={
+                    a.agreement_type === "BROKERAGE_ONLY"
+                      ? "text-info text-xs"
+                      : "text-xs text-muted-foreground"
+                  }
+                >
+                  {a.agreement_type === "BROKERAGE_ONLY"
+                    ? "BKG only"
+                    : "PNL + BKG"}
                 </span>
               </td>
               {hasActions && (

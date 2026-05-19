@@ -4,6 +4,7 @@ import { api, unwrap } from "@/lib/api";
 export type AgreementStatus = "ACTIVE" | "PAUSED" | "ENDED";
 export type SettlementMode = "AUTO" | "MANUAL";
 export type SettlementCadence = "DAILY" | "WEEKLY" | "MONTHLY";
+export type AgreementType = "PNL_AND_BROKERAGE" | "BROKERAGE_ONLY";
 export type SharingSettlementStatus = "PENDING" | "SETTLED" | "FAILED";
 
 export interface AgreementDTO {
@@ -18,6 +19,7 @@ export interface AgreementDTO {
   settlement_mode: SettlementMode;
   settlement_cadence: SettlementCadence | null;
   status: AgreementStatus;
+  agreement_type: AgreementType;
   effective_from: string;
   effective_until: string | null;
   created_at: string;
@@ -77,6 +79,7 @@ export const PnlSharingAPI = {
   // Agreements
   listAgreements: (params?: {
     status?: AgreementStatus;
+    agreement_type?: AgreementType;
     admin_id?: string;
     broker_id?: string;
     skip?: number;
@@ -92,6 +95,7 @@ export const PnlSharingAPI = {
     share_pct: string;
     settlement_mode: SettlementMode;
     settlement_cadence?: SettlementCadence | null;
+    agreement_type?: AgreementType;
   }) =>
     unwrap<AgreementDTO>(api.post("/admin/pnl-sharing/agreements", body)),
 
