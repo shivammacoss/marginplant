@@ -1387,6 +1387,19 @@ def _to_legacy_dict(
     is_option_buy = is_option and (action or "").upper() == "BUY"
     is_option_sell = is_option and (action or "").upper() == "SELL"
 
+    # Per-side override for option BUY / SELL. NULL = inherit segment-level
+    # marginCalcMode resolved above. When explicitly set, it overrides
+    # the mode for that side only — admin can run option BUY in Fixed
+    # (flat ₹/lot) while option SELL stays on Times (multiplier).
+    if is_option_buy:
+        side_mode = pick("optionBuyMarginCalcMode", None)
+        if side_mode in ("fixed", "times", "percent"):
+            margin_mode = side_mode
+    elif is_option_sell:
+        side_mode = pick("optionSellMarginCalcMode", None)
+        if side_mode in ("fixed", "times", "percent"):
+            margin_mode = side_mode
+
     # `Times` mode quotes a leverage multiplier (e.g. 700×), which is symmetric
     # across intraday and overnight — telling a user "you have 700× intraday
     # leverage but only 100× overnight" doesn't match how brokers price

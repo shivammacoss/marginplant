@@ -110,6 +110,8 @@ async def dump_all_segments(admin: SuperAdmin):
             "name": seg.name,
             "displayName": seg.displayName,
             "marginCalcMode": seg.marginCalcMode,
+            "optionBuyMarginCalcMode": getattr(seg, "optionBuyMarginCalcMode", None),
+            "optionSellMarginCalcMode": getattr(seg, "optionSellMarginCalcMode", None),
             "intradayMargin": seg.intradayMargin,
             "overnightMargin": seg.overnightMargin,
             "optionBuyIntraday": seg.optionBuyIntraday,
@@ -209,6 +211,8 @@ async def diagnose_segment(
     # Highlight the few fields that drive the OrderPanel display.
     critical = {
         "marginCalcMode": seg_dump.get("marginCalcMode"),
+        "optionBuyMarginCalcMode": seg_dump.get("optionBuyMarginCalcMode"),
+        "optionSellMarginCalcMode": seg_dump.get("optionSellMarginCalcMode"),
         "intradayMargin": seg_dump.get("intradayMargin"),
         "overnightMargin": seg_dump.get("overnightMargin"),
         "optionBuyIntraday": seg_dump.get("optionBuyIntraday"),

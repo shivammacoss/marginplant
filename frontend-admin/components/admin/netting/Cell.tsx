@@ -32,7 +32,14 @@ export function Cell({
         onChange={(e) => {
           const raw = e.target.value;
           const opt = field.options?.find((o) => String(o.v) === raw);
-          onChange(opt ? opt.v : raw === "" ? null : raw);
+          // Empty string from a select always means "no value set" — emit
+          // null so the backend Pydantic Literal accepts it (writes null on
+          // the override doc and the resolver inherits segment-level).
+          if (raw === "") {
+            onChange(null);
+            return;
+          }
+          onChange(opt ? opt.v : raw);
         }}
         className={cls}
       >
