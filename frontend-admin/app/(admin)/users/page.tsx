@@ -47,7 +47,7 @@ export default function AdminUsersPage() {
     { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
     {
       key: "ledger",
-      header: "L",
+      header: "LEDGER",
       align: "center",
       render: (r: any) => (
         <Button
@@ -66,7 +66,7 @@ export default function AdminUsersPage() {
     },
     {
       key: "stats",
-      header: "S",
+      header: "STATS",
       align: "center",
       render: (r: any) => (
         <Button
@@ -85,7 +85,7 @@ export default function AdminUsersPage() {
     },
     {
       key: "balance",
-      header: "B",
+      header: "BALANCE",
       align: "right",
       render: (r: any) => {
         const v = Number(r.wallet?.available_balance ?? 0);

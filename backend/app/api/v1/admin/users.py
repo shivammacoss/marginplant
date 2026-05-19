@@ -143,6 +143,32 @@ async def list_users(
     )
     items = [_ser(u) for u in rows]
     await _enrich_admin_broker_names(items)
+
+    # Batch-load wallets for the page so the admin list can surface the
+    # `available_balance` + `settlement_outstanding` columns. One round-trip
+    # via $in keeps this O(1) instead of N+1 over wallet_service.summary().
+    from app.models.wallet import Wallet
+    user_ids = [u.id for u in rows]
+    wallets = await Wallet.find({"user_id": {"$in": user_ids}}).to_list()
+    wallet_map = {str(w.user_id): w for w in wallets}
+    for item in items:
+        w = wallet_map.get(item["id"])
+        item["wallet"] = (
+            {
+                "available_balance": str(w.available_balance),
+                "used_margin": str(w.used_margin),
+                "credit_limit": str(w.credit_limit),
+                "settlement_outstanding": str(w.settlement_outstanding),
+            }
+            if w is not None
+            else {
+                "available_balance": "0",
+                "used_margin": "0",
+                "credit_limit": "0",
+                "settlement_outstanding": "0",
+            }
+        )
+
     return APIResponse(
         data={
             "items": items,
