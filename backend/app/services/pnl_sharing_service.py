@@ -807,3 +807,22 @@ def stop_pnl_sharing_scheduler() -> None:
     """Signal the scheduler loop to exit on its next tick. Called from main.py shutdown."""
     global _pnl_sharing_scheduler_stop
     _pnl_sharing_scheduler_stop = True
+
+
+async def publish_pnl_sharing_update(broker_id: PydanticObjectId) -> None:
+    """Best-effort WS notify when a position close MAY have changed the
+    snapshot for any agreement under this broker.
+
+    Called from the matching-engine close path. Frontend admin/broker views
+    use the `pnl_sharing_update` event to invalidate report query keys and
+    refetch fresh data. Payload carries the broker_id so future versions can
+    filter (Phase C invalidates all P&L sharing queries on any update).
+
+    Never blocks the caller. Errors are logged + swallowed by the underlying
+    `publish_admin_event`.
+    """
+    from app.services.admin_events import publish_admin_event
+    await publish_admin_event(
+        "pnl_sharing_update",
+        {"broker_id": str(broker_id)},
+    )
