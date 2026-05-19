@@ -255,6 +255,22 @@ async def execute_market_order(
         target=tp_dec,
     )
 
+    # ── P&L sharing WS notify on Position close ──────────────────────
+    # When this fill flattened the position (FIFO match on opposite side
+    # cleared quantity to 0), `apply_fill` flipped status to CLOSED and
+    # already persisted. Best-effort WS notify so admin P&L sharing
+    # dashboards refresh in real-time. Fire-and-forget — never block
+    # trade execution on a Redis hiccup or missing-broker lookup.
+    if pos is not None and pos.status == PositionStatus.CLOSED and pos.user_id is not None:
+        try:
+            from app.models.user import User
+            from app.services.pnl_sharing_service import publish_pnl_sharing_update
+            _u = await User.get(pos.user_id)
+            if _u is not None and _u.assigned_broker_id is not None:
+                await publish_pnl_sharing_update(_u.assigned_broker_id)
+        except Exception:
+            logger.exception("pnl_sharing_ws_publish_failed")
+
     # ── Wallet adjustments — B-book / CFD model ──────────────────────
     # In a B-book broker the user never actually receives the notional
     # value of the underlying asset on a SELL — they only realize the
