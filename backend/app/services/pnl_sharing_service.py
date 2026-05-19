@@ -685,3 +685,61 @@ async def build_report(
         periods_unsettled=unsettled,
     )
     return Report(rows=rows, summary=summary)
+
+
+# ── Scheduler ────────────────────────────────────────────────────────
+async def find_due_settlements(
+    *,
+    now: datetime | None = None,
+) -> list[tuple[PnlSharingAgreement, datetime, datetime]]:
+    """Find (agreement, period_start, period_end) eligible for auto-settle.
+
+    Returns the most recently CLOSED period per the agreement's cadence for each
+    ACTIVE + AUTO agreement, subject to:
+    - effective_from must be on/before period_start (no partial-period backfill)
+    - period_end must be before `now` (period actually closed)
+    - no SETTLED row already exists for that period (FAILED/PENDING re-fire OK)
+    """
+    now = now or now_utc()
+    agreements = await PnlSharingAgreement.find(
+        PnlSharingAgreement.status == AgreementStatus.ACTIVE,
+        PnlSharingAgreement.settlement_mode == SettlementMode.AUTO,
+    ).to_list()
+
+    due: list[tuple[PnlSharingAgreement, datetime, datetime]] = []
+    for agreement in agreements:
+        cadence = agreement.settlement_cadence
+        if cadence is None:
+            continue  # invariant violation; AUTO mode should always have cadence
+
+        # Step back into the previous period
+        if cadence == SettlementCadence.DAILY:
+            ref = now - timedelta(days=1)
+        elif cadence == SettlementCadence.WEEKLY:
+            ref = now - timedelta(days=7)
+        elif cadence == SettlementCadence.MONTHLY:
+            ref = now - timedelta(days=32)  # always lands in the previous month
+        else:
+            continue
+
+        period_start, period_end = compute_period_bounds(cadence, ref)
+
+        # Skip if agreement was created after this period started
+        if agreement.effective_from > period_start:
+            continue
+
+        # Skip if the period hasn't actually closed yet
+        if period_end >= now:
+            continue
+
+        # Skip if a SETTLED row already exists (idempotency optimisation)
+        existing_settled = await PnlSharingSettlement.find_one(
+            PnlSharingSettlement.agreement_id == agreement.id,
+            PnlSharingSettlement.period_start == period_start,
+            PnlSharingSettlement.status == SharingSettlementStatus.SETTLED,
+        )
+        if existing_settled is not None:
+            continue
+
+        due.append((agreement, period_start, period_end))
+    return due
