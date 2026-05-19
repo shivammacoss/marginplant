@@ -97,6 +97,13 @@ export function AdminWsBridge() {
             qc.invalidateQueries({ queryKey: ["admin", "users"] });
             qc.invalidateQueries({ queryKey: ["admin", "dashboard"] });
             break;
+          case "pnl_sharing_update":
+            // Refetch all P&L sharing data (list, agreement detail, report
+            // rows, settlement history, me/agreement) so the live SharingCard
+            // refreshes as positions close. Phase C invalidates broadly;
+            // per-agreement filtering by broker_id is a future optimisation.
+            qc.invalidateQueries({ queryKey: ["pnl-sharing"] });
+            break;
           // hello / heartbeat — ignore
         }
       };
