@@ -28,6 +28,14 @@ class Wallet(TimestampMixin):
     unrealized_pnl: Money = Field(default_factory=_zero)
     credit_limit: Money = Field(default_factory=_zero)
 
+    # Unrecovered settlement loss — when a stop-out force-close booked a
+    # realized loss that exceeded available_balance + credit_limit, the
+    # uncoverable shortfall sits here. Recovered automatically against the
+    # next DEPOSIT (deducted before crediting available_balance). Read-only
+    # for the user; modified only by wallet_service.force_debit and the
+    # DEPOSIT recovery branch in wallet_service.adjust.
+    settlement_outstanding: Money = Field(default_factory=_zero)
+
     total_deposits: Money = Field(default_factory=_zero)
     total_withdrawals: Money = Field(default_factory=_zero)
     total_brokerage: Money = Field(default_factory=_zero)
