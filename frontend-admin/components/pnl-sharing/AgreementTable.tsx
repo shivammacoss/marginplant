@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { AlertCircle } from "lucide-react";
 import type { AgreementDTO } from "@/lib/api/pnl-sharing";
@@ -22,6 +23,7 @@ export function AgreementTable({
   onEnd,
   failedAgreementIds,
 }: Props) {
+  const router = useRouter();
   const hasActions = !!(onEdit || onPauseResume || onEnd);
   return (
     <div className="overflow-x-auto border border-zinc-800 rounded-lg">
@@ -51,7 +53,8 @@ export function AgreementTable({
           {agreements.map((a) => (
             <tr
               key={a.id}
-              className="border-t border-zinc-800 hover:bg-zinc-900/30"
+              onClick={() => router.push(`/management/pnl-sharing/${a.id}`)}
+              className="border-t border-zinc-800 hover:bg-zinc-900/30 cursor-pointer"
             >
               {showAdminColumn && (
                 <td className="px-4 py-2">
@@ -91,7 +94,10 @@ export function AgreementTable({
                 </span>
               </td>
               {hasActions && (
-                <td className="px-4 py-2 text-right space-x-1">
+                <td
+                  className="px-4 py-2 text-right space-x-1"
+                  onClick={(e) => e.stopPropagation()}
+                >
                   {onEdit && (
                     <Button size="sm" variant="ghost" onClick={() => onEdit(a)}>
                       Edit
