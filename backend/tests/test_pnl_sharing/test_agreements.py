@@ -78,3 +78,35 @@ async def test_share_pct_out_of_range(db, admin_user, broker_user):
             share_pct=Decimal("150"), settlement_mode=SettlementMode.MANUAL,
             settlement_cadence=None,
         )
+
+
+@pytest.mark.asyncio
+async def test_create_brokerage_only_agreement(db, admin_user, broker_user):
+    from app.models.pnl_sharing import AgreementType, SettlementMode
+    a = await svc.create_agreement(
+        actor=admin_user, admin_id=admin_user.id, broker_id=broker_user.id,
+        share_pct=Decimal("25"), settlement_mode=SettlementMode.MANUAL,
+        settlement_cadence=None, agreement_type=AgreementType.BROKERAGE_ONLY,
+    )
+    assert a.agreement_type == AgreementType.BROKERAGE_ONLY
+
+
+@pytest.mark.asyncio
+async def test_same_pair_can_have_both_agreement_types(db, admin_user, broker_user):
+    """The same admin↔broker pair should be able to hold both a
+    PNL_AND_BROKERAGE and a BROKERAGE_ONLY agreement simultaneously."""
+    from app.models.pnl_sharing import AgreementType, SettlementMode
+    a1 = await svc.create_agreement(
+        actor=admin_user, admin_id=admin_user.id, broker_id=broker_user.id,
+        share_pct=Decimal("30"), settlement_mode=SettlementMode.MANUAL,
+        settlement_cadence=None,
+        agreement_type=AgreementType.PNL_AND_BROKERAGE,
+    )
+    a2 = await svc.create_agreement(
+        actor=admin_user, admin_id=admin_user.id, broker_id=broker_user.id,
+        share_pct=Decimal("10"), settlement_mode=SettlementMode.MANUAL,
+        settlement_cadence=None,
+        agreement_type=AgreementType.BROKERAGE_ONLY,
+    )
+    assert a1.id != a2.id
+    assert a1.agreement_type != a2.agreement_type

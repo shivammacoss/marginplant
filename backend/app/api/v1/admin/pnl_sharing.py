@@ -21,6 +21,7 @@ from fastapi.responses import StreamingResponse
 from app.core.dependencies import CurrentAdmin
 from app.models.pnl_sharing import (
     AgreementStatus,
+    AgreementType,
     PnlSharingAgreement,
     PnlSharingSettlement,
     SettlementCadence,
@@ -74,6 +75,7 @@ async def _serialize_agreement(a: PnlSharingAgreement) -> AgreementDTO:
         share_pct=str(a.share_pct),
         settlement_mode=a.settlement_mode,
         settlement_cadence=a.settlement_cadence,
+        agreement_type=a.agreement_type,
         status=a.status,
         effective_from=a.effective_from,
         effective_until=a.effective_until,
@@ -112,12 +114,14 @@ async def list_agreements(
     status_filter: AgreementStatus | None = Query(default=None, alias="status"),
     admin_id: PydanticObjectId | None = Query(default=None),
     broker_id: PydanticObjectId | None = Query(default=None),
+    agreement_type: AgreementType | None = Query(default=None),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
 ):
     rows = await svc.list_agreements_for_actor(
         actor=actor, status=status_filter,
         admin_id=admin_id, broker_id=broker_id,
+        agreement_type=agreement_type,
         skip=skip, limit=limit,
     )
     dtos = [await _serialize_agreement(a) for a in rows]
@@ -140,6 +144,7 @@ async def create_agreement(body: CreateAgreementRequest, actor: CurrentAdmin):
             share_pct=body.share_pct,
             settlement_mode=body.settlement_mode,
             settlement_cadence=body.settlement_cadence,
+            agreement_type=body.agreement_type,
         )
     except svc.AgreementConflict as e:
         raise HTTPException(status.HTTP_409_CONFLICT, str(e))

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.models.pnl_sharing import (
     AgreementStatus,
+    AgreementType,
     SettlementCadence,
     SettlementMode,
     SharingSettlementStatus,
@@ -25,6 +26,7 @@ class CreateAgreementRequest(BaseModel):
     share_pct: Decimal = Field(ge=0, le=100)
     settlement_mode: SettlementMode
     settlement_cadence: SettlementCadence | None = None
+    agreement_type: AgreementType = AgreementType.PNL_AND_BROKERAGE
 
 
 class UpdateAgreementRequest(BaseModel):
@@ -44,6 +46,7 @@ class AgreementDTO(BaseModel):
     share_pct: str
     settlement_mode: SettlementMode
     settlement_cadence: SettlementCadence | None
+    agreement_type: AgreementType
     status: AgreementStatus
     effective_from: datetime
     effective_until: datetime | None

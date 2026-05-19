@@ -40,12 +40,18 @@ class SharingSettlementStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class AgreementType(StrEnum):
+    PNL_AND_BROKERAGE = "PNL_AND_BROKERAGE"  # shares both PNL and brokerage (default)
+    BROKERAGE_ONLY = "BROKERAGE_ONLY"        # shares brokerage only; sharing_pnl forced to 0
+
+
 class PnlSharingAgreement(TimestampMixin):
     admin_id: Indexed(PydanticObjectId)   # type: ignore[valid-type]
     broker_id: Indexed(PydanticObjectId)  # type: ignore[valid-type]
     share_pct: Decimal128                 # 0..100 inclusive
     settlement_mode: SettlementMode
     settlement_cadence: SettlementCadence | None = None  # null iff mode=MANUAL
+    agreement_type: AgreementType = AgreementType.PNL_AND_BROKERAGE
     status: AgreementStatus = AgreementStatus.ACTIVE
     effective_from: datetime              # IST midnight, stored UTC
     effective_until: datetime | None = None
@@ -57,10 +63,10 @@ class PnlSharingAgreement(TimestampMixin):
         use_state_management = True
         indexes = [
             IndexModel(
-                [("admin_id", ASCENDING), ("broker_id", ASCENDING)],
+                [("admin_id", ASCENDING), ("broker_id", ASCENDING), ("agreement_type", ASCENDING)],
                 unique=True,
                 partialFilterExpression={"status": {"$in": ["ACTIVE", "PAUSED"]}},
-                name="uniq_active_admin_broker",
+                name="uniq_active_admin_broker_type",
             ),
             IndexModel([("broker_id", ASCENDING)]),
             IndexModel(

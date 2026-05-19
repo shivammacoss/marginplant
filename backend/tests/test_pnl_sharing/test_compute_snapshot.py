@@ -174,6 +174,52 @@ async def test_snapshot_outside_window_excluded(db, agreement, client_user):
 # ── Subtree test: sub-broker descendants should be INCLUDED in agreement ─────
 
 
+async def test_brokerage_only_agreement_zeros_sharing_pnl(
+    db, admin_user, broker_user, client_user
+):
+    """A BROKERAGE_ONLY agreement: clients lost ₹10000 + brokerage ₹500.
+    Expected: sharing_pnl=0 (regardless of client loss), sharing_bkg=150 (30% of 500)."""
+    from app.models.pnl_sharing import (
+        AgreementStatus, AgreementType, PnlSharingAgreement,
+        SettlementMode,
+    )
+
+    a = PnlSharingAgreement(
+        admin_id=admin_user.id,
+        broker_id=broker_user.id,
+        share_pct=Decimal128("30"),
+        settlement_mode=SettlementMode.MANUAL,
+        settlement_cadence=None,
+        status=AgreementStatus.ACTIVE,
+        agreement_type=AgreementType.BROKERAGE_ONLY,
+        effective_from=datetime(2026, 5, 1, tzinfo=UTC),
+        created_by=admin_user.id,
+        last_modified_by=admin_user.id,
+    )
+    await a.insert()
+
+    period_start = datetime(2026, 5, 18, 0, 0, tzinfo=UTC)
+    period_end = datetime(2026, 5, 18, 23, 59, 59, tzinfo=UTC)
+
+    await _make_position(
+        user_id=client_user.id,
+        realized_pnl="-10000",
+        closed_at=datetime(2026, 5, 18, 12, 0, tzinfo=UTC),
+    )
+    await _make_brokerage_tx(
+        user_id=client_user.id,
+        amount="-500",
+        created_at=datetime(2026, 5, 18, 12, 0, 1, tzinfo=UTC),
+    )
+
+    snap = await compute_sharing_snapshot(a, period_start, period_end)
+    assert snap.net_client_pnl_inr == Decimal("-10000.00")  # display value still set
+    assert snap.net_client_bkg_inr == Decimal("500.00")
+    assert snap.sharing_pnl_inr == Decimal("0")  # KEY: zero, not 3000
+    assert snap.sharing_bkg_inr == Decimal("150.00")
+    assert snap.sharing_total_inr == Decimal("150.00")
+
+
 async def test_snapshot_includes_subbroker_clients_in_subtree(
     db, admin_user, broker_user, agreement
 ):

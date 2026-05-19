@@ -27,6 +27,7 @@ from app.core.exceptions import (
 from app.models.audit_log import AuditAction
 from app.models.pnl_sharing import (
     AgreementStatus,
+    AgreementType,
     PnlSharingAgreement,
     PnlSharingSettlement,
     SettlementCadence,
@@ -193,6 +194,14 @@ async def compute_sharing_snapshot(
     sharing_pnl = quantize_money(broker_view_pnl * share_frac)
     sharing_bkg = quantize_money(net_client_bkg * share_frac)
 
+    # If BROKERAGE_ONLY, force sharing_pnl to 0 and recompute total.
+    if agreement.agreement_type == AgreementType.BROKERAGE_ONLY:
+        sharing_pnl = Decimal("0")
+        # broker_view_pnl and net_client_pnl_inr are still surfaced in the
+        # snapshot (display purposes — admin can see what the user did),
+        # but the agreement's economic share is zero for the PNL component.
+        # total_of_both stays as-is (it's a broker-view aggregate).
+
     return SharingSnapshot(
         net_client_pnl_inr=quantize_money(net_client_pnl),
         net_client_bkg_inr=quantize_money(net_client_bkg),
@@ -221,6 +230,7 @@ async def create_agreement(
     share_pct: Decimal,
     settlement_mode: SettlementMode,
     settlement_cadence: SettlementCadence | None,
+    agreement_type: AgreementType = AgreementType.PNL_AND_BROKERAGE,
 ) -> PnlSharingAgreement:
     if not (Decimal("0") <= share_pct <= Decimal("100")):
         raise AgreementValidationError("share_pct must be in [0, 100]")
@@ -244,6 +254,7 @@ async def create_agreement(
     existing = await PnlSharingAgreement.find_one(
         PnlSharingAgreement.admin_id == admin_id,
         PnlSharingAgreement.broker_id == broker_id,
+        PnlSharingAgreement.agreement_type == agreement_type,
         PnlSharingAgreement.status != AgreementStatus.ENDED,
     )
     if existing is not None:
@@ -255,6 +266,7 @@ async def create_agreement(
         share_pct=Decimal128(str(share_pct)),
         settlement_mode=settlement_mode,
         settlement_cadence=settlement_cadence,
+        agreement_type=agreement_type,
         status=AgreementStatus.ACTIVE,
         effective_from=now_utc(),
         created_by=actor.id,
@@ -284,6 +296,7 @@ async def create_agreement(
             "settlement_cadence": settlement_cadence.value
             if settlement_cadence
             else None,
+            "agreement_type": agreement_type.value,
         },
     )
     return a
@@ -423,6 +436,7 @@ async def list_agreements_for_actor(
     status: AgreementStatus | None = None,
     admin_id: PydanticObjectId | None = None,
     broker_id: PydanticObjectId | None = None,
+    agreement_type: AgreementType | None = None,
     skip: int = 0,
     limit: int = 50,
 ) -> list[PnlSharingAgreement]:
@@ -437,6 +451,8 @@ async def list_agreements_for_actor(
         q = q.find(PnlSharingAgreement.admin_id == admin_id)
     if broker_id is not None:
         q = q.find(PnlSharingAgreement.broker_id == broker_id)
+    if agreement_type is not None:
+        q = q.find(PnlSharingAgreement.agreement_type == agreement_type)
     return await q.skip(skip).limit(limit).to_list()
 
 
@@ -816,6 +832,30 @@ def stop_pnl_sharing_scheduler() -> None:
     """Signal the scheduler loop to exit on its next tick. Called from main.py shutdown."""
     global _pnl_sharing_scheduler_stop
     _pnl_sharing_scheduler_stop = True
+
+
+async def heal_pnl_sharing_agreement_type() -> int:
+    """Idempotent backfill: set agreement_type=PNL_AND_BROKERAGE on any rows
+    missing it, then drop the legacy `uniq_active_admin_broker` index if
+    present (the new `uniq_active_admin_broker_type` index replaces it).
+
+    Returns count of rows backfilled.
+    """
+    coll = PnlSharingAgreement.get_motor_collection()
+
+    # Backfill missing field
+    res = await coll.update_many(
+        {"agreement_type": {"$exists": False}},
+        {"$set": {"agreement_type": "PNL_AND_BROKERAGE"}},
+    )
+
+    # Drop the legacy index if present (new model defines a different name)
+    try:
+        await coll.drop_index("uniq_active_admin_broker")
+    except Exception:
+        pass  # already dropped or never existed
+
+    return res.modified_count
 
 
 async def publish_pnl_sharing_update(broker_id: PydanticObjectId) -> None:
