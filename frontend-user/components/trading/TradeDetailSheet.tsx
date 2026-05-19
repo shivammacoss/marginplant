@@ -1114,6 +1114,11 @@ function TradeDetailSheetInner({ token, open, onClose, onSwap }: Props) {
           onOpenChange={setOptionChainOpen}
           initialUnderlying={instrument?.symbol ?? null}
           onPick={(tok) => {
+            // Guard against empty/falsy tokens — calling onSwap("") would
+            // null-out the parent's sheetToken and the lazy-mount wrapper
+            // would unmount the entire sheet, looking to the user like
+            // "card hi nahi khula".
+            if (!tok) return;
             setOptionChainOpen(false);
             // Mobile + parent gave us `onSwap` → just swap the active
             // token, keep the bottom-sheet open at the new strike. No
@@ -1123,7 +1128,7 @@ function TradeDetailSheetInner({ token, open, onClose, onSwap }: Props) {
               typeof window !== "undefined" &&
               window.matchMedia("(max-width: 767px)").matches;
             if (isMobileUi && onSwap) {
-              onSwap(tok);
+              onSwap(String(tok));
               return;
             }
             onClose();
