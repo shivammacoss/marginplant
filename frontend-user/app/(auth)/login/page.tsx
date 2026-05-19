@@ -53,8 +53,23 @@ function LoginPageInner() {
   const searchParams = useSearchParams();
   const login = useAuthStore((s) => s.login);
   const setUser = useAuthStore((s) => s.setUser);
+  const hydrated = useAuthStore((s) => s.hydrated);
+  const currentUser = useAuthStore((s) => s.user);
   const [showPwd, setShowPwd] = useState(false);
   const [needs2fa, setNeeds2fa] = useState(false);
+
+  // If the auth store rehydrated with a live `user`, the visitor is
+  // already signed in — bounce them to /dashboard instead of showing
+  // the login form. Critical for the installed PWA: cold launches land
+  // here from the manifest's start_url, and without this guard a
+  // previously-authed user would see the login form even though their
+  // 30-day refresh token is still valid (user complaint: "ek baar
+  // login ho gaya use to login hi rahe, logout mat ho").
+  useEffect(() => {
+    if (hydrated && currentUser) {
+      router.replace("/dashboard");
+    }
+  }, [hydrated, currentUser, router]);
 
   // Detect admin "Login as user" on the FIRST render — the access + refresh
   // tokens come in as query params when the admin panel pops a new tab via

@@ -21,7 +21,20 @@ export default function manifest(): MetadataRoute.Manifest {
     short_name: "MarginPlant",
     description:
       "Trade Indian stocks, F&O, commodities, currencies, and crypto with MarginPlant Broker — fast, transparent, dark-themed.",
-    start_url: "/login",
+    // start_url is /dashboard, not /login. Earlier we shipped /login
+    // because the spec said "PWA opens login first" — but that combined
+    // with the login page NOT auto-redirecting already-authed users
+    // meant every cold launch of the installed PWA dumped the user on
+    // a login form even though their refresh token (30 days) was still
+    // valid. User complaint: "ek baar login ho gaya use to login hi
+    // rahe, logout mat ho".
+    //
+    // Now: dashboard is the entry point. The dashboard layout's auth
+    // guard redirects unauthenticated visitors to /login on its own,
+    // so first-time installs still land on the login form — but
+    // returning users with a valid session stay signed in across
+    // restarts, exactly the native-app feel they want.
+    start_url: "/dashboard",
     scope: "/",
     display: "standalone",
     orientation: "portrait",
