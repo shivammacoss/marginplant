@@ -490,8 +490,21 @@ async def validate(
                 )
 
     # 6) OTM extra-strict cap
+    # Skipped for closing / squareoff orders — those REDUCE existing
+    # exposure, they don't add a new OTM bet. Risk auto-squareoff on
+    # a stop-out used to silently fail in an infinite retry loop here
+    # ("OTM cap 5 reached") because the user already had > otm_max
+    # lots open and the enforcer kept trying to add more by routing
+    # the close as a regular fill. Same exemption every other lot/qty
+    # cap above already gives via `is_squareoff` / `is_reducing`.
     otm_max = int(s.get("otm_max_each_lot") or 0)
-    if otm_max and "OPTION" in segment_type.upper() and instrument.option_type:
+    if (
+        otm_max
+        and "OPTION" in segment_type.upper()
+        and instrument.option_type
+        and not is_squareoff
+        and not is_reducing
+    ):
         # Heuristic: rely on max_each_lot already handling general cap; here we tighten
         if (held + lots) > otm_max:
             raise OrderRejectedError(f"OTM cap {otm_max} reached", code="OTM_CAP_EXCEEDED")
