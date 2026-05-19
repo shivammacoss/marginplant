@@ -19,6 +19,7 @@ from typing import Any
 from beanie import PydanticObjectId
 from bson import Decimal128
 
+from app.core.exceptions import InsufficientFundsError
 from app.models._base import OrderAction, OrderType
 from app.models.order import Order, OrderStatus
 from app.models.trade import Trade
@@ -318,17 +319,37 @@ async def execute_market_order(
     # using `pnl_inr_dec` here would double-debit it. `pnl_inr_dec` is
     # kept only for `Trade.pnl_inr` (History tab display).
     if raw_pnl_inr_dec is not None and raw_pnl_inr_dec != 0:
-        await wallet_service.adjust(
-            order.user_id,
-            raw_pnl_inr_dec,
-            transaction_type=TransactionType.PNL,
-            narration=(
-                f"Realized {'profit' if raw_pnl_inr_dec > 0 else 'loss'} "
-                f"on {order.instrument.symbol} close"
-            ),
-            reference_type="ORDER",
-            reference_id=str(order.id),
+        pnl_narration = (
+            f"Realized {'profit' if raw_pnl_inr_dec > 0 else 'loss'} "
+            f"on {order.instrument.symbol} close"
         )
+        try:
+            await wallet_service.adjust(
+                order.user_id,
+                raw_pnl_inr_dec,
+                transaction_type=TransactionType.PNL,
+                narration=pnl_narration,
+                reference_type="ORDER",
+                reference_id=str(order.id),
+            )
+        except InsufficientFundsError:
+            # Forced-close path (risk_enforcer stop-out, auto-squareoff): the
+            # position MUST close even if the realized loss exceeds available
+            # balance + credit_limit. Fall back to `force_debit` which debits
+            # what we can and books the overflow to `settlement_outstanding`.
+            # Voluntary user closes (`is_squareoff` falsy) keep raising so the
+            # user can't silently rack up dues from their own actions.
+            if getattr(order, "is_squareoff", False) and raw_pnl_inr_dec < 0:
+                await wallet_service.force_debit(
+                    order.user_id,
+                    -raw_pnl_inr_dec,
+                    transaction_type=TransactionType.PNL,
+                    narration=f"{pnl_narration} (stop-out: shortfall booked to outstanding)",
+                    reference_type="ORDER",
+                    reference_id=str(order.id),
+                )
+            else:
+                raise
 
     return trade
 

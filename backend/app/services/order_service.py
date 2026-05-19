@@ -295,6 +295,7 @@ async def place_order(
         margin_blocked=Decimal128(str(margin)),
         status=OrderStatus.PENDING,
         is_amo=is_amo,
+        is_squareoff=is_squareoff,
         applied_settings=applied,
         placed_by=user.id,  # type: ignore[arg-type]
         placed_from=str(payload.get("placed_from") or "WEB"),
