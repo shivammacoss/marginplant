@@ -10,10 +10,9 @@ import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { StatusPill } from "@/components/common/StatusPill";
-import { UserActionMenu } from "@/components/admin/UserActionMenu";
+import { UserActionMenu, LiveTradeStatsDialog } from "@/components/admin/UserActionMenu";
 import { OwnerBadge } from "@/components/admin/OwnerBadge";
 import { LedgerSheet } from "@/components/admin/LedgerSheet";
-import { LiveStatsSheet } from "@/components/admin/LiveStatsSheet";
 import { useAdminAuthStore } from "@/stores/authStore";
 
 export default function AdminUsersPage() {
@@ -212,11 +211,15 @@ export default function AdminUsersPage() {
         onClose={() => setLedgerUser(null)}
         user={ledgerUser}
       />
-      <LiveStatsSheet
-        open={!!statsUser}
-        onClose={() => setStatsUser(null)}
-        user={statsUser}
-      />
+      {statsUser && (
+        <LiveTradeStatsDialog
+          open={!!statsUser}
+          userId={statsUser.id}
+          userCode={statsUser.user_code}
+          fullName={statsUser.full_name || ""}
+          onClose={() => setStatsUser(null)}
+        />
+      )}
     </div>
   );
 }

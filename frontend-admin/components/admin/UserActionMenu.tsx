@@ -636,7 +636,7 @@ function _pnlClass(n: number | string | null | undefined): string {
   return "text-foreground";
 }
 
-function LiveTradeStatsDialog({
+export function LiveTradeStatsDialog({
   open,
   userId,
   userCode,
