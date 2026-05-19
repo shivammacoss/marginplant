@@ -17,14 +17,15 @@ import {
   Trash2,
 } from "lucide-react";
 
-import { ManagementAPI, setTokens } from "@/lib/api";
+import { BrokerMgmtAPI, ManagementAPI, setTokens } from "@/lib/api";
 import { useAdminAuthStore } from "@/stores/authStore";
 import { STORAGE_KEYS } from "@/lib/constants";
-import type { AdminUser } from "@/types";
+import type { AdminUser, BrokerPermissions, PermissionLevel } from "@/types";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
@@ -84,6 +85,7 @@ export default function SubAdminsPage() {
   const [loginAsId, setLoginAsId] = useState<string | null>(null);
   const [resetPwTargetId, setResetPwTargetId] = useState<string | null>(null);
   const [newPw, setNewPw] = useState("");
+  const [createBrokerForAdmin, setCreateBrokerForAdmin] = useState<{id: string; name: string} | null>(null);
 
   // Same-origin localStorage means we can't keep both super-admin and sub-admin
   // sessions live in different tabs (both live under localhost:3001). So
@@ -240,6 +242,11 @@ export default function SubAdminsPage() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={() => setCreateBrokerForAdmin({ id: r.id, name: r.full_name || r.user_code })}>
+                <Plus className="size-4 text-primary" />
+                Create Broker
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
               <DropdownMenuItem onSelect={() => loginAs(r)}>
                 <LogIn className="size-4 text-primary" />
                 Login
@@ -380,6 +387,12 @@ export default function SubAdminsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <CreateBrokerForAdminDialog
+        open={!!createBrokerForAdmin}
+        admin={createBrokerForAdmin}
+        onClose={() => setCreateBrokerForAdmin(null)}
+      />
     </div>
   );
 }
@@ -609,6 +622,153 @@ function EditSubAdminDialog({
           </Button>
           <Button onClick={save} disabled={loading}>
             Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ── Create Broker for Admin dialog ────────────────────────────────────
+const BROKER_PERMS_ALL_OFF: BrokerPermissions = {
+  users: "OFF",
+  kyc: "OFF",
+  deposits: "OFF",
+  withdrawals: "OFF",
+  segment_settings: "OFF",
+  risk: "OFF",
+  netting: "OFF",
+  trading_view: "OFF",
+  ledger: "OFF",
+  reports: "OFF",
+  brokerage: "OFF",
+  sub_brokers: "OFF",
+  banks: "OFF",
+};
+
+function CreateBrokerForAdminDialog({
+  open,
+  admin,
+  onClose,
+}: {
+  open: boolean;
+  admin: { id: string; name: string } | null;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const [form, setForm] = useState({
+    full_name: "",
+    email: "",
+    mobile: "",
+    password: "",
+    confirm_password: "",
+    pnl_share_pct: "0",
+  });
+  const [perms, setPerms] = useState<BrokerPermissions>({ ...BROKER_PERMS_ALL_OFF });
+  const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+
+  async function submit() {
+    if (form.password.length < 8) {
+      toast.error("Password must be at least 8 characters");
+      return;
+    }
+    if (form.password !== form.confirm_password) {
+      toast.error("Passwords do not match");
+      return;
+    }
+    setLoading(true);
+    try {
+      await BrokerMgmtAPI.create({
+        full_name: form.full_name,
+        email: form.email,
+        mobile: form.mobile,
+        password: form.password,
+        permissions: perms as unknown as Record<string, "OFF" | "VIEW" | "EDIT">,
+        pnl_share_pct: form.pnl_share_pct,
+        assigned_admin_id: admin?.id,
+      });
+      toast.success("Broker created");
+      onClose();
+      setForm({ full_name: "", email: "", mobile: "", password: "", confirm_password: "", pnl_share_pct: "0" });
+      setPerms({ ...BROKER_PERMS_ALL_OFF });
+      qc.invalidateQueries({ queryKey: ["admin", "brokers"] });
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Create Broker under {admin?.name}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label>Full name</Label>
+              <Input value={form.full_name} onChange={(e) => setForm((f) => ({ ...f, full_name: e.target.value }))} />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Email</Label>
+              <Input type="email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Mobile (10-digit)</Label>
+              <Input value={form.mobile} onChange={(e) => setForm((f) => ({ ...f, mobile: e.target.value }))} />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Password</Label>
+              <div className="relative">
+                <Input
+                  type={showPassword ? "text" : "password"}
+                  className="pr-10"
+                  value={form.password}
+                  onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((s) => !s)}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  className="absolute inset-y-0 right-0 grid w-10 place-items-center text-muted-foreground hover:text-foreground"
+                >
+                  {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                </button>
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Confirm password</Label>
+              <Input
+                type={showPassword ? "text" : "password"}
+                value={form.confirm_password}
+                onChange={(e) => setForm((f) => ({ ...f, confirm_password: e.target.value }))}
+              />
+              {form.confirm_password.length > 0 && form.password !== form.confirm_password ? (
+                <p className="text-xs text-destructive">Passwords do not match</p>
+              ) : null}
+            </div>
+            <div className="space-y-1.5">
+              <Label>PNL share %</Label>
+              <Input
+                type="number"
+                min={0}
+                max={100}
+                step="0.01"
+                value={form.pnl_share_pct}
+                onChange={(e) => setForm((f) => ({ ...f, pnl_share_pct: e.target.value }))}
+              />
+            </div>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={submit} disabled={loading}>
+            Create Broker
           </Button>
         </DialogFooter>
       </DialogContent>
