@@ -147,6 +147,15 @@ Known `admin:events` event types (consumed by [frontend-admin/components/common/
 
 `RUN_SEED_ON_STARTUP=true` (default) runs idempotent seed on every boot: super admin, 20 segment-settings rows, 4 templates (Bronze/Silver/Gold/VIP), default brokerage plan, company bank, deposit/withdrawal rules, platform settings, NSE holidays. Safe to disable in tests via env.
 
+### Settlement outstanding (negative-balance recovery)
+
+When a stop-out force-close cannot fully debit the realized loss from the user's wallet (loss exceeds `available_balance + credit_limit`), the unrecoverable shortfall accrues to `Wallet.settlement_outstanding`. Wallet's `available_balance` floors at 0 — never goes negative. Recovered automatically against the user's next `DEPOSIT` (deducted before crediting available_balance).
+
+- Force-close path uses [`wallet_service.force_debit`](backend/app/services/wallet_service.py); regular trades still respect `InsufficientFundsError`.
+- Force-close is distinguished by `Order.is_squareoff = True` (set by `risk_enforcer._squareoff_position` and propagated through to the matching engine).
+- Two new audit transaction types: `SETTLEMENT_OUTSTANDING_BOOKED` (accrual) and `SETTLEMENT_OUTSTANDING_RECOVERY` (recovered from deposit).
+- User wallet UI shows the outstanding amount in red when > 0; admin user-detail page mirrors it.
+
 ## Conventions
 
 - Use `app.utils.decimal_utils.quantize_money` / `to_decimal` for money — never `float()`.
