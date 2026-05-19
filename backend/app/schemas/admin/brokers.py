@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
+from beanie import PydanticObjectId
 from pydantic import BaseModel, EmailStr, Field
 
 from app.models.user import BrokerPermissions
@@ -23,6 +24,11 @@ class CreateBrokerRequest(BaseModel):
     password: str = Field(min_length=8)
     permissions: BrokerPermissions = Field(default_factory=BrokerPermissions)
     pnl_share_pct: Decimal = Field(default=Decimal("0"), ge=0, le=100)
+    # Super-admin only: pin the new broker to a specific admin's pool.
+    # When omitted, super-admin creates a top-level broker in the platform
+    # pool (assigned_admin_id = None). Admin/broker callers MUST leave this
+    # null — service layer rejects mismatch with their natural chain.
+    assigned_admin_id: PydanticObjectId | None = None
 
 
 class UpdateBrokerRequest(BaseModel):

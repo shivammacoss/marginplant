@@ -119,26 +119,42 @@ async def create_broker(
     full_name: str,
     permissions: BrokerPermissions,
     pnl_share_pct: Decimal,
+    assigned_admin_id: PydanticObjectId | None = None,
 ) -> User:
     """Mints a new BROKER row. Validates permission cap, sets the ownership
     chain, and writes an audit log.
 
-    Allowed creators: ADMIN (creates a top-level broker in their pool) or
-    BROKER (creates a sub-broker in their subtree). Super-admin is rejected
-    — super-admin manages admins, admins manage brokers.
+    Allowed creators: SUPER_ADMIN (top-level broker in platform pool, or
+    pinned to a specific admin via `assigned_admin_id`), ADMIN (top-level
+    broker in their pool — `assigned_admin_id` arg ignored / must match
+    self), or BROKER (sub-broker in their subtree — `assigned_admin_id`
+    arg ignored / must match the inherited admin).
     """
     if pnl_share_pct < 0 or pnl_share_pct > 100:
         raise ValidationFailedError("pnl_share_pct must be between 0 and 100")
 
-    if creator.role == UserRole.SUPER_ADMIN:
-        raise ValidationFailedError(
-            "Super-admin cannot create brokers. Brokers are created by admins."
-        )
-
     cap = max_grantable_perms(creator)
     _validate_permissions_against_cap(permissions, cap)
 
-    assigned_admin_id, ancestry = _resolve_creator_chain(creator)
+    resolved_admin_id, ancestry = _resolve_creator_chain(creator)
+
+    # Super-admin may pin the broker under any existing ADMIN. For non-super
+    # callers, reject any payload assigned_admin_id that differs from the
+    # natural chain (defense in depth — frontend shouldn't send it).
+    if assigned_admin_id is not None:
+        if creator.role == UserRole.SUPER_ADMIN:
+            target_admin = await User.get(assigned_admin_id)
+            if target_admin is None or target_admin.role != UserRole.ADMIN:
+                raise ValidationFailedError(
+                    "assigned_admin_id must reference an existing ADMIN user"
+                )
+            resolved_admin_id = target_admin.id
+        elif assigned_admin_id != resolved_admin_id:
+            raise ValidationFailedError(
+                "Only super-admin may set assigned_admin_id on broker create"
+            )
+
+    assigned_admin_id = resolved_admin_id
 
     new = await user_service.create_user(
         email=email,
@@ -343,18 +359,23 @@ async def list_brokers_for(
     q: str | None = None,
     page: int = 1,
     page_size: int = 20,
+    admin_id: PydanticObjectId | None = None,
 ) -> tuple[list[User], int]:
     """Returns brokers visible to the actor.
 
-      - SUPER_ADMIN → top brokers in platform pool (no assigned_admin_id)
+      - SUPER_ADMIN + admin_id=X → brokers under that admin (assigned_admin_id == X)
+      - SUPER_ADMIN + admin_id=None → top brokers in platform pool (no assigned_admin_id)
       - ADMIN       → brokers in their pool (assigned_admin_id == admin.id)
-        and NO parent broker (top brokers under the admin)
+        and NO parent broker (top brokers under the admin). `admin_id` arg ignored.
       - BROKER      → their direct sub-brokers (assigned_broker_id == self.id)
     """
     query: dict[str, Any] = {"role": UserRole.BROKER.value}
 
     if actor.role == UserRole.SUPER_ADMIN:
-        query["assigned_admin_id"] = None
+        if admin_id is not None:
+            query["assigned_admin_id"] = admin_id
+        else:
+            query["assigned_admin_id"] = None
         query["assigned_broker_id"] = None
     elif actor.role == UserRole.ADMIN:
         query["assigned_admin_id"] = actor.id
