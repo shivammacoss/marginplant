@@ -259,6 +259,24 @@ async def reassign_user(
     target.last_transferred_at = _now_utc()
     target.last_transferred_by = actor_id
     await target.save()
+
+    # Cache-bust the per-user netting + risk caches — the resolver reads
+    # `assigned_admin_id` LIVE to pick the right sub-admin / super-admin
+    # segment override, but the resolved settings are memoised in Redis
+    # for 5 min. Without an explicit purge the user would keep trading
+    # under the OLD owner's lot caps / margins / commissions for up to
+    # CACHE_TTL after the transfer commits. User-flagged: "transfer
+    # ke baad us user ki segment setting jis admin ne kiya hai uski
+    # work karegi ki nahi?".
+    try:
+        from app.core.redis_client import cache_delete_pattern
+
+        await cache_delete_pattern(f"netting_eff:{target.id}:*")
+        await cache_delete_pattern(f"risk:{target.id}")
+    except Exception:
+        # Cache miss is harmless — settings will re-resolve on the
+        # next order. Don't fail the transfer over Redis hiccups.
+        pass
     await log_event(
         action=AuditAction.USER_REASSIGN,
         entity_type="User",

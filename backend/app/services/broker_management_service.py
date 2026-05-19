@@ -506,6 +506,19 @@ async def reassign_user_to_broker(
     target.last_transferred_at = _now_utc()
     target.last_transferred_by = actor.id
     await target.save()
+
+    # Cache-bust the per-user netting + risk caches — same reasoning as
+    # admin_management_service.reassign_user. Broker hops change
+    # broker_ancestry (and therefore which BrokerSegmentOverride row
+    # applies), so the resolver's 5-min memoisation would keep serving
+    # the old broker's lot caps / margins until the cache expired.
+    try:
+        from app.core.redis_client import cache_delete_pattern
+
+        await cache_delete_pattern(f"netting_eff:{target.id}:*")
+        await cache_delete_pattern(f"risk:{target.id}")
+    except Exception:
+        pass
     await log_event(
         action=AuditAction.USER_REASSIGN_TO_BROKER,
         entity_type="User",
