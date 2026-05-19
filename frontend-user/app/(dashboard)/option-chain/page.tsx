@@ -28,9 +28,18 @@ export default function OptionChainPage() {
   const openTrade = useCallback(
     (token: string) => {
       if (!token) return;
+      // Mobile + tablet (< lg / 1024 px) open the slide-up trade sheet
+      // so the user never loses the option-chain context. Earlier this
+      // gated on (max-width: 767px) but several Android phones report a
+      // CSS viewport ≥ 768 px in the optical-zoom default, which made
+      // the gate fall to the desktop /terminal branch — symptom the
+      // user flagged: "stick price click karne par card open nahi
+      // hota". Widening to 1023 px catches every non-desktop form
+      // factor; the desktop branch only fires on real desktops where
+      // the full chart + order panel page actually fits.
       const isMobileUi =
         typeof window !== "undefined" &&
-        window.matchMedia("(max-width: 767px)").matches;
+        window.matchMedia("(max-width: 1023px)").matches;
       if (isMobileUi) {
         setSheetToken(token);
       } else {
