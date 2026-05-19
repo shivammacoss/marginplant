@@ -21,6 +21,7 @@ import {
   Wallet as WalletIcon,
   X,
   XCircle,
+  AlertCircle,
 } from "lucide-react";
 import { WalletAPI } from "@/lib/api";
 import { API_URL } from "@/lib/constants";
@@ -310,6 +311,24 @@ export default function WalletPage() {
           <HeroStat label="Realized P&L" value={formatINR(summary?.realized_pnl ?? 0)} />
         </div>
       </section>
+
+      {/* ── Settlement outstanding banner (only when > 0) ─────────── */}
+      {Number(summary?.settlement_outstanding ?? 0) > 0 && (
+        <section className="flex items-start gap-3 rounded-xl border border-destructive/40 bg-destructive/10 p-4">
+          <AlertCircle className="size-5 shrink-0 text-destructive mt-0.5" />
+          <div className="flex-1">
+            <div className="text-xs font-semibold uppercase tracking-wider text-destructive">
+              Outstanding settlement
+            </div>
+            <div className="font-tabular text-2xl font-bold text-destructive mt-0.5">
+              {formatINR(summary?.settlement_outstanding ?? 0)}
+            </div>
+            <div className="text-xs text-muted-foreground mt-1">
+              Auto-deducted from your next deposit before crediting available balance.
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* ── Mobile-only action row (desktop has them in the hero) ── */}
       <div className="grid grid-cols-2 gap-3 sm:hidden">

@@ -162,6 +162,7 @@ class WalletSummary(BaseModel):
     realized_pnl: str
     unrealized_pnl: str
     credit_limit: str
+    settlement_outstanding: str = "0"
     total_deposits: str
     total_withdrawals: str
     total_brokerage: str

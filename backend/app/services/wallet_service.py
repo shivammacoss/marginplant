@@ -445,6 +445,7 @@ async def summary(user_id: str | PydanticObjectId) -> dict[str, Any]:
         "realized_pnl": str(w.realized_pnl),
         "unrealized_pnl": str(w.unrealized_pnl),
         "credit_limit": str(w.credit_limit),
+        "settlement_outstanding": str(w.settlement_outstanding),
         "total_deposits": str(w.total_deposits),
         "total_withdrawals": str(w.total_withdrawals),
         "total_brokerage": str(w.total_brokerage),
