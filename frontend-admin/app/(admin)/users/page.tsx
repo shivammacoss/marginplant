@@ -12,6 +12,8 @@ import { DataTable, type Column } from "@/components/common/DataTable";
 import { StatusPill } from "@/components/common/StatusPill";
 import { UserActionMenu } from "@/components/admin/UserActionMenu";
 import { OwnerBadge } from "@/components/admin/OwnerBadge";
+import { LedgerSheet } from "@/components/admin/LedgerSheet";
+import { LiveStatsSheet } from "@/components/admin/LiveStatsSheet";
 import { useAdminAuthStore } from "@/stores/authStore";
 
 export default function AdminUsersPage() {
@@ -20,6 +22,8 @@ export default function AdminUsersPage() {
   const [role, setRole] = useState<string>("");
   const [status, setStatus] = useState<string>("");
   const [page, setPage] = useState(1);
+  const [ledgerUser, setLedgerUser] = useState<any | null>(null);
+  const [statsUser, setStatsUser] = useState<any | null>(null);
   const pageSize = 20;
 
   const { data, isFetching } = useQuery({
@@ -42,6 +46,57 @@ export default function AdminUsersPage() {
     { key: "role", header: "Role", render: (r) => <StatusPill status={r.role} /> },
     { key: "owner", header: "Owner", render: (r) => <OwnerBadge row={r} me={me} /> },
     { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
+    {
+      key: "ledger",
+      header: "L",
+      align: "center",
+      render: (r: any) => (
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 w-7 p-0 font-mono font-semibold"
+          title="View ledger / Adjust wallet"
+          onClick={(e) => {
+            e.stopPropagation();
+            setLedgerUser(r);
+          }}
+        >
+          L
+        </Button>
+      ),
+    },
+    {
+      key: "stats",
+      header: "S",
+      align: "center",
+      render: (r: any) => (
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 w-7 p-0 font-mono font-semibold"
+          title="Live trading stats"
+          onClick={(e) => {
+            e.stopPropagation();
+            setStatsUser(r);
+          }}
+        >
+          S
+        </Button>
+      ),
+    },
+    {
+      key: "balance",
+      header: "B",
+      align: "right",
+      render: (r: any) => {
+        const v = Number(r.wallet?.available_balance ?? 0);
+        return (
+          <span className="font-mono text-xs">
+            ₹{v.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </span>
+        );
+      },
+    },
     {
       key: "outstanding",
       header: "Outstanding",
@@ -151,6 +206,17 @@ export default function AdminUsersPage() {
           </Button>
         </div>
       )}
+
+      <LedgerSheet
+        open={!!ledgerUser}
+        onClose={() => setLedgerUser(null)}
+        user={ledgerUser}
+      />
+      <LiveStatsSheet
+        open={!!statsUser}
+        onClose={() => setStatsUser(null)}
+        user={statsUser}
+      />
     </div>
   );
 }
