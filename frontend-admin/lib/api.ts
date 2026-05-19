@@ -338,6 +338,7 @@ export const BrokerMgmtAPI = {
     password: string;
     permissions: Record<string, "OFF" | "VIEW" | "EDIT">;
     pnl_share_pct: number | string;
+    assigned_admin_id?: string;
   }) => unwrap<any>(api.post("/admin/management/brokers", body)),
   update: (id: string, body: { full_name?: string }) =>
     unwrap<any>(api.put(`/admin/management/brokers/${id}`, body)),
@@ -417,6 +418,10 @@ export const ManagementAPI = {
     unwrap<any>(api.post(`/admin/management/sub-admins/${id}/block`)),
   unblockSubAdmin: (id: string) =>
     unwrap<any>(api.post(`/admin/management/sub-admins/${id}/unblock`)),
+  deleteSubAdmin: (id: string) =>
+    unwrap<any>(api.delete(`/admin/management/sub-admins/${id}`)),
+  resetSubAdminPassword: (id: string, new_password: string) =>
+    unwrap<any>(api.post(`/admin/management/sub-admins/${id}/reset-password`, { new_password })),
   listAssignedUsers: (id: string, params?: { page?: number; page_size?: number }) =>
     unwrap<{ items: any[]; meta: any }>(
       api.get(`/admin/management/sub-admins/${id}/users`, { params })

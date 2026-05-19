@@ -15,7 +15,7 @@ import {
   EyeOff,
 } from "lucide-react";
 
-import { BrokerMgmtAPI, setTokens } from "@/lib/api";
+import { BrokerMgmtAPI, ManagementAPI, setTokens } from "@/lib/api";
 import { useAdminAuthStore } from "@/stores/authStore";
 import { canSee } from "@/lib/permissions";
 import { Button } from "@/components/ui/button";
@@ -88,6 +88,7 @@ export default function BrokersPage() {
   // Broker actor creates sub-brokers under their own subtree; the backend
   // wires `broker_ancestry` automatically. Only the UI noun changes.
   const isBrokerActor = admin?.role === "BROKER";
+  const isSuperAdmin = admin?.role === "SUPER_ADMIN";
   const noun = isBrokerActor ? "Sub-broker" : "Broker";
   const nounPlural = isBrokerActor ? "Sub-brokers" : "Brokers";
   const [q, setQ] = useState("");
@@ -111,6 +112,17 @@ export default function BrokersPage() {
     // — the broker list query is cheap, no flake retries needed. If it
     // fails, fail fast and let the error surface to the toast.
     retry: false,
+  });
+
+  // Super-admin only: load sub-admins so the create-broker form can
+  // pin the new broker to a specific admin (otherwise → platform pool).
+  const { data: adminsList = [] } = useQuery({
+    queryKey: ["admin", "sub-admins", "for-broker-create"],
+    queryFn: async () => {
+      const { items } = await ManagementAPI.listSubAdmins({ page_size: 200 });
+      return items as Array<{ id: string; full_name: string; user_code: string }>;
+    },
+    enabled: isSuperAdmin,
   });
 
   const blockMut = useMutation({
@@ -318,6 +330,8 @@ export default function BrokersPage() {
         onOpenChange={setCreating}
         cap={cap}
         noun={noun}
+        isSuperAdmin={isSuperAdmin}
+        adminsList={adminsList}
         onCreated={() => qc.invalidateQueries({ queryKey: ["admin", "brokers"] })}
       />
       {editing && (
@@ -442,12 +456,16 @@ function CreateBrokerDialog({
   onOpenChange,
   cap,
   noun,
+  isSuperAdmin,
+  adminsList,
   onCreated,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   cap: Record<keyof BrokerPermissions, PermissionLevel>;
   noun: string;
+  isSuperAdmin: boolean;
+  adminsList: Array<{ id: string; full_name: string; user_code: string }>;
   onCreated: () => void;
 }) {
   const [form, setForm] = useState({
@@ -459,6 +477,7 @@ function CreateBrokerDialog({
     pnl_share_pct: "0",
   });
   const [perms, setPerms] = useState<BrokerPermissions>({ ...ALL_OFF });
+  const [selectedAdminId, setSelectedAdminId] = useState("");
   const [loading, setLoading] = useState(false);
   // Drives BOTH the password and confirm-password inputs so the admin
   // can visually verify the match before submitting.
@@ -482,11 +501,13 @@ function CreateBrokerDialog({
         password: form.password,
         permissions: perms as unknown as Record<string, "OFF" | "VIEW" | "EDIT">,
         pnl_share_pct: form.pnl_share_pct,
+        assigned_admin_id: selectedAdminId || undefined,
       });
       toast.success(`${noun} created`);
       onOpenChange(false);
       setForm({ full_name: "", email: "", mobile: "", password: "", confirm_password: "", pnl_share_pct: "0" });
       setPerms({ ...ALL_OFF });
+      setSelectedAdminId("");
       onCreated();
     } catch (e: any) {
       toast.error(e.message);
@@ -565,6 +586,23 @@ function CreateBrokerDialog({
                 onChange={(e) => setForm((f) => ({ ...f, pnl_share_pct: e.target.value }))}
               />
             </div>
+            {isSuperAdmin && (
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label>Assign to admin (optional — leave empty for platform pool)</Label>
+                <select
+                  value={selectedAdminId}
+                  onChange={(e) => setSelectedAdminId(e.target.value)}
+                  className="w-full rounded border border-input bg-background px-3 py-2 text-foreground"
+                >
+                  <option value="">— Platform pool —</option>
+                  {adminsList.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.full_name} ({a.user_code})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
           </div>
 
           <div>

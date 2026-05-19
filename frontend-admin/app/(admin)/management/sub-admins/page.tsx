@@ -13,6 +13,8 @@ import {
   MoreVertical,
   Eye,
   EyeOff,
+  KeyRound,
+  Trash2,
 } from "lucide-react";
 
 import { ManagementAPI, setTokens } from "@/lib/api";
@@ -80,6 +82,8 @@ export default function SubAdminsPage() {
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<any | null>(null);
   const [loginAsId, setLoginAsId] = useState<string | null>(null);
+  const [resetPwTargetId, setResetPwTargetId] = useState<string | null>(null);
+  const [newPw, setNewPw] = useState("");
 
   // Same-origin localStorage means we can't keep both super-admin and sub-admin
   // sessions live in different tabs (both live under localhost:3001). So
@@ -157,6 +161,26 @@ export default function SubAdminsPage() {
       qc.invalidateQueries({ queryKey: ["admin", "sub-admins"] });
     },
     onError: (e: any) => toast.error(e.message),
+  });
+  const resetPwMut = useMutation({
+    mutationFn: ({ id, pw }: { id: string; pw: string }) =>
+      ManagementAPI.resetSubAdminPassword(id, pw),
+    onSuccess: () => {
+      toast.success("Password reset");
+      setResetPwTargetId(null);
+      setNewPw("");
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.detail ?? e?.message ?? "Reset failed"),
+  });
+  const deleteMut = useMutation({
+    mutationFn: (id: string) => ManagementAPI.deleteSubAdmin(id),
+    onSuccess: () => {
+      toast.success("Sub-admin deleted");
+      qc.invalidateQueries({ queryKey: ["admin", "sub-admins"] });
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.detail ?? e?.message ?? "Delete failed"),
   });
 
   if (admin?.role !== "SUPER_ADMIN") {
@@ -241,6 +265,25 @@ export default function SubAdminsPage() {
                   Unblock
                 </DropdownMenuItem>
               )}
+              <DropdownMenuItem onSelect={() => setResetPwTargetId(r.id)}>
+                <KeyRound className="size-4" />
+                Reset Password
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={() => {
+                  if (
+                    confirm(
+                      `Permanently delete ${r.user_code}? Their users will be reassigned to the platform pool.`,
+                    )
+                  ) {
+                    deleteMut.mutate(r.id);
+                  }
+                }}
+                className="text-red-500"
+              >
+                <Trash2 className="size-4 text-red-500" />
+                Delete
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
@@ -287,6 +330,56 @@ export default function SubAdminsPage() {
           onSaved={() => qc.invalidateQueries({ queryKey: ["admin", "sub-admins"] })}
         />
       )}
+
+      <Dialog
+        open={!!resetPwTargetId}
+        onOpenChange={(o) => {
+          if (!o) {
+            setResetPwTargetId(null);
+            setNewPw("");
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Reset Password</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Label>New password (min 8 chars)</Label>
+            <Input
+              type="password"
+              value={newPw}
+              onChange={(e) => setNewPw(e.target.value)}
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setResetPwTargetId(null);
+                setNewPw("");
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (newPw.length < 8) {
+                  toast.error("Password must be at least 8 characters");
+                  return;
+                }
+                if (resetPwTargetId) {
+                  resetPwMut.mutate({ id: resetPwTargetId, pw: newPw });
+                }
+              }}
+              disabled={resetPwMut.isPending}
+            >
+              {resetPwMut.isPending ? "Resetting..." : "Reset"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
