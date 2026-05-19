@@ -62,56 +62,66 @@ export function TopBar() {
           the user doesn't briefly think their wallet is empty. */}
       <Link
         href="/wallet"
-        className="ml-auto inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary/5 px-3 py-1.5 text-xs font-semibold text-primary transition-colors hover:bg-primary/10"
+        className="ml-auto inline-flex max-w-[55vw] items-center gap-1.5 truncate rounded-full border border-primary/20 bg-primary/5 px-2.5 py-1.5 text-xs font-semibold text-primary transition-colors hover:bg-primary/10 sm:max-w-none sm:gap-2 sm:px-3"
       >
-        <Wallet className="size-3.5" />
+        <Wallet className="size-3.5 shrink-0" />
         <span className="hidden text-[10px] font-medium uppercase tracking-wider text-muted-foreground sm:inline">
           Wallet
         </span>
-        <span className={cn("font-tabular", !hasBalance && walletLoading && "text-muted-foreground/60")}>
+        <span
+          className={cn(
+            "truncate font-tabular",
+            !hasBalance && walletLoading && "text-muted-foreground/60",
+          )}
+        >
           {hasBalance ? formatINR(balance) : walletLoading ? "₹ —" : formatINR(balance)}
         </span>
       </Link>
 
-      <ThemeToggle />
-
-      {/* Mobile support shortcut — desktop already has Sidebar's support
-          footer, but on mobile the sidebar is hidden so this is the
-          primary entry point. Hidden on ≥ md to avoid duplicate
-          affordances. Hidden entirely when admin hasn't configured
-          either channel. */}
-      <SupportShortcut />
-
-      <Button variant="ghost" size="icon" aria-label="Notifications" asChild className="hidden sm:inline-flex">
+      {/* Notification bell — visible on mobile + desktop. The only mobile
+          shortcut kept in the header; everything else lives behind the
+          Profile tab (bottom nav) so the bar doesn't overflow on small
+          phones. */}
+      <Button variant="ghost" size="icon" aria-label="Notifications" asChild>
         <Link href="/notifications">
           <Bell className="size-4" />
         </Link>
       </Button>
 
-      <Button variant="ghost" size="icon" aria-label="Profile" asChild className="hidden md:inline-flex">
-        <Link href="/profile">
-          <UserIcon className="size-4" />
-        </Link>
-      </Button>
-
-      <Button
-        variant="ghost"
-        size="icon"
-        aria-label="Sign out"
-        onClick={() => logout().then(() => (window.location.href = "/login"))}
-        title={user ? `Sign out ${user.full_name}` : "Sign out"}
-      >
-        <LogOut className="size-4" />
-      </Button>
+      {/* ── Desktop-only cluster ────────────────────────────────
+         ThemeToggle / Support / Profile / Logout used to ALL render on
+         mobile too, which crowded the 14-row header and overlapped the
+         wallet pill on narrow screens (user-reported). On mobile the
+         Profile tab in the bottom nav now hosts theme + sign-out +
+         support so the header stays clean. Sidebar already covers
+         these affordances on desktop. */}
+      <div className="hidden items-center gap-1 md:flex">
+        <ThemeToggle />
+        <SupportShortcut />
+        <Button variant="ghost" size="icon" aria-label="Profile" asChild>
+          <Link href="/profile">
+            <UserIcon className="size-4" />
+          </Link>
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Sign out"
+          onClick={() => logout().then(() => (window.location.href = "/login"))}
+          title={user ? `Sign out ${user.full_name}` : "Sign out"}
+        >
+          <LogOut className="size-4" />
+        </Button>
+      </div>
     </header>
   );
 }
 
 /**
- * Mobile-only Support shortcut. WhatsApp first (preferred channel),
- * email fallback. Desktop hides this since the Sidebar carries the
- * full support footer. Pulls live admin-managed contact info; renders
- * nothing when both channels are unset (admin hasn't configured).
+ * Support shortcut for the desktop header cluster — WhatsApp first
+ * (preferred channel), email fallback. On mobile the same options live
+ * inside the Profile tab so we can keep the header clean. Renders
+ * nothing when admin hasn't configured either channel.
  */
 function SupportShortcut() {
   const { data: support } = useSupportContacts();
@@ -132,7 +142,6 @@ function SupportShortcut() {
       aria-label="Contact support"
       title="Contact support"
       asChild
-      className="md:hidden"
     >
       <a
         href={target}

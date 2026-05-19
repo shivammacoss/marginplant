@@ -8,6 +8,9 @@ import {
   CheckCircle2,
   IdCard,
   KeyRound,
+  LogOut,
+  Mail,
+  MessageCircle,
   Phone,
   ShieldCheck,
   ShieldOff,
@@ -18,6 +21,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { KycSection } from "@/components/profile/KycSection";
+import { ThemeToggle } from "@/components/common/ThemeToggle";
+import { useAuthStore } from "@/stores/authStore";
+import {
+  buildMailtoUrl,
+  buildWhatsappUrl,
+  useSupportContacts,
+} from "@/lib/useSupport";
 import { cn } from "@/lib/utils";
 
 type Tab = "overview" | "kyc" | "security";
@@ -115,7 +125,121 @@ export default function ProfilePage() {
       )}
       {tab === "kyc" && <KycSection />}
       {tab === "security" && <SecurityTab me={me} />}
+
+      {/* ── Preferences (mobile-primary, shown on every tab) ──
+         Theme toggle + Sign out + Support shortcuts. Used to live in
+         the header but on phones the header overflowed the wallet pill,
+         so the mobile-only items got moved here (user feedback —
+         "wallet overlap ho raha"). Header still shows them on desktop
+         where there's room. */}
+      <PreferencesCard />
     </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Preferences (theme / sign out / support) — Profile-page footer
+// ─────────────────────────────────────────────────────────────────
+function PreferencesCard() {
+  const logout = useAuthStore((s) => s.logout);
+  const user = useAuthStore((s) => s.user);
+  const { data: support } = useSupportContacts();
+  const waUrl = buildWhatsappUrl(
+    support?.whatsapp,
+    "Hi, I need help with my MarginPlant account",
+  );
+  const mailUrl = buildMailtoUrl(support?.email, {
+    subject: "MarginPlant support request",
+  });
+  async function signOut() {
+    try {
+      await logout();
+    } finally {
+      window.location.href = "/login";
+    }
+  }
+  return (
+    <section className="rounded-xl border border-border bg-card p-5 shadow-sm">
+      <div className="mb-4">
+        <h3 className="text-sm font-semibold">Preferences</h3>
+        <p className="text-[11px] text-muted-foreground">
+          Theme, support and session actions
+        </p>
+      </div>
+      <div className="space-y-2">
+        {/* Theme — full-width row so it's tappable on mobile */}
+        <div className="flex items-center justify-between rounded-lg border border-border bg-muted/20 px-3 py-2.5">
+          <div className="flex items-center gap-3">
+            <div className="grid size-9 place-items-center rounded-full bg-primary/10 text-primary">
+              <ShieldCheck className="size-4" />
+            </div>
+            <div>
+              <div className="text-sm font-semibold">Appearance</div>
+              <p className="text-[11px] text-muted-foreground">
+                Switch between light and dark theme
+              </p>
+            </div>
+          </div>
+          <ThemeToggle />
+        </div>
+
+        {/* Support — WhatsApp / Mail (whichever admin configured) */}
+        {(waUrl || mailUrl) && (
+          <a
+            href={waUrl ?? mailUrl!}
+            target={waUrl ? "_blank" : undefined}
+            rel={waUrl ? "noopener noreferrer" : undefined}
+            className="flex items-center justify-between rounded-lg border border-border bg-muted/20 px-3 py-2.5 transition-colors hover:bg-muted/40"
+          >
+            <div className="flex items-center gap-3">
+              <div
+                className={cn(
+                  "grid size-9 place-items-center rounded-full",
+                  waUrl
+                    ? "bg-[#25D366]/15 text-[#25D366]"
+                    : "bg-primary/10 text-primary",
+                )}
+              >
+                {waUrl ? (
+                  <MessageCircle className="size-4" />
+                ) : (
+                  <Mail className="size-4" />
+                )}
+              </div>
+              <div>
+                <div className="text-sm font-semibold">
+                  {waUrl ? "WhatsApp support" : "Email support"}
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  {waUrl ? support?.whatsapp : support?.email}
+                </p>
+              </div>
+            </div>
+          </a>
+        )}
+
+        {/* Sign out — destructive */}
+        <button
+          type="button"
+          onClick={signOut}
+          className="flex w-full items-center justify-between rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2.5 text-left transition-colors hover:bg-destructive/10"
+        >
+          <div className="flex items-center gap-3">
+            <div className="grid size-9 place-items-center rounded-full bg-destructive/15 text-destructive">
+              <LogOut className="size-4" />
+            </div>
+            <div>
+              <div className="text-sm font-semibold text-destructive">
+                Sign out
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                {user ? `End session for ${user.full_name}` : "End this session"}
+              </p>
+            </div>
+          </div>
+        </button>
+      </div>
+    </section>
   );
 }
 
