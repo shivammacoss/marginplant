@@ -158,6 +158,12 @@ class NettingFieldsBase(BaseModel):
     maxValue: float | None = None
     # Fixed Margin
     marginCalcMode: Literal["fixed", "times", "percent"] | None = None
+    # Per-side margin mode for option Buy and Sell. NULL means "inherit
+    # from the segment-level marginCalcMode above". When set, this mode
+    # overrides for that side only — lets admin run, e.g., option BUY
+    # in Fixed (flat ₹/lot) while option SELL is in Times (multiplier).
+    optionBuyMarginCalcMode: Literal["fixed", "times", "percent"] | None = None
+    optionSellMarginCalcMode: Literal["fixed", "times", "percent"] | None = None
     intradayMargin: float | None = None
     overnightMargin: float | None = None
     optionBuyIntraday: float | None = None
@@ -226,6 +232,10 @@ class NettingFieldsRequired(BaseModel):
     # admin explicitly re-clicked the dropdown. None lets admin's typed
     # number drive the inference automatically.
     marginCalcMode: Literal["fixed", "times", "percent"] | None = None
+    # Per-side margin mode for option Buy and Sell. NULL = inherit from
+    # segment-level marginCalcMode above. See NettingFieldsBase docstring.
+    optionBuyMarginCalcMode: Literal["fixed", "times", "percent"] | None = None
+    optionSellMarginCalcMode: Literal["fixed", "times", "percent"] | None = None
     intradayMargin: float = 100.0
     overnightMargin: float = 100.0
     # Option-specific columns default to None = inherit from segment-wide

@@ -72,8 +72,33 @@ export const CATEGORY_FIELDS: Record<string, FieldDef[]> = {
     },
     { key: "intradayMargin", label: "Intraday Margin", type: "number" },
     { key: "overnightMargin", label: "Overnight Margin", type: "number" },
+    {
+      key: "optionBuyMarginCalcMode",
+      label: "Opt Buy Mode",
+      // Empty value = inherit segment-level marginCalcMode (the common
+      // case). The Cell component sends "" up to saveAll, which the
+      // backend upsert accepts and writes as null on the override doc.
+      type: "select",
+      optionOnly: true,
+      options: [
+        { v: "", l: "Inherit" },
+        { v: "fixed", l: "Fixed" },
+        { v: "times", l: "Times" },
+      ],
+    },
     { key: "optionBuyIntraday", label: "Opt Buy Intraday", type: "number", optionOnly: true },
     { key: "optionBuyOvernight", label: "Opt Buy Overnight", type: "number", optionOnly: true },
+    {
+      key: "optionSellMarginCalcMode",
+      label: "Opt Sell Mode",
+      type: "select",
+      optionOnly: true,
+      options: [
+        { v: "", l: "Inherit" },
+        { v: "fixed", l: "Fixed" },
+        { v: "times", l: "Times" },
+      ],
+    },
     { key: "optionSellIntraday", label: "Opt Sell Intraday", type: "number", optionOnly: true },
     { key: "optionSellOvernight", label: "Opt Sell Overnight", type: "number", optionOnly: true },
   ],
