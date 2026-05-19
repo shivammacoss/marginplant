@@ -383,18 +383,44 @@ export default function PositionsPage() {
       typeof window !== "undefined" &&
       window.matchMedia("(max-width: 767px)").matches;
     if (!isMobileUi && !confirm("Square off this position at market?")) return;
-    // Sync toast: pops in the same frame as the click, not after the
-    // API round-trip. Dismissed on rejection so we don't leave a
-    // misleading "Submitted" up next to the error.
+
+    // OPTIMISTIC REMOVE — drop the row from the cache in the SAME frame
+    // as the click so the UI feels instant ("close karne me time lag
+    // raha hai 200 ms" was the user complaint). Earlier we awaited the
+    // API and only invalidated afterwards, so the row sat with its
+    // disabled state for the full round-trip. Mirror of the pattern
+    // already used in components/trading/PositionsTabs.tsx:squareoff.
+    qc.cancelQueries({ queryKey: ["positions", "open"] });
+    qc.cancelQueries({ queryKey: ["positions", "summary"] });
+    qc.cancelQueries({ queryKey: ["active-trades"] });
+    const posSnapshot = qc.getQueryData<any[]>(["positions", "open"]);
+    const tradesSnapshot = qc.getQueryData<any[]>(["active-trades"]);
+    qc.setQueryData<any[]>(["positions", "open"], (old) =>
+      Array.isArray(old) ? old.filter((p) => p.id !== id) : [],
+    );
+    qc.setQueryData<any[]>(["active-trades"], (old) =>
+      Array.isArray(old) ? old.filter((t) => t.position_id !== id) : [],
+    );
+
+    // Sync toast: pops in the same frame as the click + optimistic
+    // remove. Dismissed on rejection so we don't leave a misleading
+    // "Closed" up next to a restored row.
     const pendingToastId = toast.success(
-      isMobileUi ? "Closing position…" : "Submitted",
+      isMobileUi ? "Closed" : "Submitted",
+      { duration: 1500 },
     );
     try {
       await PositionAPI.squareoff(id);
-      toast.dismiss(pendingToastId);
-      toast.success("Position closed");
-      qc.invalidateQueries({ queryKey: ["positions"] });
+      // DO NOT invalidate positions here — Mongo Atlas can briefly
+      // return the just-closed position as still OPEN on the read
+      // replica for a tick, which would re-add the row and cause a
+      // flicker. The 2 s background poll handles eventual consistency.
+      qc.invalidateQueries({ queryKey: ["orders"] });
+      qc.invalidateQueries({ queryKey: ["wallet"] });
     } catch (e: any) {
+      // Rollback both caches so the row reappears.
+      if (posSnapshot) qc.setQueryData(["positions", "open"], posSnapshot);
+      if (tradesSnapshot) qc.setQueryData(["active-trades"], tradesSnapshot);
       toast.dismiss(pendingToastId);
       toast.error(e?.message || "Failed");
     }
@@ -405,15 +431,30 @@ export default function PositionsPage() {
       typeof window !== "undefined" &&
       window.matchMedia("(max-width: 767px)").matches;
     if (!isMobileUi && !confirm("Square off ALL open positions?")) return;
-    // Provisional toast — the final count comes from the server response,
-    // but the user sees an instant ack right after the tap.
-    const pendingToastId = toast.success(`Squaring off ${open.length}…`);
+
+    // Same optimistic-clear pattern as single squareoff — wipe all open
+    // rows the moment the user taps, so the empty state shows
+    // instantly. Backend reconciles via the 2 s poll.
+    qc.cancelQueries({ queryKey: ["positions", "open"] });
+    qc.cancelQueries({ queryKey: ["positions", "summary"] });
+    qc.cancelQueries({ queryKey: ["active-trades"] });
+    const posSnapshot = qc.getQueryData<any[]>(["positions", "open"]);
+    const tradesSnapshot = qc.getQueryData<any[]>(["active-trades"]);
+    qc.setQueryData<any[]>(["positions", "open"], () => []);
+    qc.setQueryData<any[]>(["active-trades"], () => []);
+
+    const pendingToastId = toast.success(`Squaring off ${open.length}…`, {
+      duration: 1500,
+    });
     try {
       const r = await PositionAPI.squareoffAll();
       toast.dismiss(pendingToastId);
       toast.success(`Squared off ${r?.squared_off ?? 0}/${r?.total ?? 0}`);
-      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["orders"] });
+      qc.invalidateQueries({ queryKey: ["wallet"] });
     } catch (e: any) {
+      if (posSnapshot) qc.setQueryData(["positions", "open"], posSnapshot);
+      if (tradesSnapshot) qc.setQueryData(["active-trades"], tradesSnapshot);
       toast.dismiss(pendingToastId);
       toast.error(e?.message || "Failed");
     }

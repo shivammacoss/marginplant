@@ -127,8 +127,12 @@ export function ClosePositionDialog({ target, onClose }: Props) {
       // explicit value here would still work but the path is slightly
       // different and full-close is the common case.
       await PositionAPI.squareoff(target.id, isFull ? undefined : lots);
-      qc.invalidateQueries({ queryKey: ["positions"] });
+      // DO NOT invalidate positions — Atlas read replica may briefly
+      // return the just-closed row as still OPEN, which would re-add
+      // the row after we just optimistically removed it (flicker). The
+      // 2 s background poll handles eventual consistency.
       qc.invalidateQueries({ queryKey: ["wallet"] });
+      qc.invalidateQueries({ queryKey: ["orders"] });
     } catch (e: any) {
       // Rollback the optimistic removal.
       if (isFull && snapshot) qc.setQueryData(["positions", "open"], snapshot);
