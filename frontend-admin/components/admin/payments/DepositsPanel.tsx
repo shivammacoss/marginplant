@@ -97,7 +97,28 @@ export function DepositsPanel() {
       ),
     },
     { key: "owner", header: "Owner", render: (r) => <OwnerBadge row={r} me={me} /> },
-    { key: "amount", header: "Amount", align: "right", render: (r) => formatINR(r.amount) },
+    {
+      key: "amount",
+      header: "Amount",
+      align: "right",
+      render: (r) => {
+        const outstanding = Number(r.user_settlement_outstanding ?? 0);
+        if (outstanding <= 0) return formatINR(r.amount);
+        const depositAmt = Number(r.amount);
+        const recovered = Math.min(outstanding, depositAmt);
+        return (
+          <div className="flex flex-col items-end leading-tight">
+            <span>{formatINR(r.amount)}</span>
+            <span
+              className="text-[10px] text-destructive"
+              title={`User has ₹${outstanding.toFixed(2)} outstanding. ₹${recovered.toFixed(2)} will be recovered first; remainder credits balance.`}
+            >
+              ⚠ ₹{outstanding.toFixed(0)} dues
+            </span>
+          </div>
+        );
+      },
+    },
     { key: "payment_mode", header: "Mode" },
     { key: "utr_number", header: "UTR", render: (r) => r.utr_number || "—" },
     { key: "user_remark", header: "Remark", render: (r) => r.user_remark || "—", className: "max-w-[200px] truncate" },

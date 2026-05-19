@@ -60,6 +60,14 @@ async def list_deposits(
         q["user_id"] = {"$in": scope}
     rows = await DepositRequest.find(q).sort("-created_at").limit(limit).to_list()
     owner_map = await build_owner_map([r.user_id for r in rows])
+
+    # Batch-lookup settlement_outstanding per user so admin can see at
+    # approval time how much of this deposit will be recovered first.
+    from app.models.wallet import Wallet
+    user_ids = list({r.user_id for r in rows})
+    wallets = await Wallet.find({"user_id": {"$in": user_ids}}).to_list()
+    outstanding_map = {str(w.user_id): str(w.settlement_outstanding) for w in wallets}
+
     return APIResponse(
         data=[
             {
@@ -74,6 +82,7 @@ async def list_deposits(
                 "admin_remark": r.admin_remark,
                 "created_at": r.created_at,
                 "processed_at": r.processed_at,
+                "user_settlement_outstanding": outstanding_map.get(str(r.user_id), "0"),
                 **owner_fields(owner_map.get(str(r.user_id))),
             }
             for r in rows

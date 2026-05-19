@@ -43,6 +43,21 @@ export default function AdminUsersPage() {
     { key: "owner", header: "Owner", render: (r) => <OwnerBadge row={r} me={me} /> },
     { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
     {
+      key: "outstanding",
+      header: "Outstanding",
+      align: "right",
+      render: (r) => {
+        const v = Number(r.wallet?.settlement_outstanding ?? 0);
+        return v > 0 ? (
+          <span className="font-mono text-xs text-destructive">
+            ₹{v.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">—</span>
+        );
+      },
+    },
+    {
       key: "actions",
       header: "",
       align: "right",
