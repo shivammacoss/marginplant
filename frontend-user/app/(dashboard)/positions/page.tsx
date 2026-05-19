@@ -922,13 +922,19 @@ export default function PositionsPage() {
         }
       />
 
-      {/* Wallet + margin status strip (Balance / Equity / M2M / Used /
-          CF Required). Surfaces the numbers the trader needs to size
-          new orders + see live equity without leaving the page. */}
+      {/* Wallet + margin status strip — Balance / Equity / M2M / Used.
+          CF Required (carry-forward margin estimate) used to live here
+          as a 5th tile but the user asked to drop it from the Positions
+          tab: it duplicates the per-row Holding Margin already on every
+          card and only matters when reviewing the carry-eligible legs.
+          We now hide it on the Position tab and show it on the Active
+          tab via `showCfRequired` so the wallet strip stays 4 tiles
+          where the trader is just looking at the net position view. */}
       <WalletStatusStrip
         wallet={wallet}
         m2m={totalMtm}
         cfRequired={requiredMargin}
+        showCfRequired={tab === "active"}
       />
 
       {/* Unified blotter tabs — Position / Active / Closed / Cancelled /
@@ -1063,17 +1069,27 @@ function WalletStatusStrip({
   wallet,
   m2m,
   cfRequired,
+  showCfRequired = true,
 }: {
   wallet: any;
   m2m: number;
   cfRequired: number;
+  /** Drop the CF Required tile when false — used on the Position tab
+   *  so the trader sees a clean 4-tile wallet row. Active tab keeps it
+   *  on (5 tiles) because that's where carry-forward planning lives. */
+  showCfRequired?: boolean;
 }) {
   const available = Number(wallet?.available_balance ?? 0);
   const used = Number(wallet?.used_margin ?? 0);
   const balance = available + used;
   const equity = balance + m2m;
   return (
-    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+    <div
+      className={cn(
+        "grid grid-cols-2 gap-2 sm:grid-cols-3",
+        showCfRequired ? "lg:grid-cols-5" : "lg:grid-cols-4",
+      )}
+    >
       <WalletTile label="Balance" value={formatINR(balance)} />
       <WalletTile label="Equity" value={formatINR(equity)} />
       <WalletTile
@@ -1082,11 +1098,13 @@ function WalletStatusStrip({
         valueClass={pnlColor(m2m)}
       />
       <WalletTile label="Used Margin" value={formatINR(used)} />
-      <WalletTile
-        label="CF Required"
-        value={formatINR(cfRequired)}
-        valueClass={cfRequired > available ? "text-red-500" : undefined}
-      />
+      {showCfRequired && (
+        <WalletTile
+          label="CF Required"
+          value={formatINR(cfRequired)}
+          valueClass={cfRequired > available ? "text-red-500" : undefined}
+        />
+      )}
     </div>
   );
 }

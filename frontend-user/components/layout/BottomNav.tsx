@@ -48,21 +48,27 @@ export function BottomNav() {
           const active = pathname === it.href || pathname?.startsWith(it.href + "/");
           const Icon = it.icon;
           if (it.accent) {
-            // Circle TRADE button — sits inline within the same h-14 row
-            // (no -mt raised bubble, no ring around the cell). User
-            // feedback: "nav bar me box mat banao, trade ko cercle me
-            // rakho usi me hi". Previous version used a full-cell
-            // primary background which looked like a square box; we
-            // restored the circle shape but kept it constrained to the
-            // row height so the rest of the bar stays flush.
+            // TRADE tab — matches the surrounding icons in size, just
+            // tinted primary so it still reads as the "main action"
+            // without a giant circle dominating the bar. User
+            // feedback after the previous iteration: "ek jda bada
+            // circle nahi chiaye, jitne baki sab icon hai utna hi
+            // trade bhi dikhe". Small filled circle wraps only the
+            // icon (size-8) — same vertical rhythm as Home/Market/
+            // Orders/Profile.
             return (
-              <li key={it.href} className="flex items-center justify-center">
+              <li key={it.href}>
                 <Link
                   href={it.href}
-                  className="flex size-12 flex-col items-center justify-center gap-0.5 rounded-full bg-primary text-primary-foreground shadow-md shadow-primary/30"
+                  className={cn(
+                    "flex h-14 flex-col items-center justify-center gap-0.5 text-[10px] transition-colors",
+                    active ? "text-primary" : "text-primary/85 hover:text-primary",
+                  )}
                 >
-                  <Icon className="size-5" />
-                  <span className="text-[8px] font-semibold uppercase tracking-wider leading-none">{it.label}</span>
+                  <span className="grid size-8 place-items-center rounded-full bg-primary/15 text-primary">
+                    <Icon className="size-5" />
+                  </span>
+                  <span className="font-semibold uppercase tracking-wider">{it.label}</span>
                 </Link>
               </li>
             );

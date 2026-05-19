@@ -605,17 +605,21 @@ async def list_active_trades(user: CurrentUser):
     }
     tokens = [p.instrument.token for p in open_positions]
 
-    # Pull every trade for these instruments since just before the OLDEST
-    # position open time. We subtract a buffer because trade.executed_at is
-    # set BEFORE position.opened_at (trade is inserted first in the engine).
-    from datetime import timedelta
-    oldest_open = min((p.opened_at for p in open_positions if p.opened_at), default=None)
+    # Pull every trade for these (user, instrument) pairs — no date
+    # filter. Earlier the query used `executed_at >= oldest_open - 5s`
+    # for performance, but that broke on **flipped / reopened
+    # positions**: when a user closes a long and re-shorts the same
+    # instrument the new position's `opened_at` is reset to "now", so
+    # any opening trade older than that vanished from the FIFO match
+    # → opposite-side total mis-counted → wrong number of active-trade
+    # rows surfaced (user-reported: "position me 4 dikh raha, active
+    # me sirf 2"). Without the date filter the query is still scoped
+    # to (user_id, token) so the result set stays small even for
+    # high-frequency traders.
     trade_q: dict[str, Any] = {
         "user_id": user.id,
         "instrument.token": {"$in": tokens},
     }
-    if oldest_open is not None:
-        trade_q["executed_at"] = {"$gte": oldest_open - timedelta(seconds=5)}
     trades = await Trade.find(trade_q).sort("-executed_at").to_list()
 
     # Fallback: if Beanie raw-dict query returns nothing but positions exist,
