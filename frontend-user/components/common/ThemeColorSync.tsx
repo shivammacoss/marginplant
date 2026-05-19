@@ -13,12 +13,16 @@ import { useTheme } from "next-themes";
  * flagged this as "mere sabse top me green color a rha hai esko theme se
  * match karo").
  *
- * This component watches `resolvedTheme` and rewrites the
- * `<meta name="theme-color">` tag in place. `#ffffff` for light,
- * `#0a0a0a` for dark — same constants as the static fallbacks declared
- * in `app/layout.tsx`'s `viewport.themeColor`, so the look is identical
- * whether the browser picked the media-query fallback or this runtime
- * override is active.
+ * Implementation note — DO NOT remove existing theme-color meta nodes.
+ * The previous version called `parentElement.removeChild(el)` on every
+ * matching tag and then appended a fresh one, which tripped React's
+ * reconciler with "Cannot read properties of null (reading 'removeChild')"
+ * during the next commit phase (the SSR-emitted metas were still tracked
+ * by React's HMR / head manager). Updating attributes in place leaves
+ * the nodes where React expects them, and our own appended tag wins the
+ * cascade because the browser picks the first applicable theme-color
+ * (we strip `media` from all of them so every tag matches every
+ * scheme).
  */
 export function ThemeColorSync() {
   const { resolvedTheme } = useTheme();
@@ -27,18 +31,20 @@ export function ThemeColorSync() {
     if (typeof document === "undefined") return;
     const colour = resolvedTheme === "light" ? "#ffffff" : "#0a0a0a";
 
-    // Remove the two media-keyed metas Next.js emitted from
-    // viewport.themeColor — otherwise the browser would keep honouring
-    // them (an explicit static tag wins over a runtime-set one only if
-    // the static one's media query DOESN'T match).
-    document
-      .querySelectorAll('meta[name="theme-color"]')
-      .forEach((el) => el.parentElement?.removeChild(el));
-
-    const meta = document.createElement("meta");
-    meta.name = "theme-color";
-    meta.content = colour;
-    document.head.appendChild(meta);
+    const metas = document.querySelectorAll('meta[name="theme-color"]');
+    if (metas.length === 0) {
+      const m = document.createElement("meta");
+      m.setAttribute("name", "theme-color");
+      m.setAttribute("content", colour);
+      document.head.appendChild(m);
+      return;
+    }
+    metas.forEach((m) => {
+      m.setAttribute("content", colour);
+      // Drop any media query so this tag applies regardless of the OS
+      // colour scheme — the app's resolvedTheme is the source of truth.
+      if (m.hasAttribute("media")) m.removeAttribute("media");
+    });
   }, [resolvedTheme]);
 
   return null;
