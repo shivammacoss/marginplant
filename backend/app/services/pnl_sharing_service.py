@@ -34,6 +34,7 @@ from app.models.pnl_sharing import (
 from app.models.position import Position, PositionStatus
 from app.models.transaction import TransactionType, WalletTransaction
 from app.models.user import User, UserRole
+from app.schemas.pnl_sharing import ReportRow, ReportSummary
 from app.services import market_data_service, wallet_service
 from app.services.admin_settlement_service import _realised_inr
 from app.services.audit_service import log_event
@@ -606,3 +607,81 @@ async def settle_period(
         },
     )
     return row
+
+
+# ── Reports ─────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class Report:
+    rows: list[ReportRow]
+    summary: ReportSummary
+
+
+async def build_report(
+    *,
+    agreement: PnlSharingAgreement,
+    cadence: SettlementCadence,
+    from_dt: datetime,
+    to_dt: datetime,
+) -> Report:
+    """Walk periods from from_dt to to_dt at given cadence; snapshot each.
+
+    For each period, also look up the corresponding PnlSharingSettlement row
+    (if any) to determine the settlement_status ("SETTLED" / "PENDING" /
+    "FAILED" / "UNSETTLED").
+    """
+    rows: list[ReportRow] = []
+    total_pnl = Decimal("0")
+    total_bkg = Decimal("0")
+    settled = pending = failed = unsettled = 0
+
+    cursor = _as_ist(from_dt)
+    end_ist = _as_ist(to_dt)
+    while cursor <= end_ist:
+        p_start, p_end = compute_period_bounds(cadence, cursor)
+        snap = await compute_sharing_snapshot(agreement, p_start, p_end)
+
+        existing = await PnlSharingSettlement.find_one(
+            PnlSharingSettlement.agreement_id == agreement.id,
+            PnlSharingSettlement.period_start == p_start,
+        )
+        if existing is None:
+            status_label = "UNSETTLED"
+            unsettled += 1
+        elif existing.status == SharingSettlementStatus.SETTLED:
+            status_label = "SETTLED"
+            settled += 1
+        elif existing.status == SharingSettlementStatus.FAILED:
+            status_label = "FAILED"
+            failed += 1
+        else:
+            status_label = "PENDING"
+            pending += 1
+
+        rows.append(
+            ReportRow(
+                period_start=p_start,
+                period_end=p_end,
+                net_client_pnl_inr=str(snap.net_client_pnl_inr),
+                net_client_bkg_inr=str(snap.net_client_bkg_inr),
+                total_of_both_inr=str(snap.total_of_both_inr),
+                actual_pnl_inr=str(snap.actual_pnl_inr),
+                sharing_pnl_inr=str(snap.sharing_pnl_inr),
+                sharing_bkg_inr=str(snap.sharing_bkg_inr),
+                settlement_status=status_label,
+            )
+        )
+        total_pnl += snap.sharing_pnl_inr
+        total_bkg += snap.sharing_bkg_inr
+
+        # Advance cursor past this period (1ms after p_end to ensure progress)
+        cursor = _as_ist(p_end) + timedelta(milliseconds=1)
+
+    summary = ReportSummary(
+        total_sharing_pnl_inr=str(total_pnl),
+        total_sharing_bkg_inr=str(total_bkg),
+        periods_settled=settled,
+        periods_pending=pending,
+        periods_failed=failed,
+        periods_unsettled=unsettled,
+    )
+    return Report(rows=rows, summary=summary)

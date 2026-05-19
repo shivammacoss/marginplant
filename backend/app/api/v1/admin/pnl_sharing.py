@@ -21,6 +21,7 @@ from app.models.pnl_sharing import (
     AgreementStatus,
     PnlSharingAgreement,
     PnlSharingSettlement,
+    SettlementCadence,
     SharingSettlementStatus,
 )
 from app.models.user import User, UserRole
@@ -29,6 +30,7 @@ from app.schemas.pnl_sharing import (
     AgreementDTO,
     CreateAgreementRequest,
     ManualSettleRequest,
+    ReportResponse,
     SettlementDTO,
     UpdateAgreementRequest,
 )
@@ -302,3 +304,44 @@ async def retry_settlement(settlement_id: PydanticObjectId, actor: CurrentAdmin)
     except svc.AgreementValidationError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     return APIResponse(data=await _serialize_settlement(settlement))
+
+
+@router.get("/reports/{agreement_id}", response_model=APIResponse[ReportResponse])
+async def get_report(
+    agreement_id: PydanticObjectId,
+    actor: CurrentAdmin,
+    period: SettlementCadence = Query(...),
+    from_date: datetime = Query(..., alias="from"),
+    to_date: datetime = Query(..., alias="to"),
+):
+    a = await PnlSharingAgreement.get(agreement_id)
+    if a is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "agreement not found")
+    if not _can_view(actor, a):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "no access")
+    if from_date > to_date:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "from > to")
+    report = await svc.build_report(
+        agreement=a, cadence=period, from_dt=from_date, to_dt=to_date,
+    )
+    return APIResponse(
+        data=ReportResponse(
+            agreement=await _serialize_agreement(a),
+            rows=report.rows,
+            summary=report.summary,
+        )
+    )
+
+
+@router.get("/me/agreement", response_model=APIResponse[AgreementDTO])
+async def my_agreement(actor: CurrentAdmin):
+    """Broker-self: fetch the broker's own active agreement (404 if none)."""
+    if actor.role != UserRole.BROKER:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "brokers only")
+    a = await PnlSharingAgreement.find_one(
+        PnlSharingAgreement.broker_id == actor.id,
+        PnlSharingAgreement.status != AgreementStatus.ENDED,
+    )
+    if a is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no active agreement")
+    return APIResponse(data=await _serialize_agreement(a))
