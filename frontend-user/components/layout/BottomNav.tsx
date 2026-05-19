@@ -48,24 +48,21 @@ export function BottomNav() {
           const active = pathname === it.href || pathname?.startsWith(it.href + "/");
           const Icon = it.icon;
           if (it.accent) {
-            // Flat inline accent (no -mt floating bubble, no ring) — the
-            // previous floating pill looked broken on the terminal page
-            // because the chart card sat flush above the nav, so the
-            // raised disc had no breathing room. Going flat keeps the
-            // TRADE tab visually distinct (filled primary background)
-            // without sticking up into the chart edge.
+            // Circle TRADE button — sits inline within the same h-14 row
+            // (no -mt raised bubble, no ring around the cell). User
+            // feedback: "nav bar me box mat banao, trade ko cercle me
+            // rakho usi me hi". Previous version used a full-cell
+            // primary background which looked like a square box; we
+            // restored the circle shape but kept it constrained to the
+            // row height so the rest of the bar stays flush.
             return (
-              <li key={it.href}>
+              <li key={it.href} className="flex items-center justify-center">
                 <Link
                   href={it.href}
-                  className={cn(
-                    "flex h-14 flex-col items-center justify-center gap-0.5 text-[10px] transition-colors",
-                    active ? "text-primary-foreground" : "text-primary-foreground/85 hover:text-primary-foreground",
-                    "bg-primary",
-                  )}
+                  className="flex size-12 flex-col items-center justify-center gap-0.5 rounded-full bg-primary text-primary-foreground shadow-md shadow-primary/30"
                 >
                   <Icon className="size-5" />
-                  <span className="font-semibold uppercase tracking-wider">{it.label}</span>
+                  <span className="text-[8px] font-semibold uppercase tracking-wider leading-none">{it.label}</span>
                 </Link>
               </li>
             );
