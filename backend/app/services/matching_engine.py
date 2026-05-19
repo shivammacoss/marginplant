@@ -266,8 +266,19 @@ async def execute_market_order(
             from app.models.user import User
             from app.services.pnl_sharing_service import publish_pnl_sharing_update
             _u = await User.get(pos.user_id)
-            if _u is not None and _u.assigned_broker_id is not None:
-                await publish_pnl_sharing_update(_u.assigned_broker_id)
+            if _u is not None:
+                # Notify every ancestor broker — agreements at ANY level above
+                # this user may need their snapshot refreshed. broker_ancestry
+                # already includes the direct parent for a CLIENT (last element);
+                # fallback to assigned_broker_id if ancestry is empty.
+                ancestors = list(_u.broker_ancestry or [])
+                if (
+                    _u.assigned_broker_id is not None
+                    and _u.assigned_broker_id not in ancestors
+                ):
+                    ancestors.append(_u.assigned_broker_id)
+                for ancestor_id in ancestors:
+                    await publish_pnl_sharing_update(ancestor_id)
         except Exception:
             logger.exception("pnl_sharing_ws_publish_failed")
 
