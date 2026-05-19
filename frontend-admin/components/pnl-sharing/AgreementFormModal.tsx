@@ -129,7 +129,7 @@ export function AgreementFormModal({
                   setAdminId(e.target.value);
                   setBrokerId("");
                 }}
-                className="w-full bg-zinc-900 border border-zinc-800 rounded px-3 py-2"
+                className="w-full bg-background text-foreground border border-input rounded px-3 py-2"
               >
                 <option value="">Select admin...</option>
                 {admins.map((a) => (
@@ -146,7 +146,7 @@ export function AgreementFormModal({
               value={brokerId}
               onChange={(e) => setBrokerId(e.target.value)}
               disabled={isEdit}
-              className="w-full bg-zinc-900 border border-zinc-800 rounded px-3 py-2 disabled:opacity-50"
+              className="w-full bg-background text-foreground border border-input rounded px-3 py-2 disabled:opacity-50"
             >
               <option value="">Select broker...</option>
               {brokers.map((b) => (
@@ -194,7 +194,7 @@ export function AgreementFormModal({
               <select
                 value={cadence}
                 onChange={(e) => setCadence(e.target.value as SettlementCadence)}
-                className="w-full bg-zinc-900 border border-zinc-800 rounded px-3 py-2"
+                className="w-full bg-background text-foreground border border-input rounded px-3 py-2"
               >
                 <option value="DAILY">Daily</option>
                 <option value="WEEKLY">Weekly</option>
