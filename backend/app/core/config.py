@@ -55,7 +55,20 @@ class Settings(BaseSettings):
     # screen unless they sign out explicitly or revoke from another device.
     JWT_SECRET: SecretStr = Field(default=SecretStr("change-me"))
     JWT_ALGORITHM: str = "HS256"
-    JWT_ACCESS_TTL_MIN: int = 15
+    # Access token bumped from 15 → 1440 min (24 h) so the silent-refresh
+    # cycle fires at most once a day instead of every 15 min. User-flagged
+    # symptom on the installed PWA: "30 din set hai fir bhi logout ho
+    # raha hai". Cause was a transient refresh failure (PWA resume before
+    # network reattaches, backend deploy mid-suspend, etc.) which the
+    # frontend interceptor used to convert into a hard /login redirect.
+    # Longer access lifetime + revised frontend retry semantics together
+    # close that hole. Backend revocation is still instantaneous because
+    # /auth/refresh + the JTI allow-list rotate on every refresh, so a
+    # logout from another device kills the next refresh attempt — the
+    # access token only lives until its own TTL after that, which 24 h
+    # is still well within the security budget for a personal trading
+    # app.
+    JWT_ACCESS_TTL_MIN: int = 1440
     JWT_REFRESH_TTL_DAYS: int = 30
 
     # ── Admin extra security ─────────────────────────────────────────

@@ -38,9 +38,18 @@ api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   return config;
 });
 
-async function refreshAccessToken(): Promise<string | null> {
+/**
+ * Three-state refresh outcome — see the user-side api.ts for the full
+ * rationale. Short version: a network glitch or 5xx mid-refresh MUST
+ * NOT log the admin out, because the refresh token may still be valid;
+ * only an explicit 401/403 from the /refresh endpoint counts as a
+ * sign-out signal.
+ */
+async function refreshAccessToken(): Promise<
+  { kind: "ok"; access: string } | { kind: "auth_failed" | "transient" }
+> {
   const refresh = getRefreshToken();
-  if (!refresh) return null;
+  if (!refresh) return { kind: "auth_failed" };
   try {
     const headers: Record<string, string> = {};
     if (ADMIN_API_KEY) headers["X-Admin-Api-Key"] = ADMIN_API_KEY;
@@ -50,12 +59,17 @@ async function refreshAccessToken(): Promise<string | null> {
       { headers, timeout: 15_000 }
     );
     const pair = r.data.data;
-    if (!pair) return null;
+    if (!pair) return { kind: "transient" };
     setTokens(pair.access_token, pair.refresh_token);
-    return pair.access_token;
-  } catch {
-    clearTokens();
-    return null;
+    return { kind: "ok", access: pair.access_token };
+  } catch (err) {
+    const ax = err as AxiosError;
+    const status = ax.response?.status;
+    if (status === 401 || status === 403) {
+      clearTokens();
+      return { kind: "auth_failed" };
+    }
+    return { kind: "transient" };
   }
 }
 
@@ -66,7 +80,10 @@ api.interceptors.response.use(
     const status = error.response?.status;
     if (status === 401 && original && !original._retry) {
       original._retry = true;
-      refreshPromise ||= refreshAccessToken().finally(() => {
+      refreshPromise ||= (async () => {
+        const r = await refreshAccessToken();
+        return r.kind === "ok" ? r.access : null;
+      })().finally(() => {
         refreshPromise = null;
       });
       const newToken = await refreshPromise;
@@ -74,7 +91,16 @@ api.interceptors.response.use(
         original.headers = { ...(original.headers || {}), Authorization: `Bearer ${newToken}` };
         return api.request(original);
       }
-      if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+      // Only redirect when the refresh path actually cleared the
+      // tokens (explicit auth failure). Transient errors keep the
+      // refresh around so the next request can retry without making
+      // the admin re-enter credentials.
+      const stillHaveRefresh = typeof window !== "undefined" && !!getRefreshToken();
+      if (
+        !stillHaveRefresh &&
+        typeof window !== "undefined" &&
+        !window.location.pathname.startsWith("/login")
+      ) {
         window.location.href = "/login";
       }
     }

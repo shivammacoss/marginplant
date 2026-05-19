@@ -39,9 +39,27 @@ api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   return config;
 });
 
-async function refreshAccessToken(): Promise<string | null> {
+/**
+ * Try to mint a fresh access token from the stored refresh token.
+ *
+ * Return semantics — three states matter, not two:
+ *   - "ok":          got a new access; tokens updated in localStorage.
+ *   - "auth_failed": backend explicitly rejected the refresh (401 / 403).
+ *                    Tokens MUST be cleared and the user redirected.
+ *   - "transient":   network glitch, 5xx, timeout, CORS, anything else.
+ *                    DO NOT clear tokens — the refresh token may still be
+ *                    valid, the user just temporarily can't reach the
+ *                    server. PWA users on flaky mobile networks hit this
+ *                    every time the app resumes from background; the old
+ *                    code force-cleared tokens here and bounced them to
+ *                    /login, which is the "PWA bar bar logout" the user
+ *                    reported even with a 30-day refresh TTL.
+ */
+async function refreshAccessToken(): Promise<
+  { kind: "ok"; access: string } | { kind: "auth_failed" | "transient" }
+> {
   const refresh = getRefreshToken();
-  if (!refresh) return null;
+  if (!refresh) return { kind: "auth_failed" };
   try {
     const res = await axios.post<ApiResponse<TokenPair>>(
       `${API_URL}/api/v1/user/auth/refresh`,
@@ -49,12 +67,23 @@ async function refreshAccessToken(): Promise<string | null> {
       { timeout: 15_000 }
     );
     const pair = res.data.data;
-    if (!pair) return null;
+    if (!pair) return { kind: "transient" };
     setTokens(pair.access_token, pair.refresh_token);
-    return pair.access_token;
-  } catch {
-    clearTokens();
-    return null;
+    return { kind: "ok", access: pair.access_token };
+  } catch (err) {
+    const ax = err as AxiosError;
+    const status = ax.response?.status;
+    // Only treat an explicit auth rejection as a sign-out signal.
+    // 401 + 403 from /refresh itself = the refresh token is no longer
+    // valid (revoked, rotated by another tab, expired, etc.) → clear
+    // and log the user out. Anything else (network down, server 5xx,
+    // gateway timeout, CORS preflight failure) is transient — keep the
+    // tokens and let the next request retry.
+    if (status === 401 || status === 403) {
+      clearTokens();
+      return { kind: "auth_failed" };
+    }
+    return { kind: "transient" };
   }
 }
 
@@ -65,7 +94,10 @@ api.interceptors.response.use(
     const status = error.response?.status;
     if (status === 401 && original && !original._retry) {
       original._retry = true;
-      refreshPromise ||= refreshAccessToken().finally(() => {
+      refreshPromise ||= (async () => {
+        const r = await refreshAccessToken();
+        return r.kind === "ok" ? r.access : null;
+      })().finally(() => {
         refreshPromise = null;
       });
       const newToken = await refreshPromise;
@@ -73,7 +105,16 @@ api.interceptors.response.use(
         original.headers = { ...(original.headers || {}), Authorization: `Bearer ${newToken}` };
         return api.request(original);
       }
-      if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+      // Only redirect to /login when we KNOW the refresh was rejected
+      // (auth_failed → tokens already cleared inside refreshAccessToken).
+      // For transient failures the tokens are still around — let the next
+      // call retry naturally; the user keeps their session.
+      const stillHaveRefresh = typeof window !== "undefined" && !!getRefreshToken();
+      if (
+        !stillHaveRefresh &&
+        typeof window !== "undefined" &&
+        !window.location.pathname.startsWith("/login")
+      ) {
         window.location.href = "/login";
       }
     }
