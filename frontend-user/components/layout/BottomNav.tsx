@@ -27,19 +27,26 @@ const items = [
  * Mobile-only bottom tab bar. Hidden ≥ md so the desktop sidebar is the
  * single nav surface there. Sits above the page in a translucent sticky
  * footer with safe-area padding.
+ *
+ * `compact` (used on the terminal/chart page) renders the bar as a
+ * centered pill with side margins instead of edge-to-edge — keeps the
+ * chart canvas visually wider while still giving thumb-reach navigation.
  */
-export function BottomNav() {
+export function BottomNav({ compact = false }: { compact?: boolean } = {}) {
   const pathname = usePathname();
   return (
     <nav
       className={cn(
-        "fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/95 backdrop-blur",
+        "fixed bottom-0 z-40 bg-background/95 backdrop-blur",
         "md:hidden",
-        "supports-[backdrop-filter]:bg-background/80"
+        "supports-[backdrop-filter]:bg-background/80",
+        compact
+          ? "left-1/2 mb-2 w-[min(92vw,360px)] -translate-x-1/2 rounded-full border border-border shadow-lg shadow-black/20"
+          : "inset-x-0 border-t border-border",
       )}
-      style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+      style={{ paddingBottom: compact ? undefined : "env(safe-area-inset-bottom)" }}
     >
-      <ul className="grid grid-cols-5">
+      <ul className={cn("grid grid-cols-5", compact && "rounded-full overflow-hidden")}>
         {items.map((it) => {
           const active = pathname === it.href || pathname?.startsWith(it.href + "/");
           const Icon = it.icon;
@@ -48,10 +55,13 @@ export function BottomNav() {
               <li key={it.href} className="relative">
                 <Link
                   href={it.href}
-                  className="-mt-5 mx-auto flex h-14 w-14 flex-col items-center justify-center gap-0.5 rounded-full bg-primary text-primary-foreground shadow-lg shadow-primary/30 ring-4 ring-background"
+                  className={cn(
+                    "mx-auto flex flex-col items-center justify-center gap-0.5 rounded-full bg-primary text-primary-foreground shadow-lg shadow-primary/30 ring-4 ring-background",
+                    compact ? "h-11 w-11 -mt-3" : "h-14 w-14 -mt-5",
+                  )}
                 >
-                  <Icon className="size-5" />
-                  <span className="text-[9px] font-semibold uppercase tracking-wider">{it.label}</span>
+                  <Icon className={compact ? "size-4" : "size-5"} />
+                  <span className={cn("font-semibold uppercase tracking-wider", compact ? "text-[8px]" : "text-[9px]")}>{it.label}</span>
                 </Link>
               </li>
             );
@@ -61,11 +71,12 @@ export function BottomNav() {
               <Link
                 href={it.href}
                 className={cn(
-                  "flex h-14 flex-col items-center justify-center gap-0.5 text-[10px] transition-colors",
+                  "flex flex-col items-center justify-center gap-0.5 transition-colors",
+                  compact ? "h-12 text-[9px]" : "h-14 text-[10px]",
                   active ? "text-primary" : "text-muted-foreground hover:text-foreground"
                 )}
               >
-                <Icon className={cn("size-5", active && "scale-110")} />
+                <Icon className={cn(compact ? "size-4" : "size-5", active && "scale-110")} />
                 <span className="font-medium">{it.label}</span>
               </Link>
             </li>

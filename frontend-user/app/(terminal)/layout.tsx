@@ -16,6 +16,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/common/ThemeToggle";
 import { UserWsBridge } from "@/components/common/UserWsBridge";
+import { BottomNav } from "@/components/layout/BottomNav";
 import { InstrumentsPanel } from "@/components/trading/InstrumentsPanel";
 import { OptionChainPicker } from "@/components/trading/OptionChainPicker";
 import { InstrumentAPI, OptionChainAPI } from "@/lib/api";
@@ -114,25 +115,25 @@ export default function TerminalLayout({ children }: { children: React.ReactNode
 
       <UserWsBridge />
 
-      {/* ── Top header ─────────────────────────────────────────── */}
+      {/* ── Top header ───────────────────────────────────────────
+          Mobile: only the "Option chain" pill is visible — back arrow,
+          instruments toggle, theme, wallet, and sign-out are hidden
+          since the new BottomNav covers navigation (Home/Market/Trade/
+          Orders/Profile) and the chart canvas needs the vertical room.
+          Desktop (md+) keeps the full toolbar untouched. */}
       <header className="relative z-20 flex h-12 shrink-0 items-center gap-2 border-b border-border bg-card px-3">
-        <Button asChild variant="ghost" size="icon" aria-label="Back to dashboard" className="size-8">
+        <Button asChild variant="ghost" size="icon" aria-label="Back to dashboard" className="hidden size-8 md:inline-flex">
           <Link href="/dashboard">
             <ArrowLeft className="size-4" />
           </Link>
         </Button>
-        {/* BrandLogo (MarginPlant text + arrow) removed per user request. The
-            Instruments toggle that used to live in the left ToolRail now
-            sits here so the rail can be removed entirely — same one-tap
-            access to the watchlist drawer, but reclaims the 40-px left
-            column for chart area on mobile. */}
         <Button
           type="button"
           variant={sidePanel === "instruments" ? "secondary" : "ghost"}
           size="icon"
           aria-label="Toggle instruments panel"
           title="Instruments"
-          className="size-8"
+          className="hidden size-8 md:inline-flex"
           onClick={() =>
             setSidePanel(sidePanel === "instruments" ? null : "instruments")
           }
@@ -152,21 +153,23 @@ export default function TerminalLayout({ children }: { children: React.ReactNode
             <Layers className="size-4" />
             <span className="text-xs font-medium">Option chain</span>
           </Button>
-          <ThemeToggle />
-          <Button asChild variant="ghost" size="icon" aria-label="Wallet" className="size-8">
-            <Link href="/wallet">
-              <WalletIcon className="size-4" />
-            </Link>
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label="Sign out"
-            className="size-8"
-            onClick={() => logout().then(() => (window.location.href = "/login"))}
-          >
-            <LogOut className="size-4" />
-          </Button>
+          <div className="hidden items-center gap-1.5 md:flex">
+            <ThemeToggle />
+            <Button asChild variant="ghost" size="icon" aria-label="Wallet" className="size-8">
+              <Link href="/wallet">
+                <WalletIcon className="size-4" />
+              </Link>
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Sign out"
+              className="size-8"
+              onClick={() => logout().then(() => (window.location.href = "/login"))}
+            >
+              <LogOut className="size-4" />
+            </Button>
+          </div>
         </div>
       </header>
 
@@ -183,9 +186,18 @@ export default function TerminalLayout({ children }: { children: React.ReactNode
             `overflow-hidden` clipped everything past the chart card on
             narrow viewports, which is what made the chart appear tiny
             with a huge empty band below it on phones. lg+ stays fixed
-            (no page scroll) — the grid columns there are self-contained. */}
-        <main className="min-h-0 flex-1 overflow-y-auto lg:overflow-hidden">{children}</main>
+            (no page scroll) — the grid columns there are self-contained.
+            `pb-20 md:pb-0` reserves room for the mobile-only compact
+            BottomNav pill mounted below so the order panel's last row
+            isn't hidden behind it. */}
+        <main className="min-h-0 flex-1 overflow-y-auto pb-20 md:pb-0 lg:overflow-hidden">{children}</main>
       </div>
+
+      {/* Mobile-only compact pill nav so the chart page gets the same
+          Home/Market/Trade/Orders/Profile thumb-reach as the rest of
+          the app. `compact` shrinks the bar's width and height — the
+          chart canvas stays the visual hero on phones. */}
+      <BottomNav compact />
 
       {/* Footer status bar (Equity / Free / Margin / Balance / Margin
           level / connection) removed per user request — those numbers
