@@ -408,6 +408,10 @@ async def list_positions(
                 "exchange": str(r.instrument.exchange),
                 "segment_type": r.segment_type,
                 "product_type": r.product_type.value,
+                # Lot size of the instrument at the time the position is
+                # observed. Lets the admin blotter compute Volume column
+                # (= qty/lot_size) without a separate /instruments lookup.
+                "lot_size": int(getattr(r.instrument, "lot_size", 0) or 0),
                 "quantity": qty,
                 # Original trade size at peak of this position's lifecycle.
                 # `quantity` drops to 0 on full close, so the Closed-tab UI
@@ -827,6 +831,159 @@ async def positions_pnl_summary(
             "last_week_start": last_week_start.isoformat(),
             "last_week_end": last_week_end.isoformat(),
             "usd_inr_rate": round(current_usd_inr, 4),
+        }
+    )
+
+
+@router.get("/positions/{position_id}/netting", response_model=APIResponse[dict])
+async def position_netting_entries(
+    position_id: str,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("trading_view", "read")),
+):
+    """Drill-down on a single position: the chronological list of fills
+    that built it up, plus a header summary (side, total volume, average
+    entry, current price, total P/L) and an `avg_calc_formula` string for
+    the dialog footer.
+
+    Used by the admin Positions blotter row-click to show the same view
+    the user reported as the "Netting Entries — BSE (426450)" mockup.
+    Works for both OPEN and CLOSED positions:
+      - OPEN  → returns every fill from `opened_at` onward whose
+                (user, token, product_type) matches the position
+      - CLOSED → bounded by `[opened_at, closed_at]`
+    """
+    from decimal import Decimal as _D
+
+    from app.utils.decimal_utils import to_decimal as _to_dec
+    from app.services import market_data_service as _mds
+
+    p = await Position.get(PydanticObjectId(position_id))
+    if p is None:
+        raise HTTPException(status_code=404, detail="Position not found")
+    await assert_user_in_scope(admin, p.user_id)
+
+    # Find every Trade that contributed to this position. `position_id` is
+    # not stored on Trade, so we match by user + token + product_type +
+    # time window. For a re-opened position (close then open again on the
+    # same instrument) the time bounds keep us inside the CURRENT
+    # incarnation's fills.
+    #
+    # Grace window: position.opened_at is stamped AFTER the opening
+    # Trade.insert() in position_service.apply_fill, so a millisecond of
+    # clock-skew between the two writes makes `executed_at >= opened_at`
+    # silently drop the opening Trade — exactly the user-reported "sirf
+    # ek entry dikh raha hai (Exit), Entry missing" bug. We widen the
+    # lower bound by 60 s to absorb any realistic skew without leaking
+    # in a previous closed-incarnation's fills (those would be hours/
+    # days earlier).
+    from datetime import timedelta as _td
+
+    query: dict = {
+        "user_id": p.user_id,
+        "instrument.token": p.instrument.token,
+        "product_type": p.product_type,
+    }
+    time_q: dict = {}
+    if p.opened_at:
+        time_q["$gte"] = p.opened_at - _td(seconds=60)
+    if p.closed_at:
+        # Same grace on the upper bound so a closing trade whose
+        # executed_at lands a few milliseconds AFTER position.closed_at
+        # still shows up.
+        time_q["$lte"] = p.closed_at + _td(seconds=60)
+    if time_q:
+        query["executed_at"] = time_q
+
+    trades = (
+        await Trade.find(query).sort("+executed_at").to_list()
+    )
+
+    # Build the per-row entries the dialog renders.
+    open_side = (
+        p.opened_side.value
+        if p.opened_side and hasattr(p.opened_side, "value")
+        else str(p.opened_side or "")
+    ).upper() or None
+
+    entries: list[dict] = []
+    formula_parts: list[str] = []
+    total_volume = _D("0")
+    weighted = _D("0")
+    for idx, t in enumerate(trades, start=1):
+        side = (
+            t.action.value if hasattr(t.action, "value") else str(t.action)
+        ).upper()
+        # An "Entry" leg adds same-direction exposure; "Exit" reduces.
+        # If we know the original opened_side, anything matching it is
+        # Entry, opposite is Exit. Fallback: BUY=Entry / SELL=Exit when
+        # opened_side is unknown.
+        entry_kind = "Exit"
+        if open_side is None:
+            entry_kind = "Entry" if side == "BUY" else "Exit"
+        elif side == open_side:
+            entry_kind = "Entry"
+        else:
+            entry_kind = "Exit"
+
+        qty = _to_dec(t.quantity)
+        price = _to_dec(t.price)
+        if entry_kind == "Entry":
+            total_volume += qty
+            weighted += qty * price
+            formula_parts.append(f"{qty}×₹{price}")
+        pnl_inr = (
+            _to_dec(t.pnl_inr) if getattr(t, "pnl_inr", None) is not None else None
+        )
+        entries.append(
+            {
+                "row": idx,
+                "type": entry_kind,
+                "side": side,
+                "executed_at": t.executed_at.isoformat() if t.executed_at else None,
+                "volume": float(qty),
+                "price": float(price),
+                "pnl_inr": float(pnl_inr) if pnl_inr is not None else None,
+            }
+        )
+
+    avg_entry = (weighted / total_volume) if total_volume > 0 else _to_dec(p.avg_price)
+    avg_calc_formula = (
+        f"({' + '.join(formula_parts)}) ÷ {total_volume} = ₹{avg_entry:.2f}"
+        if formula_parts
+        else f"₹{avg_entry:.2f}"
+    )
+
+    # Live LTP for OPEN; close price (already stamped onto position.ltp by
+    # position_service.apply_fill) for CLOSED.
+    if p.status == PositionStatus.OPEN:
+        try:
+            current_price = float(await _mds.get_ltp(p.instrument.token))
+        except Exception:
+            current_price = float(_to_dec(p.ltp)) if p.ltp is not None else 0.0
+    else:
+        current_price = float(_to_dec(p.ltp)) if p.ltp is not None else 0.0
+
+    # Header total P/L: unrealised for OPEN, realised for CLOSED.
+    if p.status == PositionStatus.OPEN:
+        total_pnl = float(_to_dec(p.unrealized_pnl)) if p.unrealized_pnl is not None else 0.0
+    else:
+        total_pnl = float(_to_dec(p.realized_pnl)) if p.realized_pnl is not None else 0.0
+
+    return APIResponse(
+        data={
+            "position_id": str(p.id),
+            "symbol": p.instrument.symbol,
+            "exchange": str(getattr(p.instrument.exchange, "value", p.instrument.exchange) or ""),
+            "token": p.instrument.token,
+            "status": p.status.value if hasattr(p.status, "value") else str(p.status),
+            "side": open_side or "BUY",
+            "volume": float(total_volume),
+            "avg_entry": float(avg_entry),
+            "current_price": current_price,
+            "total_pnl": total_pnl,
+            "avg_calc_formula": avg_calc_formula,
+            "entries": entries,
         }
     )
 

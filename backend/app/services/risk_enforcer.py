@@ -210,9 +210,62 @@ async def _enforce_for_user(user: User) -> None:
     # Refresh LTP + run bracket SL/TP checks per position. Bracket legs on
     # open positions don't live in the pending-order book, so this is where
     # they fire.
+    #
+    # Market-closed gate: for Indian equity / F&O (close 15:30 IST) and MCX
+    # (close 23:55 IST) we MUST NOT auto-fire SL/TP brackets after close.
+    # The cached LTP is whatever the last tick before close was — comparing
+    # it against the user's bracket trigger one second later (or hours
+    # later) and "filling" the close at that stale price is a phantom
+    # execution: there's no exchange, no counterparty, no real fill. The
+    # user reported "market closed ho gaya phir bhi mere trade close ho
+    # gaya" because the enforcer was happily booking these phantom closes.
+    # Forex / crypto / spot commodity stay 24×5 / 24×7, so they get the
+    # full bracket evaluation as before.
+    from app.utils.time_utils import is_after_close, is_weekend, now_ist
+
+    now_now = now_ist()
+    is_weekend_now = is_weekend(now_now.date())
+
+    def _segment_closed(seg: str | None) -> bool:
+        if not seg:
+            return False
+        if is_weekend_now:
+            # Indian exchanges + MCX are closed Sat/Sun. is_after_close
+            # only handles weekday close-of-day, so OR with a prefix
+            # check that covers the full weekend window. Forex (CDS_*)
+            # is 24×5 — closed Sat all day, Sun till ~Mon 04:00 IST;
+            # we cover that conservatively by NOT including it here so
+            # 24×5 instruments still trade Sun evening if open. Crypto
+            # is 24×7 and never closes.
+            if seg.startswith(("NSE_", "BSE_", "MCX_", "NFO_", "BFO_")):
+                return True
+        return is_after_close(seg, now_now)
+
     total_unrealised = Decimal("0")
     bracket_fired_ids: set[str] = set()
     for p in open_positions:
+        # ── Market-closed skip ─────────────────────────────────────────
+        # Skip the ENTIRE evaluation (LTP refresh, bracket fire, and
+        # this position's contribution to the aggregate stop-out loss)
+        # when its segment is past close. The cached LTP at this point
+        # is whatever the last tick before close was — booking a phantom
+        # close at that stale price is what caused the "market closed
+        # ho gaya phir bhi mere trade close ho gaya" bug. Re-evaluation
+        # resumes on the next tick once the segment reopens.
+        seg_for_check = (
+            getattr(p, "segment_type", None) or getattr(p.instrument, "segment", None)
+        )
+        if _segment_closed(str(seg_for_check) if seg_for_check else None):
+            # Preserve the position's last-known unrealised P/L on the
+            # aggregate so the warning re-arm logic and admin telemetry
+            # still see "this user has open exposure" — but DON'T treat
+            # any change as actionable.
+            try:
+                total_unrealised += to_decimal(p.unrealized_pnl)
+            except Exception:
+                pass
+            continue
+
         ltp = ltp_map.get(p.instrument.token)
         if ltp is not None:
             try:
@@ -442,34 +495,59 @@ async def _enforce_for_user(user: User) -> None:
                 extra={"user_id": str(user.id), "position_id": str(p.id)},
             )
 
-    # Total projected loss = floating loss (clamped at 0 when in profit
-    # — profit doesn't soften a stop-out) + estimated close brokerage.
+    # Bal-protection stop-out semantics.
+    #
+    #   loss_pct = (floating_loss + estimated_close_brokerage) / bal × 100
+    #
+    # Where bal = wallet wealth at rest (available + used_margin). This is
+    # NOT the CFD "Margin Level" gauge — it's a "% of MAIN BALANCE the user
+    # is about to lose" gauge. Fire when loss_pct ≥ stopOutPercent. Keeps
+    # the main balance from going negative: at stopOutPercent = 100% the
+    # auto-close fires the instant projected loss equals the entire bal,
+    # i.e. bal touches zero AT MOST. Setting stopOutPercent below 100%
+    # (e.g. 80%) closes positions BEFORE bal is fully wiped — preserving a
+    # cushion as the user explicitly asked: "main wallet kabhi negative
+    # nahi jana chahiye, stop-out apne se sab close kar de".
+    #
+    # `balance` already includes credit_limit (see _wallet_balance) so a
+    # user with extended credit gets that buffer too — the gauge measures
+    # against the total "money the broker has on the line for this user".
+    user_id_str = str(user.id)
     floating_loss = (-total_unrealised) if total_unrealised < 0 else Decimal("0")
     projected_loss = floating_loss + estimated_close_brokerage
-    if projected_loss <= 0:
-        loss_pct = 0.0
-    else:
-        loss_pct = float(projected_loss / balance * Decimal(100))
+    loss_pct = (
+        float(projected_loss / balance * Decimal(100)) if projected_loss > 0 else 0.0
+    )
 
-    user_id_str = str(user.id)
-
-    # 1) Stop-out — force-close EVERYTHING when loss crosses the threshold.
-    # Done before the warning check because hitting stop-out implicitly
-    # crossed the warning too.
+    # 1) Stop-out — force-close EVERYTHING when projected loss reaches the
+    # configured % of main balance. Done before the warning check because
+    # hitting stop-out implicitly crossed the warning too.
     if stop_pct > 0 and loss_pct >= stop_pct:
         logger.warning(
             "stop_out_triggered",
-            extra={"user_id": user_id_str, "loss_pct": round(loss_pct, 2), "threshold": stop_pct},
+            extra={
+                "user_id": user_id_str,
+                "loss_pct": round(loss_pct, 2),
+                "threshold_pct": stop_pct,
+                "floating_loss": float(floating_loss),
+                "bal": float(balance),
+            },
         )
         for p in open_positions:
-            await _squareoff_position(user, p, f"stop_out_{loss_pct:.2f}>={stop_pct}")
-        # Re-arm the warning so a future breach pings again.
+            await _squareoff_position(
+                user,
+                p,
+                f"stop_out_loss_pct_{loss_pct:.2f}>={stop_pct}",
+            )
         _warning_armed[user_id_str] = True
         return
 
-    # 2) Warning — fire once per crossing. Armed = ready to fire. Once
-    # fired we disarm; reset to armed when loss drops back below the
-    # warning threshold (rearm-on-recovery semantics).
+    # 2) Warning — fire once per crossing FROM BELOW. Armed = ready to
+    # fire. Once fired we disarm; reset to armed when loss drops back
+    # below the warning threshold. `stopOutWarningPercent` is in the
+    # same units as `stopOutPercent` (loss % of bal). Set it LOWER than
+    # the stop-out value to get an early heads-up (e.g. warning 60%,
+    # stop-out 80%).
     armed = _warning_armed.get(user_id_str, True)
     if warning_pct > 0 and loss_pct >= warning_pct:
         if armed:
@@ -480,7 +558,7 @@ async def _enforce_for_user(user: User) -> None:
                 extra={
                     "user_id": user_id_str,
                     "loss_pct": round(loss_pct, 2),
-                    "threshold": warning_pct,
+                    "threshold_pct": warning_pct,
                 },
             )
     elif loss_pct < warning_pct:

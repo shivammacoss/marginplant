@@ -377,11 +377,13 @@ export default function ZerodhaConnectPage() {
                 <LinkIcon className="size-4" /> {settings.isTokenExpired ? "Reconnect to Zerodha" : "Login to Zerodha"}
               </Button>
             )}
-            {settings.isConnected && !settings.isTokenExpired && settings.wsStatus !== "connected" && (
-              <Button variant="outline" onClick={connectWs}>
-                <PlugZap className="size-4" /> Start ticker
-              </Button>
-            )}
+            {/* "Start ticker" button removed — the backend now auto-
+                starts the WS pool after a successful login and a
+                background self-heal loop reconnects it whenever it
+                falls into ERROR (daily token rotation, transient
+                network blips, post-deploy slot release). Admin should
+                never need to click this manually. Stop ticker still
+                available for explicit shutdown if needed. */}
             {settings.wsStatus === "connected" && (
               <Button variant="outline" onClick={disconnectWs}>
                 <Plug className="size-4" /> Stop ticker

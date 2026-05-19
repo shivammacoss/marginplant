@@ -38,7 +38,14 @@ class Settings(BaseSettings):
 
     # ── Redis ────────────────────────────────────────────────────────
     REDIS_URL: str = "redis://localhost:6379/0"
-    REDIS_MAX_CONNECTIONS: int = 50
+    # Bumped from 50 → 300 after the market_tick_loop started raising
+    # `ConnectionError: Too many connections` once the Zerodha WS pool
+    # crossed ~1500 subscribed tokens. Every 250 ms tick publishes one
+    # message per token over pub/sub, plus the order validator + cache
+    # helpers all pull from the same pool. Empirical headroom needed
+    # ≈ token_count / 20 + steady ~50 for HTTP path; 300 leaves slack
+    # for spikes during option-chain expansion.
+    REDIS_MAX_CONNECTIONS: int = 300
 
     # ── JWT ──────────────────────────────────────────────────────────
     # Refresh-token TTL widened from 7 → 30 days so the mobile app keeps

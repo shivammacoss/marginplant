@@ -42,9 +42,18 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           every open admin/broker tab. */}
       <AdminWsBridge />
       <AdminSidebar />
-      <div className="flex min-h-screen flex-col">
+      {/* `min-w-0` is load-bearing here. The parent grid uses
+          `md:grid-cols-[auto_1fr]`; without `min-w-0` on the right
+          column, a wide child (e.g. the Positions blotter with 15+
+          columns) forces the column to grow to fit its content's
+          intrinsic width — pushing the sidebar off-screen and making
+          the WHOLE page scroll horizontally instead of just the
+          table. With it, the column happily shrinks below content
+          width and the DataTable's own `overflow-auto` contains the
+          horizontal scroll. */}
+      <div className="flex min-h-screen min-w-0 flex-col">
         <AdminTopBar />
-        <main className="flex-1 overflow-y-auto bg-background scrollbar-thin">
+        <main className="flex-1 overflow-y-auto overflow-x-hidden bg-background scrollbar-thin">
           <div className="mx-auto max-w-screen-2xl p-4 md:p-6">{children}</div>
         </main>
       </div>

@@ -264,13 +264,31 @@ class ZerodhaService:
         except Exception:
             logger.exception("zerodha_cache_warm_failed")
 
-        # Start the WebSocket pool (empty — tokens subscribe on-demand)
+        # Start the WebSocket pool via the retry-aware path. Previously
+        # we called `_start_ws_pool()` directly — a single shot that
+        # silently failed when Kite's gateway held the previous slot for
+        # 30-90 s (typical after a deploy or daily token rotation). The
+        # admin then saw "Ticker: connecting" forever and had to click
+        # the manual "Start ticker" button. `connect_ws(force=True)`
+        # gives us the 5-attempt back-off ladder so the post-login WS
+        # connect succeeds on its own. Fire-and-forget so the OAuth
+        # callback returns instantly even when the WS connect needs the
+        # full ~3 minute back-off (it converges in the background, and
+        # the self-heal loop below keeps trying after that).
         try:
-            await self._start_ws_pool()
+            asyncio.create_task(self._login_auto_connect())
         except Exception:
-            logger.exception("zerodha_ws_pool_start_failed")
+            logger.exception("zerodha_post_login_ws_kickoff_failed")
 
         return {"accessToken": access, "tokenExpiry": s.tokenExpiry}
+
+    async def _login_auto_connect(self) -> None:
+        """Kicks off the retry-aware WS connect after a fresh login. Runs
+        in the background so the OAuth callback doesn't block."""
+        try:
+            await self.connect_ws(force=True)
+        except Exception:
+            logger.warning("zerodha_post_login_ws_connect_giving_up_to_heal_loop")
 
     async def _auto_load_default_subscriptions(self) -> int:
         """Resolve the curated default set against the live Zerodha instruments
@@ -1581,15 +1599,23 @@ class ZerodhaService:
         (admin-pinned), subscribe those. Otherwise just start an empty pool
         for on-demand subscriptions.
 
-        When ``force`` is True (the default — what the admin's "Start ticker"
-        button uses), tear down any existing local socket AND wait a few
-        seconds before reconnecting. This is the only reliable way to escape
-        the 403 "WebSocket connection upgrade failed" loop: Zerodha allows
-        exactly ONE active KiteTicker per access_token, and when a process
-        crashes / a deploy swaps containers / a stale socket lingers, Kite's
-        side keeps the old slot warm for a few seconds longer than ours does.
-        Reconnecting too eagerly hits 403; a short sleep lets Kite release.
+        When ``force`` is True (the default), tear down any existing local
+        socket AND wait a few seconds before reconnecting. This is the only
+        reliable way to escape the 403 "WebSocket connection upgrade failed"
+        loop: Zerodha allows exactly ONE active KiteTicker per access_token,
+        and when a process crashes / a deploy swaps containers / a stale
+        socket lingers, Kite's side keeps the old slot warm for a few
+        seconds longer than ours does. Reconnecting too eagerly hits 403;
+        a short sleep lets Kite release.
+
+        Any explicit connect call un-pauses the self-heal loop so background
+        re-arming resumes after a manual reconnect.
         """
+        # Re-arm self-heal — a fresh connect_ws call means the admin / a
+        # fresh login wants the ticker back online, even if they had
+        # previously hit Disconnect.
+        self._self_heal_paused = False
+
         s = await self._get_settings()
         if not s.apiKey or not s.accessToken:
             raise RuntimeError("Authenticate with Zerodha before connecting the ticker")
@@ -1717,13 +1743,94 @@ class ZerodhaService:
         s.wsStatus = status
         if error is not None:
             s.wsLastError = error
-        if status == WsStatus.CONNECTED:
+        # Clear the stale error whenever we step into CONNECTING or
+        # CONNECTED. Previously a failed-retries error message (red banner
+        # on the admin page) stuck around even after the next retry was
+        # in progress, making it look like nothing was happening. The
+        # self-heal loop retries every 30 s — admin should see "CONNECTING"
+        # without the obsolete error from the prior cycle.
+        if status in (WsStatus.CONNECTED, WsStatus.CONNECTING):
             s.wsLastError = None
         await s.save()
 
     async def disconnect_ws(self) -> None:
         self._stop_ticker()
         await self._async_set_status(WsStatus.DISCONNECTED)
+        # Pause the self-heal loop so it doesn't immediately reconnect
+        # after an intentional admin disconnect. Resumes on next manual
+        # connect_ws or fresh login.
+        self._self_heal_paused = True
+
+    # ─────────────────────────── Self-heal loop ─────────────────────
+    # Runs forever from FastAPI lifespan. Once a minute it checks WS
+    # status; if it's in ERROR (5-retry exhaust) or DISCONNECTED while
+    # auth is still valid, it tries `connect_ws(force=True)` again with
+    # its own back-off ladder. This is the permanent fix for the daily
+    # "WebSocket connect failed after 5 retries" admin had to click
+    # through every morning after the 08:00 IST token rotation — the
+    # token refresh is automatic (handled by `_kite_with_token`), so
+    # all that was missing was a background re-arming of the WS pool.
+
+    _self_heal_paused: bool = False
+    _self_heal_running: bool = False
+
+    async def ws_self_heal_loop(self, interval_sec: float = 60.0) -> None:
+        """Background task — periodically nudge a stuck WebSocket back
+        online. Skipped when:
+          - admin explicitly disconnected (`_self_heal_paused` flag)
+          - access token missing / expired (waits for fresh login)
+          - WS is already CONNECTED (nothing to do)
+
+        Fires `connect_ws(force=True)` which carries its own 5-attempt
+        back-off ladder (~3 min total) — that handles the slot-release
+        window after every token rotation or process restart. If still
+        failing after a heal attempt, the loop sleeps `interval_sec`
+        and tries again.
+        """
+        if self._self_heal_running:
+            return
+        self._self_heal_running = True
+        logger.info("zerodha_ws_self_heal_loop_started", extra={"interval_sec": interval_sec})
+        try:
+            while self._self_heal_running:
+                try:
+                    await asyncio.sleep(interval_sec)
+                    if self._self_heal_paused:
+                        continue
+                    s = await self._get_settings()
+                    if not s.apiKey or not s.accessToken:
+                        # No auth yet — admin hasn't logged in. Self-heal
+                        # has nothing to do.
+                        continue
+                    # Auth token expired? Skip — admin needs to re-login.
+                    expiry = _ensure_aware_utc(s.tokenExpiry)
+                    if expiry and now_utc() >= expiry:
+                        continue
+                    # Already alive? Nothing to do.
+                    with self._ticker_lock:
+                        if any(e.get("connected") for e in self._tickers):
+                            continue
+                    # ERROR or DISCONNECTED with valid auth → try again.
+                    logger.info(
+                        "zerodha_ws_self_heal_triggering",
+                        extra={"current_status": s.wsStatus},
+                    )
+                    try:
+                        await self.connect_ws(force=True)
+                        logger.info("zerodha_ws_self_heal_succeeded")
+                    except Exception as e:
+                        logger.warning(
+                            "zerodha_ws_self_heal_attempt_failed",
+                            extra={"error": str(e)[:200]},
+                        )
+                except Exception:
+                    logger.exception("zerodha_ws_self_heal_tick_failed")
+        finally:
+            self._self_heal_running = False
+            logger.info("zerodha_ws_self_heal_loop_stopped")
+
+    def stop_ws_self_heal(self) -> None:
+        self._self_heal_running = False
 
     def get_ws_pool_info(self) -> dict[str, Any]:
         """Return current WebSocket pool status for admin diagnostics."""

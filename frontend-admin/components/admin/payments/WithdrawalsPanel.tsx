@@ -83,17 +83,31 @@ export function WithdrawalsPanel() {
     {
       key: "bank",
       header: "Destination",
+      // Show FULL bank/UPI details so admins can copy them into the
+      // payout tool without bouncing into the user-detail page.
+      // Previous version masked the account as ••••<last 4> which
+      // forced the admin to click through for every approval.
       render: (r) => {
         const b = r.bank ?? {};
-        // UPI mode → show the VPA (and a QR link if user uploaded one).
-        if (b.upi_id) {
-          return (
-            <span className="flex items-center gap-2">
-              <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-primary">
-                UPI
+        const isUpi = Boolean(b.upi_id);
+        const hasBank = Boolean(b.account_number);
+        if (!isUpi && !hasBank) return "—";
+        return (
+          <div className="flex flex-col gap-0.5 whitespace-normal break-all leading-tight">
+            <div className="flex items-center gap-2">
+              <span
+                className={
+                  isUpi
+                    ? "rounded bg-primary/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-primary"
+                    : "rounded bg-accent px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
+                }
+              >
+                {isUpi ? "UPI" : "Bank"}
               </span>
-              <span className="font-mono text-xs">{b.upi_id}</span>
-              {b.qr_url && (
+              <span className="font-mono text-xs">
+                {isUpi ? b.upi_id : b.account_number}
+              </span>
+              {isUpi && b.qr_url ? (
                 <a
                   href={b.qr_url}
                   target="_blank"
@@ -102,25 +116,29 @@ export function WithdrawalsPanel() {
                 >
                   QR
                 </a>
-              )}
-            </span>
-          );
-        }
-        // Bank mode → name + last 4 + IFSC.
-        if (b.account_number) {
-          return (
-            <span className="flex items-center gap-2">
-              <span className="rounded bg-accent px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
-                Bank
-              </span>
-              <span>
-                {b.name || "—"} · ••••{String(b.account_number).slice(-4)}
-                {b.ifsc ? <span className="ml-1 text-[11px] text-muted-foreground">{b.ifsc}</span> : null}
-              </span>
-            </span>
-          );
-        }
-        return "—";
+              ) : null}
+            </div>
+            {!isUpi && (b.name || b.ifsc || b.holder || b.branch) ? (
+              <div className="text-[11px] text-muted-foreground">
+                {[
+                  b.name,
+                  b.holder,
+                  b.ifsc,
+                  b.branch,
+                  b.account_type,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </div>
+            ) : null}
+            {isUpi && hasBank ? (
+              <div className="text-[11px] text-muted-foreground font-mono">
+                Bank: {b.account_number}
+                {b.ifsc ? ` · ${b.ifsc}` : ""}
+              </div>
+            ) : null}
+          </div>
+        );
       },
     },
     { key: "remarks", header: "Remarks", render: (r) => r.remarks || "—" },

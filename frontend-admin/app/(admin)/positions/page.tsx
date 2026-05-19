@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertOctagon, CalendarDays, Pencil, Search, TrendingDown, TrendingUp, Trash2, X, X as XIcon } from "lucide-react";
+import { AlertOctagon, CalendarDays, Info, Pencil, Search, TrendingDown, TrendingUp, Trash2, X, X as XIcon } from "lucide-react";
 import { TradingAPI, UsersAPI } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/dialog";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { NettingEntriesDialog } from "@/components/admin/NettingEntriesDialog";
 import { StatusPill } from "@/components/common/StatusPill";
 import { cn, formatINR, pnlColor } from "@/lib/utils";
 import { OwnerBadge } from "@/components/admin/OwnerBadge";
@@ -238,6 +239,10 @@ function AdminPositionsInner() {
 
   // ── Edit modal ────────────────────────────────────────────────────
   const [editing, setEditing] = useState<any | null>(null);
+  // Position-id of the row whose Netting Entries drilldown is open. `null`
+  // when the dialog is closed. Drives both Open + Closed tabs since the
+  // backend endpoint supports both.
+  const [nettingId, setNettingId] = useState<string | null>(null);
   const [form, setForm] = useState<{
     avg_price: string;
     quantity: string;
@@ -322,7 +327,7 @@ function AdminPositionsInner() {
     {
       key: "user",
       header: "User",
-      render: (r) => (
+      render: (r: any) => (
         <div className="flex flex-col leading-tight">
           <span className="text-sm">{r.user_name || "—"}</span>
           <span className="font-mono text-[10px] text-muted-foreground">
@@ -331,18 +336,44 @@ function AdminPositionsInner() {
         </div>
       ),
     },
-    { key: "owner", header: "Owner", render: (r) => <OwnerBadge row={r} me={me} /> },
+    { key: "owner", header: "Owner", render: (r: any) => <OwnerBadge row={r} me={me} /> },
     { key: "symbol", header: "Symbol" },
     { key: "exchange", header: "Exch" },
     {
+      // Direction the user opened on. `opened_side` is stable across the
+      // position's lifecycle (preserved by position_service even after a
+      // full close drops `quantity` to 0), so the Closed Trades view shows
+      // the original BUY/SELL just as clearly as the Open Trades view.
+      key: "opened_side",
+      header: "Side",
+      render: (r: any) => {
+        const raw = (r.opened_side || (Number(r.quantity) >= 0 ? "BUY" : "SELL"))
+          .toString()
+          .toUpperCase();
+        const isBuy = raw === "BUY";
+        return (
+          <span
+            className={cn(
+              "inline-flex min-w-[44px] items-center justify-center rounded px-1.5 py-0.5 text-[11px] font-semibold",
+              isBuy
+                ? "bg-emerald-500/15 text-emerald-500"
+                : "bg-red-500/15 text-red-500",
+            )}
+          >
+            {raw}
+          </span>
+        );
+      },
+    },
+    {
       key: "quantity",
       header: "Qty",
-      align: "right",
+      align: "right" as const,
       // For CLOSED rows `quantity` is 0 (FIFO flattens it on the close leg).
       // `opening_quantity` is preserved by position_service — that's the size
       // the user actually traded. Direction comes from `opened_side` so the
       // colour stays correct even though the signed qty is 0.
-      render: (r) => {
+      render: (r: any) => {
         const isClosed = r.status === "CLOSED";
         const displayQty = isClosed
           ? Math.abs(Number(r.opening_quantity ?? 0))
@@ -362,10 +393,51 @@ function AdminPositionsInner() {
       },
     },
     {
+      // Volume = total lot count (contracts ÷ lot_size). Renders "—" for
+      // equity rows where lot_size is 1 (Qty already conveys the size).
+      // Cell carries a small (i) icon as a visual affordance — clicking
+      // anywhere in the row opens the per-position Netting Entries
+      // breakdown, and admins were missing the click cue without an
+      // explicit indicator. Tabular-nums alignment keeps a column of
+      // mixed integer / decimal values visually clean.
+      key: "volume",
+      header: "Volume",
+      align: "right" as const,
+      render: (r: any) => {
+        const isClosed = r.status === "CLOSED";
+        const rawQty = isClosed
+          ? Math.abs(Number(r.opening_quantity ?? 0))
+          : Math.abs(Number(r.quantity));
+        const lotSize = Number(r.lot_size ?? r.instrument?.lot_size ?? 1) || 1;
+        if (lotSize <= 1 || rawQty <= 0) {
+          return (
+            <span className="inline-flex items-center justify-end gap-1.5">
+              <span>—</span>
+              <Info
+                className="size-3 text-muted-foreground/60"
+                aria-label="Click row to view netting entries"
+              />
+            </span>
+          );
+        }
+        const lots = rawQty / lotSize;
+        const text = Number.isInteger(lots) ? String(lots) : lots.toFixed(2);
+        return (
+          <span
+            className="inline-flex items-center justify-end gap-1.5"
+            title="Click row to view netting entries"
+          >
+            <span className="tabular-nums">{text}</span>
+            <Info className="size-3 text-primary/70" />
+          </span>
+        );
+      },
+    },
+    {
       key: "avg_price",
-      header: "Avg",
-      align: "right",
-      render: (r) => fmtFeedPrice(r.avg_price, r.currency_quote),
+      header: "Open Price",
+      align: "right" as const,
+      render: (r: any) => fmtFeedPrice(r.avg_price, r.currency_quote),
     },
     {
       // For closed positions, `ltp` was set to the actual close price by
@@ -375,8 +447,8 @@ function AdminPositionsInner() {
       // Trades tab still reads "LTP" since that's the live mark.
       key: "ltp",
       header: tab === "closed" ? "Close" : "LTP",
-      align: "right",
-      render: (r) => (
+      align: "right" as const,
+      render: (r: any) => (
         <span title={r.status === "CLOSED" ? "Closing price" : "Live LTP"}>
           {fmtFeedPrice(r.ltp, r.currency_quote)}
         </span>
@@ -385,12 +457,12 @@ function AdminPositionsInner() {
     {
       key: "status",
       header: "Status",
-      render: (r) => <StatusPill status={r.status} />,
+      render: (r: any) => <StatusPill status={r.status} />,
     },
     {
       key: "realized_pnl",
       header: "Realized",
-      align: "right",
+      align: "right" as const,
       // NET realised — gross realized_pnl minus the brokerage / other
       // charges stamped on this position's lifecycle trades. The
       // backend ships both fields; we subtract here so the admin and
@@ -400,7 +472,7 @@ function AdminPositionsInner() {
       // backend/app/api/v1/user/positions.py:closed_positions).
       // Hover-title carries the gross + charges decomposition so
       // admins can still see the underlying components when reconciling.
-      render: (r) => {
+      render: (r: any) => {
         const gross = Number(r.realized_pnl ?? 0);
         const charges = Number(r.charges ?? 0);
         const net = gross - charges;
@@ -434,11 +506,32 @@ function AdminPositionsInner() {
             ),
           },
         ]),
-    { key: "margin_used", header: "Margin", align: "right", render: (r) => formatINR(r.margin_used) },
+    {
+      // Total brokerage paid across this position's lifecycle (open
+      // leg + close leg if closed). Backend's `charges` field already
+      // sums every Trade row within the position's open-close window
+      // — see _charges_for() in admin/trading.py. User feedback:
+      // "margin column hata ke total close+open brokerage dikhao" —
+      // margin tells the admin nothing on the Closed tab (it's 0
+      // there anyway) and on the Open tab it duplicates info already
+      // visible in the user's wallet strip; total brokerage is what
+      // the admin actually audits.
+      key: "charges",
+      header: "Brokerage",
+      align: "right" as const,
+      render: (r: any) => (
+        <span
+          title="Total brokerage (open leg + close leg)"
+          className="tabular-nums"
+        >
+          {formatINR(Number(r.charges ?? 0))}
+        </span>
+      ),
+    },
     {
       key: "opened_at",
       header: "Opened",
-      render: (r) => (
+      render: (r: any) => (
         <span className="whitespace-nowrap font-tabular">
           {fmtOpenedAt(r.opened_at)}
         </span>
@@ -470,7 +563,7 @@ function AdminPositionsInner() {
     {
       key: "close_reason",
       header: "Closed By",
-      render: (r) =>
+      render: (r: any) =>
         r.status === "CLOSED" ? (
           <CloseReasonChip reason={r.close_reason} />
         ) : (
@@ -480,21 +573,35 @@ function AdminPositionsInner() {
     {
       key: "actions",
       header: "",
-      align: "right",
-      render: (r) => (
-        <div className="flex items-center justify-end gap-1.5">
+      align: "right" as const,
+      // `e.stopPropagation()` on every action button so clicking them
+      // doesn't also fire the row-level netting drilldown dialog (the
+      // <tr> has its own onClick now). Without this, "Close" would
+      // squareoff AND pop open the breakdown — visually noisy and the
+      // edit form would land on a faded background.
+      render: (r: any) => (
+        <div
+          className="flex items-center justify-end gap-1.5"
+          onClick={(e) => e.stopPropagation()}
+        >
           {r.status === "OPEN" && (
             <>
               <Button
                 size="sm"
-                onClick={() => setEditing(r)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setEditing(r);
+                }}
                 className="h-7 gap-1 rounded-md bg-blue-600 px-2.5 text-xs font-semibold text-white hover:bg-blue-700"
               >
                 <Pencil className="size-3.5" /> Edit
               </Button>
               <Button
                 size="sm"
-                onClick={() => squareoff(r.id)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  squareoff(r.id);
+                }}
                 className="h-7 gap-1 rounded-md bg-destructive px-2.5 text-xs font-semibold text-destructive-foreground hover:bg-destructive/90"
               >
                 <X className="size-3.5" /> Close
@@ -503,7 +610,10 @@ function AdminPositionsInner() {
           )}
           <Button
             size="sm"
-            onClick={() => remove(r.id, r.symbol)}
+            onClick={(e) => {
+              e.stopPropagation();
+              remove(r.id, r.symbol);
+            }}
             aria-label="Delete record"
             title="Delete record (no square-off)"
             className="size-7 rounded-md bg-destructive/15 p-0 text-destructive ring-1 ring-inset ring-destructive/30 hover:bg-destructive hover:text-destructive-foreground hover:ring-destructive"
@@ -637,6 +747,7 @@ function AdminPositionsInner() {
         rows={data}
         keyExtractor={(r) => r.id}
         loading={isFetching && !data}
+        onRowClick={(r: any) => setNettingId(String(r.id))}
         rowClassName={(r) =>
           tab === "open" && Number(r.unrealized_pnl) < -Number(r.margin_used) * 0.5
             ? "bg-destructive/5"
@@ -644,6 +755,14 @@ function AdminPositionsInner() {
               ? "bg-atm/5"
               : undefined
         }
+      />
+
+      {/* Row-click opens the per-position fill breakdown. Same dialog
+          serves Open + Closed tabs — the backend endpoint handles both
+          statuses and the modal renders identically. */}
+      <NettingEntriesDialog
+        positionId={nettingId}
+        onClose={() => setNettingId(null)}
       />
 
       <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>

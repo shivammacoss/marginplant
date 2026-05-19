@@ -206,7 +206,12 @@ async def list_inactive_admin_rows(user: CurrentUser):
     The user-side InstrumentsPanel uses this to hide whole asset-class
     chips (NSE EQ, MCX FUT, …) for segments the broker has paused — so
     the trader never even sees the chip, let alone an empty results
-    list. Cached in netting_service for 30 s so this endpoint is cheap.
+    list.
+
+    Pool-aware: passes `user.id` so a sub-admin's "Block → No" reaches
+    their pool members. Without this, the function returned only the
+    base + super-admin overrides, and a sub-admin's block was invisible
+    to the user-side chip filter.
     """
-    rows = await netting_service.inactive_admin_rows()
+    rows = await netting_service.inactive_admin_rows(user_id=user.id)
     return APIResponse(data=sorted(rows))

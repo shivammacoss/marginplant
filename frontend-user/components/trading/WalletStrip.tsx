@@ -52,14 +52,30 @@ export function WalletStrip({
     enabled: openPnL === undefined,
   });
 
-  const available = Number(wallet?.available_balance ?? 0);
-  const used = Number(wallet?.used_margin ?? 0);
+  // Dabba / CFD KPI strip — Bal · Equity · Margin · Free + live Open P/L.
+  // Backend's /wallet/summary now ships these as first-class fields. Legacy
+  // `available_balance + used_margin` math kept as a fallback so the strip
+  // doesn't blank out if an older API rolls back.
+  const bal = Number(
+    wallet?.bal ??
+      Number(wallet?.available_balance ?? 0) + Number(wallet?.used_margin ?? 0),
+  );
+  const margin = Number(wallet?.margin ?? wallet?.used_margin ?? 0);
+  // Prefer the parent's live `openPnL` (matches per-row P/L in the table)
+  // over the wallet's `open_unrealized_pnl` (uses mid-LTP, off by a tick
+  // on wide-spread instruments).
   const openUnrl =
     openPnL !== undefined
       ? openPnL
-      : Number(pnl?.open_unrealised ?? pnl?.unrealized_pnl ?? 0);
-  const totalBalance = available + used;
-  const equity = totalBalance + openUnrl;
+      : Number(pnl?.open_unrealised ?? pnl?.unrealized_pnl ?? wallet?.open_unrealized_pnl ?? 0);
+  const equity = bal + openUnrl;
+  const free = equity - margin;
+
+  // Margin Level chip removed per user request — a residual ₹0.02 left
+  // over from a closed position made the ratio explode into a nonsense
+  // "40,005,950%" display whenever no real exposure was open. Bal /
+  // Equity / Margin / Free + Open P/L convey all the info admins and
+  // traders need anyway; the gauge lives in the backend stop-out check.
 
   return (
     <div
@@ -68,16 +84,20 @@ export function WalletStrip({
         className,
       )}
     >
-      <Stat label="Total Balance" value={formatINR(totalBalance)} />
+      <Stat label="Bal" value={formatINR(bal)} />
       <Sep />
-      <Stat label="Equity" value={formatINR(equity)} />
+      <Stat label="Equity" value={formatINR(equity)} valueClass={pnlColor(openUnrl)} />
       <Sep />
-      <Stat label="Used Margin" value={formatINR(used)} />
-      <Sep />
-      <Stat label="Available" value={formatINR(available)} />
+      <Stat label="Margin" value={formatINR(margin)} />
       <Sep />
       <Stat
-        label="Open P/L"
+        label="Free"
+        value={formatINR(free)}
+        valueClass={free < 0 ? "text-red-500" : undefined}
+      />
+      <Sep />
+      <Stat
+        label="P/L"
         value={`${openUnrl >= 0 ? "+" : ""}${formatINR(openUnrl)}`}
         valueClass={pnlColor(openUnrl)}
       />

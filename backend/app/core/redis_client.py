@@ -100,7 +100,24 @@ async def cache_delete_pattern(pattern: str) -> int:
 
 # ── Pub/Sub (used by ws_manager.pubsub for cross-instance fanout) ─────
 async def publish(channel: str, payload: Any) -> int:
-    return int(await get_redis().publish(channel, json.dumps(payload, default=str)))
+    """Pub/sub publish. Swallows `Too many connections` (transient pool
+    exhaustion under a tick burst) by logging once at WARNING and
+    returning 0 — the next tick's publish goes through and the missed
+    one is harmless because pub/sub is fire-and-forget. Without this
+    catch, the market_tick_loop wrapper logs the full traceback at
+    ERROR for every dropped tick and the journalctl noise drowns out
+    real failures. Genuine connection errors (Redis down, bad creds)
+    re-raise so the caller can surface them."""
+    try:
+        return int(
+            await get_redis().publish(channel, json.dumps(payload, default=str))
+        )
+    except redis_asyncio.ConnectionError as e:
+        msg = str(e).lower()
+        if "too many connections" in msg:
+            logger.warning("redis_publish_pool_exhausted channel=%s", channel)
+            return 0
+        raise
 
 
 def pubsub() -> redis_asyncio.client.PubSub:

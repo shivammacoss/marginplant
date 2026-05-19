@@ -189,6 +189,8 @@ export const TradingAPI = {
     unwrap<any[]>(api.get("/admin/orders/quotes", { params: { tokens: tokens.join(",") } })),
   squareoff: (id: string) => unwrap<any>(api.post(`/admin/positions/${id}/squareoff`)),
   deletePosition: (id: string) => unwrap<any>(api.delete(`/admin/positions/${id}`)),
+  positionNetting: (id: string) =>
+    unwrap<any>(api.get(`/admin/positions/${id}/netting`)),
   pnlSummary: (params?: { user_id?: string }) =>
     unwrap<any>(api.get("/admin/positions/pnl-summary", { params })),
   emergencySquareoffAll: () => unwrap<any>(api.post("/admin/positions/emergency-squareoff")),

@@ -199,6 +199,18 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     asyncio.create_task(_zerodha_boot())
 
+    # Zerodha WS self-heal loop — periodically reconnects the ticker if
+    # it falls into ERROR state (typical after the daily 08:00 IST token
+    # rotation, after a process restart while Kite still holds the
+    # previous slot, or on transient network blips). Runs forever; the
+    # check is dirt-cheap when WS is healthy (just a status read).
+    from app.services.zerodha_service import zerodha as _zerodha_heal
+
+    zerodha_heal_task: _asyncio.Task = _asyncio.create_task(
+        _zerodha_heal.ws_self_heal_loop(interval_sec=30.0)
+    )
+    setattr(app, "_zerodha_self_heal_task", zerodha_heal_task)
+
     logger.info(
         "app_started",
         extra={

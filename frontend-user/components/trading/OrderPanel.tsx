@@ -513,9 +513,15 @@ export function OrderPanel({ instrument, ltp, bid, ask, fxRate }: Props) {
     // server decide (safer than blocking a valid trade behind a stale
     // cache).
     if (walletSummary) {
-      const avail = Number(walletSummary.available_balance ?? 0);
+      // Dabba / CFD pre-flight: deployable money is `free` (= equity −
+      // margin), not just available cash. A wallet with float losses
+      // already has those losses subtracted from `free`, so the check
+      // matches the server's enforcement post-PnL.
+      const free = Number(
+        walletSummary.free ?? walletSummary.available_balance ?? 0,
+      );
       const credit = Number(walletSummary.credit_limit ?? 0);
-      const total = avail + credit;
+      const total = free + credit;
       if (intradayMargin > 0 && total < intradayMargin) {
         toast.error(
           `Insufficient balance — need ${formatINR(intradayMargin)}, have ${formatINR(total)}`,
