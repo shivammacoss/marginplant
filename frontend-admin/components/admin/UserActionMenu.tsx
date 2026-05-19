@@ -6,6 +6,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   Activity,
+  ArrowRightLeft,
   Ban,
   CheckCircle2,
   CreditCard,
@@ -21,6 +22,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { UsersAPI } from "@/lib/api";
+import { TransferUserDialog } from "@/components/admin/TransferUserDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -57,6 +59,7 @@ export function UserActionMenu({ user, onChange }: Props) {
   const qc = useQueryClient();
   const [menuOpen, setMenuOpen] = useState(false);
   const [action, setAction] = useState<ActionKind>(null);
+  const [transferOpen, setTransferOpen] = useState(false);
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
@@ -297,6 +300,20 @@ export function UserActionMenu({ user, onChange }: Props) {
 
             <MenuSeparator />
 
+            {/* Transfer User — opens the role-aware destination picker.
+                Super-admin sees admins, admin sees their brokers, broker
+                sees their sub-brokers. All trade / wallet / position
+                history travels with the user automatically (scoped via
+                User.assigned_admin_id / broker_ancestry in
+                `core/dependencies.py:scoped_user_ids`). */}
+            <MenuButton
+              icon={<ArrowRightLeft className="size-4" />}
+              label="Transfer User"
+              onClick={() => pick(() => setTransferOpen(true))}
+            />
+
+            <MenuSeparator />
+
             <MenuButton
               icon={
                 user.status === "BLOCKED" ? (
@@ -481,6 +498,18 @@ export function UserActionMenu({ user, onChange }: Props) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Transfer flow lives in its own component — picks the right
+          backend endpoint based on caller role and invalidates the
+          relevant React-Query keys after success. */}
+      <TransferUserDialog
+        user={user}
+        open={transferOpen}
+        onClose={() => setTransferOpen(false)}
+        onChange={() => {
+          refresh();
+        }}
+      />
     </>
   );
 }
