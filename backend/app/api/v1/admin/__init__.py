@@ -14,6 +14,7 @@ from app.api.v1.admin import (
     management,
     netting,
     payin_out,
+    pnl_sharing,
     reports,
     risk,
     settings,
@@ -40,3 +41,4 @@ router.include_router(infoway.router)
 router.include_router(kyc.router)
 router.include_router(management.router)
 router.include_router(brokers.router)
+router.include_router(pnl_sharing.router)
