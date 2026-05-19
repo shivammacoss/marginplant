@@ -157,6 +157,29 @@ export const PnlSharingAPI = {
       api.get(`/admin/pnl-sharing/reports/${agreementId}`, { params })
     ),
 
+  downloadReport: async (
+    agreementId: string,
+    params: {
+      period: SettlementCadence;
+      from: string;
+      to: string;
+      format: "pdf" | "excel";
+    },
+  ) => {
+    const resp = await api.get(
+      `/admin/pnl-sharing/reports/${agreementId}/download`,
+      { params, responseType: "blob" },
+    );
+    const blob = resp.data as Blob;
+    // Try to read filename from Content-Disposition header
+    const cd: string = (resp.headers["content-disposition"] as string) || "";
+    const match = cd.match(/filename="([^"]+)"/);
+    const filename =
+      (match && match[1]) ||
+      `pnl_sharing_report.${params.format === "pdf" ? "pdf" : "xlsx"}`;
+    return { blob, filename };
+  },
+
   // Broker self
   getMyAgreement: () =>
     unwrap<AgreementDTO>(api.get("/admin/pnl-sharing/me/agreement")),

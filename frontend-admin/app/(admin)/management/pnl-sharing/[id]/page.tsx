@@ -18,6 +18,17 @@ import { SettlementHistoryTable } from "@/components/pnl-sharing/SettlementHisto
 import { Button } from "@/components/ui/button";
 import { PnlSharingAPI, type SettlementCadence } from "@/lib/api/pnl-sharing";
 
+function triggerDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 function periodBounds(cadence: SettlementCadence): { from: string; to: string } {
   const now = new Date();
   if (cadence === "DAILY") {
@@ -167,7 +178,35 @@ export default function PnlSharingDetailPage() {
       </div>
 
       {currentRow && (
-        <SharingCard agreement={agreement} row={currentRow} showDownloads />
+        <SharingCard
+          agreement={agreement}
+          row={currentRow}
+          showDownloads
+          onDownloadPdf={async () => {
+            try {
+              const { blob, filename } = await PnlSharingAPI.downloadReport(
+                agreement.id,
+                { period: cadence, from, to, format: "pdf" },
+              );
+              triggerDownload(blob, filename);
+            } catch (e) {
+              const err = e as { message?: string };
+              toast.error(err?.message ?? "PDF download failed");
+            }
+          }}
+          onDownloadExcel={async () => {
+            try {
+              const { blob, filename } = await PnlSharingAPI.downloadReport(
+                agreement.id,
+                { period: cadence, from, to, format: "excel" },
+              );
+              triggerDownload(blob, filename);
+            } catch (e) {
+              const err = e as { message?: string };
+              toast.error(err?.message ?? "Excel download failed");
+            }
+          }}
+        />
       )}
 
       <div>
