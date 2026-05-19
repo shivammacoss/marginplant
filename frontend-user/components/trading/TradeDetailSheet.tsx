@@ -41,6 +41,16 @@ interface Props {
   token: string | null;
   open: boolean;
   onClose: () => void;
+  /**
+   * Optional: when set + viewport is mobile, the in-sheet Option Chain
+   * picker calls `onSwap(newToken)` instead of navigating to /terminal.
+   * Parent updates its `token` state and this same sheet re-mounts with
+   * the picked strike — the user stays inside the bottom-sheet flow
+   * without ever bouncing to the chart route on a phone. Desktop keeps
+   * the /terminal navigation since the full chart is more useful with
+   * a wide viewport.
+   */
+  onSwap?: (token: string) => void;
 }
 
 /**
@@ -65,7 +75,7 @@ export function TradeDetailSheet(props: Props) {
   return <TradeDetailSheetInner {...props} />;
 }
 
-function TradeDetailSheetInner({ token, open, onClose }: Props) {
+function TradeDetailSheetInner({ token, open, onClose, onSwap }: Props) {
   const qc = useQueryClient();
 
   // ── Live data ─────────────────────────────────────────────────────
@@ -700,7 +710,7 @@ function TradeDetailSheetInner({ token, open, onClose }: Props) {
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="w-[calc(100%-1rem)] max-w-md gap-0 p-0">
+      <DialogContent className="flex max-h-[92vh] w-[calc(100%-1rem)] max-w-md flex-col gap-0 overflow-hidden p-0">
         <DialogTitle className="sr-only">
           Trade {instrument?.symbol ?? ""}
         </DialogTitle>
@@ -792,7 +802,10 @@ function TradeDetailSheetInner({ token, open, onClose }: Props) {
         </div>
 
         {/* ── Stats grid ──────────────────────────────────────────── */}
-        <div className="grid grid-cols-4 gap-2 px-4 pt-4 text-[11px]">
+        {/* LTP High / Low / Open / Last — hidden on mobile to keep
+            the bottom-sheet compact so BUY/SELL stays on screen
+            without scrolling. Desktop keeps the four-up summary. */}
+        <div className="hidden grid-cols-4 gap-2 px-4 pt-4 text-[11px] sm:grid">
           {/* Render an em-dash when the feed hasn't delivered an OHLC
               field yet (typical for fresh subscribes / off-hours), so
               the user doesn't see a confusing "0.0000" placeholder. */}
@@ -1102,6 +1115,17 @@ function TradeDetailSheetInner({ token, open, onClose }: Props) {
           initialUnderlying={instrument?.symbol ?? null}
           onPick={(tok) => {
             setOptionChainOpen(false);
+            // Mobile + parent gave us `onSwap` → just swap the active
+            // token, keep the bottom-sheet open at the new strike. No
+            // full-route navigation, no closing the sheet only to
+            // re-open it via the chart page (the user's pain point).
+            const isMobileUi =
+              typeof window !== "undefined" &&
+              window.matchMedia("(max-width: 767px)").matches;
+            if (isMobileUi && onSwap) {
+              onSwap(tok);
+              return;
+            }
             onClose();
             router.push(`/terminal?token=${encodeURIComponent(tok)}`);
           }}

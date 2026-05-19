@@ -216,11 +216,14 @@ export default function OptionChainPage() {
       </div>
 
       {/* Mobile trade sheet — opens when a strike or leg is tapped on
-          phones. Desktop still gets the /terminal navigation above. */}
+          phones. Desktop still gets the /terminal navigation above.
+          `onSwap` lets the in-sheet Option Chain picker swap strikes
+          without bouncing the user through /terminal. */}
       <TradeDetailSheet
         token={sheetToken}
         open={!!sheetToken}
         onClose={() => setSheetToken(null)}
+        onSwap={(tok) => setSheetToken(tok)}
       />
     </div>
   );

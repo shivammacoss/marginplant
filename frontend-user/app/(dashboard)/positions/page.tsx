@@ -7,6 +7,7 @@ import { LogOut, Pencil, X } from "lucide-react";
 import { OrderAPI, PositionAPI, WalletAPI } from "@/lib/api";
 import { useMarketStream } from "@/lib/useMarketStream";
 import { usePriceFlash } from "@/lib/usePriceFlash";
+import { isInstrumentMarketOpen } from "@/lib/marketHours";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -47,21 +48,56 @@ function fmtFeedPrice(
 
 /**
  * Extract a readable expiry chip from an NSE/MCX derivative symbol.
- * Handles the monthly pattern that all FUT / monthly options share:
- *   CRUDEOIL26JUNFUT → "26 JUN"
- *   SILVERM26JUNFUT  → "26 JUN"
- *   NIFTY26JUN23700PE → "26 JUN"
- * Returns null for spot stocks, indices, or weekly contracts whose
- * encoding is purely numeric (NIFTY2651923700PE = 19-May-26 weekly —
- * needs a separate parser that we can layer in later if the user asks).
+ * Handles both encoding styles NSE uses for FUT + options:
+ *
+ *  • Monthly (alphabetic month):   `CRUDEOIL26JUNFUT` / `NIFTY26JUN23700PE`
+ *                                  → "26 JUN"
+ *  • Weekly NIFTY/BANKNIFTY etc:   `NIFTY2651923800PE` (YY=26, M=5,
+ *                                  D=19, strike, side) → "19 MAY 26"
+ *  • Weekly Oct/Nov/Dec:           NSE encodes those single chars as
+ *                                  "O" / "N" / "D" in the month slot —
+ *                                  same parser handles that path.
+ *
+ * Returns null for spot stocks, indices, or anything that doesn't match
+ * the two encodings above.
  */
 function extractExpiryLabel(symbol: string | null | undefined): string | null {
   if (!symbol) return null;
-  const m = /(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)/i.exec(
-    symbol,
-  );
-  if (!m) return null;
-  return `${m[1]} ${m[2].toUpperCase()}`;
+  const sym = String(symbol).toUpperCase();
+  const MONTH_NAMES = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                       "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+
+  // Monthly pattern — `<UNDERLYING><YY><MMM>...`. The regex anchors on
+  // the YY+MMM tuple so it works for any underlying prefix and for both
+  // FUT (CRUDEOIL26JUNFUT) and option (NIFTY26JUN23700PE) suffixes.
+  const monthly =
+    /(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)/.exec(sym);
+  if (monthly) return `${monthly[1]} ${monthly[2]}`;
+
+  // Weekly numeric pattern — `<ALPHA><YY><M><DD>...<CE|PE>` where M is
+  // a single char: 1-9 for Jan-Sep, then O/N/D for Oct/Nov/Dec. So
+  // NIFTY2651923800PE = YY 26, M 5, DD 19, strike 23800, PE.
+  const weekly =
+    /^[A-Z]+(\d{2})([1-9OND])(\d{2})\d+(?:CE|PE)$/.exec(sym);
+  if (weekly) {
+    const yy = weekly[1];
+    const mChar = weekly[2];
+    const dd = weekly[3];
+    let monthIdx: number;
+    if (/^[1-9]$/.test(mChar)) {
+      monthIdx = parseInt(mChar, 10) - 1;       // "5" → May (index 4)
+    } else if (mChar === "O") {
+      monthIdx = 9;                              // Oct
+    } else if (mChar === "N") {
+      monthIdx = 10;                             // Nov
+    } else {
+      monthIdx = 11;                             // Dec
+    }
+    if (monthIdx < 0 || monthIdx > 11) return null;
+    return `${dd} ${MONTH_NAMES[monthIdx]} ${yy}`;
+  }
+
+  return null;
 }
 
 // Compact pill that translates Position.close_reason into a human label
@@ -231,6 +267,24 @@ export default function PositionsPage() {
    * fall back to plain ltp, identical to the old behaviour.
    */
   function liveLtpFor(row: any, side?: "BUY" | "SELL"): number {
+    // Market-closed gate — when the instrument's segment is past its
+    // close-of-day (NSE/BSE 15:30, MCX 23:30, indices session-bound),
+    // we IGNORE every live overlay and return the last stored
+    // `row.ltp`. The user reported "market band hai fir bhi PnL move
+    // kar raha" — root cause was Zerodha/Infoway replaying the final
+    // pre-close snapshot every few seconds, and our display picking up
+    // each replay as a "new" tick. Freezing at row.ltp matches the
+    // exchange's actual state: no transactions are happening, the
+    // price MUST not drift on screen.
+    //
+    // Crypto / forex / spot commodity segments are 24×5 / 24×7 — for
+    // those isInstrumentMarketOpen returns true around the clock, so
+    // this gate is a no-op there.
+    const seg = row?.segment_type ?? row?.segment;
+    const exch = row?.exchange;
+    if (!isInstrumentMarketOpen(seg, exch)) {
+      return Number(row?.ltp ?? 0);
+    }
     const tok = String(row?.instrument_token ?? row?.token ?? "");
     if (tok) {
       const tick = liveQuotes.get(tok);

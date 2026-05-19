@@ -23,6 +23,10 @@ export default function MarketsPage() {
         token={tradeToken}
         open={!!tradeToken}
         onClose={() => setTradeToken(null)}
+        // In-sheet Option Chain picker on mobile swaps the displayed
+        // strike instead of full-route bouncing to /terminal — the
+        // user stays in the marketwatch → trade flow.
+        onSwap={(tok) => setTradeToken(tok)}
       />
     </div>
   );
