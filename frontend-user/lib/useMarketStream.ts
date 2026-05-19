@@ -41,22 +41,56 @@ export function useMarketStream(tokens: string[]): Map<string, MarketQuote> {
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
 
-    // Per-token buffer of the latest tick. Every WS message overwrites the
-    // entry for that token; a single timer flushes the buffer into React
-    // state at most every DISPLAY_THROTTLE_MS. Net effect: smooth,
-    // readable PnL updates at ~2 fps instead of 4-10 fps, without dropping
-    // any data — the LAST tick for each token always wins.
-    const pending = new Map<string, MarketQuote>();
+    // Per-token sticky cache. Every incoming tick is merged INTO the
+    // previous cached entry instead of replacing it wholesale, with one
+    // crucial rule: if a numeric quote field (bid / ask / ltp) arrives
+    // as 0 / null / undefined / NaN, KEEP the previous non-zero value
+    // for that field. Upstream Zerodha / Infoway ticks legitimately
+    // skip bid or ask on illiquid options + the millisecond between a
+    // depth refresh and a trade — without the sticky merge, the
+    // position page's `(isLong ? bid : ask) || liveLtp` chain falls
+    // through to LTP for that single tick, and on a wide-spread
+    // instrument the PnL jumps several hundred / thousand rupees only
+    // to snap back on the next tick. User-reported symptom: "bid/ask
+    // ek millisecond ke liye band hoti hai, position LTP par shift ho
+    // jata hai, PnL 2000 se 5000 ho jata hai". Sticky preservation
+    // makes the display continuous — the LAST KNOWN good bid/ask
+    // stays until a new non-zero value arrives.
+    const sticky = new Map<string, MarketQuote>();
+    const dirty = new Set<string>();
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function isPositive(x: any): boolean {
+      const n = Number(x);
+      return Number.isFinite(n) && n > 0;
+    }
+
+    function mergeSticky(prev: MarketQuote | undefined, next: MarketQuote): MarketQuote {
+      // Start from the previous quote so unrelated fields (volume, OHLC,
+      // change_pct, etc.) are preserved when the new tick only carries
+      // a subset of fields.
+      const merged: MarketQuote = { ...(prev ?? {}), ...next };
+      // Sticky overrides — keep prior value when the incoming field is
+      // missing or non-positive. Zero is treated as "no data" for
+      // bid / ask / ltp because exchanges never quote them as 0 for a
+      // live tradable instrument.
+      if (!isPositive(next.bid) && isPositive(prev?.bid)) merged.bid = prev!.bid;
+      if (!isPositive(next.ask) && isPositive(prev?.ask)) merged.ask = prev!.ask;
+      if (!isPositive(next.ltp) && isPositive(prev?.ltp)) merged.ltp = prev!.ltp;
+      return merged;
+    }
 
     function flushPending() {
       flushTimer = null;
-      if (pending.size === 0) return;
-      const drained = new Map(pending);
-      pending.clear();
-      setQuotes((prev) => {
-        const next = new Map(prev);
-        for (const [tok, q] of drained) next.set(tok, q);
+      if (dirty.size === 0) return;
+      const drainedTokens = [...dirty];
+      dirty.clear();
+      setQuotes((prevState) => {
+        const next = new Map(prevState);
+        for (const tok of drainedTokens) {
+          const q = sticky.get(tok);
+          if (q) next.set(tok, q);
+        }
         return next;
       });
     }
@@ -65,7 +99,9 @@ export function useMarketStream(tokens: string[]): Map<string, MarketQuote> {
       for (const q of snaps) {
         const tok = String(q?.token ?? "");
         if (!tok) continue;
-        pending.set(tok, q as MarketQuote);
+        const prev = sticky.get(tok);
+        sticky.set(tok, mergeSticky(prev, q as MarketQuote));
+        dirty.add(tok);
       }
       if (flushTimer === null) {
         flushTimer = setTimeout(flushPending, DISPLAY_THROTTLE_MS);
@@ -131,7 +167,8 @@ export function useMarketStream(tokens: string[]): Map<string, MarketQuote> {
       stopped = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (flushTimer) clearTimeout(flushTimer);
-      pending.clear();
+      sticky.clear();
+      dirty.clear();
       wsRef.current?.close();
     };
     // intentionally empty deps — the WS stays open for the lifetime of the
