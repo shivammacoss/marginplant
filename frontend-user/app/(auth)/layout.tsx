@@ -62,12 +62,19 @@ function AuthLayoutInner({ children }: { children: React.ReactNode }) {
               start cold with no logo or welcome text. User asked:
               "login page mobile view me logo and branding kar do".
               Compact (~120 px), centred, gradient backdrop tile around
-              the icon so the brand mark reads even on a light theme. */}
+              the icon so the brand mark reads even on a light theme.
+              The smaller duplicate-icon row (BrandLogo size="md") was
+              removed per follow-up ask: "es chhota vala logo remove
+              kar do" — we now show the tile icon + a plain text
+              wordmark, not two stacked sprout icons. */}
           <div className="mb-6 flex w-full flex-col items-center gap-2 text-center lg:hidden">
             <div className="rounded-2xl bg-gradient-to-br from-primary/20 via-primary/10 to-transparent p-3">
               <BrandLogo href={null} size="lg" iconOnly />
             </div>
-            <BrandLogo href={null} size="md" />
+            <span className="text-lg font-semibold tracking-tight">
+              <span className="text-primary">MarginPlant</span>
+              <span className="text-foreground"> Broker</span>
+            </span>
             <p className="max-w-xs text-xs text-muted-foreground">
               Trade Indian markets — fast, fair, focused.
             </p>

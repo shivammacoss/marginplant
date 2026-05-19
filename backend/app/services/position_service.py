@@ -519,9 +519,21 @@ async def _apply_holding(
 
 
 async def list_open(user_id: str | PydanticObjectId) -> list[Position]:
-    return await Position.find(
-        Position.user_id == PydanticObjectId(user_id), Position.status == PositionStatus.OPEN
-    ).to_list()
+    # Newest-opened position FIRST so the just-entered trade lands at
+    # the top of the user's Positions tab instead of the bottom.
+    # User-flagged: "abhi latest position last me ja raha hai, turat
+    # vale ko sabse upar rakho aur jo sabse pehle liya hoga ve last
+    # me jaye". Sorting on the server (rather than re-sorting in the
+    # frontend on every render) also keeps the active-trades drilldown
+    # consistent with the row order shown above it.
+    return await (
+        Position.find(
+            Position.user_id == PydanticObjectId(user_id),
+            Position.status == PositionStatus.OPEN,
+        )
+        .sort("-opened_at")
+        .to_list()
+    )
 
 
 async def list_closed_today(user_id: str | PydanticObjectId) -> list[Position]:
