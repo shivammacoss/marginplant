@@ -327,7 +327,24 @@ export function MobileInstrumentsBar({ activeToken, onSelect }: Props) {
       };
     };
     if (debouncedSearch.trim().length > 0) return (searchHits ?? []).map(enrich);
-    if (bucket?.mode === "watchlist") return wlQuotes ?? [];
+    if (bucket?.mode === "watchlist") {
+      // Watchlist rows used to be returned raw, which meant the Favorites
+      // tab never received WS overlay updates — only the REST snapshot
+      // from /marketwatch/quotes refreshed prices. Result: prices in
+      // Favorites felt frozen + flickered on each refetch.
+      // Now we also enrich watchlist rows so live ticks overlay onto
+      // the snapshot, matching every other bucket.
+      return (wlQuotes ?? []).map((q: any) => {
+        const tok = String(q.instrument_token ?? q.token ?? "");
+        const live = quoteByToken.get(tok);
+        return {
+          ...q,
+          bid: live?.bid ?? q.bid ?? null,
+          ask: live?.ask ?? q.ask ?? null,
+          change_pct: live?.change_pct ?? q.change_pct ?? null,
+        };
+      });
+    }
     if (managedSegmentName) {
       return (segmentItems ?? []).map((it: any) =>
         enrich({
@@ -560,79 +577,19 @@ export function MobileInstrumentsBar({ activeToken, onSelect }: Props) {
                 );
               }
               return (
-                <div
+                <InstrumentRow
                   key={token}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => onSelect(token)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      onSelect(token);
-                    }
-                  }}
-                  className={cn(
-                    // Right column `auto` so Indian-segment rows fit both
-                    // star + X without clipping; single-button rows still
-                    // sit flush on the right edge.
-                    "grid w-full cursor-pointer grid-cols-[1fr_auto_auto] items-center gap-3 border-b border-border/40 px-3 py-2.5 text-xs transition-colors",
-                    isActive ? "bg-primary/10" : "hover:bg-muted/30",
-                  )}
-                >
-                  {/* Symbol + change% + exchange (left, stacked) */}
-                  <div className="flex min-w-0 flex-col items-start leading-tight">
-                    <span
-                      className={cn(
-                        "truncate font-semibold text-sm",
-                        isActive && "text-primary",
-                      )}
-                    >
-                      {q.symbol}
-                    </span>
-                    <div className="mt-0.5 flex items-baseline gap-1.5 text-[10px]">
-                      {changePct != null ? (
-                        <span
-                          className={cn(
-                            "font-medium tabular-nums",
-                            Number(changePct) > 0
-                              ? "text-emerald-500"
-                              : Number(changePct) < 0
-                                ? "text-red-500"
-                                : "text-muted-foreground",
-                          )}
-                        >
-                          {Number(changePct) >= 0 ? "+" : ""}
-                          {Number(changePct).toFixed(2)}%
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )}
-                      {q.exchange && (
-                        <span className="truncate uppercase tracking-wider text-muted-foreground">
-                          {q.exchange}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Bid (red) over Ask (green) — stacked vertically */}
-                  <div className="flex flex-col items-end gap-0.5 leading-tight">
-                    <FlashCell
-                      value={bid}
-                      segment={q.segment}
-                      exchange={q.exchange}
-                      side="bid"
-                    />
-                    <FlashCell
-                      value={ask}
-                      segment={q.segment}
-                      exchange={q.exchange}
-                      side="ask"
-                    />
-                  </div>
-
-                  {rightAction}
-                </div>
+                  token={token}
+                  symbol={q.symbol}
+                  exchange={q.exchange}
+                  segment={q.segment}
+                  bid={bid}
+                  ask={ask}
+                  changePct={changePct}
+                  isActive={isActive}
+                  onSelect={() => onSelect(token)}
+                  rightAction={rightAction}
+                />
               );
             })}
           </div>
@@ -642,10 +599,128 @@ export function MobileInstrumentsBar({ activeToken, onSelect }: Props) {
   );
 }
 
+/**
+ * Single row in the instruments list. Extracted as its own component so the
+ * sticky-display hook for change% has a stable hook-call site — earlier
+ * inlining it inside the `list.map()` callback violated the rules-of-hooks.
+ * Receives every value pre-resolved by the parent so this stays a pure
+ * presentational node. Card-level memoisation is intentionally NOT added:
+ * each row depends on its own live ticks via the sticky hooks inside
+ * FlashCell + useStickyNumber, so we want the row to repaint on every
+ * change. Memoising on prop equality would defeat that.
+ */
+function InstrumentRow({
+  token,
+  symbol,
+  exchange,
+  segment,
+  bid,
+  ask,
+  changePct,
+  isActive,
+  onSelect,
+  rightAction,
+}: {
+  token: string;
+  symbol: string;
+  exchange?: string;
+  segment?: string;
+  bid: number | null;
+  ask: number | null;
+  changePct: number | null;
+  isActive: boolean;
+  onSelect: () => void;
+  rightAction: React.ReactNode;
+}) {
+  const stickyChange = useStickyNumber(changePct);
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
+      className={cn(
+        // Right column `auto` so Indian-segment rows fit both star + X
+        // without clipping; single-button rows still sit flush on the
+        // right edge.
+        "grid w-full cursor-pointer grid-cols-[1fr_auto_auto] items-center gap-3 border-b border-border/40 px-3 py-2.5 text-xs transition-colors",
+        isActive ? "bg-primary/10" : "hover:bg-muted/30",
+      )}
+    >
+      {/* Symbol + change% + exchange (left, stacked) */}
+      <div className="flex min-w-0 flex-col items-start leading-tight">
+        <span
+          className={cn(
+            "truncate font-semibold text-sm",
+            isActive && "text-primary",
+          )}
+        >
+          {symbol}
+        </span>
+        <div className="mt-0.5 flex items-baseline gap-1.5 text-[10px]">
+          {stickyChange != null ? (
+            <span
+              className={cn(
+                "font-medium tabular-nums",
+                stickyChange > 0
+                  ? "text-emerald-500"
+                  : stickyChange < 0
+                    ? "text-red-500"
+                    : "text-muted-foreground",
+              )}
+            >
+              {stickyChange >= 0 ? "+" : ""}
+              {stickyChange.toFixed(2)}%
+            </span>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+          {exchange && (
+            <span className="truncate uppercase tracking-wider text-muted-foreground">
+              {exchange}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Bid (red) over Ask (green) — stacked vertically */}
+      <div className="flex flex-col items-end gap-0.5 leading-tight">
+        <FlashCell
+          value={bid}
+          segment={segment}
+          exchange={exchange}
+          side="bid"
+        />
+        <FlashCell
+          value={ask}
+          segment={segment}
+          exchange={exchange}
+          side="ask"
+        />
+      </div>
+
+      {rightAction}
+    </div>
+  );
+}
 
 /** Tick-flash cell — bid red / ask green by default, flashes green/red
  *  on tick direction. Rendered inside a clickable row so this is a
- *  `<span>`, not a button. */
+ *  `<span>`, not a button.
+ *
+ *  Sticky display: when the incoming `value` momentarily goes null /
+ *  zero (REST refetch in-flight, WS unsubscribed during scroll, feed
+ *  blip), we keep showing the last non-zero number we ever saw for
+ *  this cell. That eliminates the "price gayab → wapas aa gaya"
+ *  flicker the user reported in mobile market view — once a row has
+ *  shown a price, the cell never falls back to "—" for the lifetime
+ *  of the React node. Flash detection still tracks the RAW value so
+ *  a zero-tick doesn't fake a flash. */
 function FlashCell({
   value,
   segment,
@@ -658,6 +733,13 @@ function FlashCell({
   side: "bid" | "ask";
 }) {
   const dir = usePriceFlash(value);
+  const lastGoodRef = useRef<number | null>(null);
+  if (value != null && Number.isFinite(value) && value !== 0) {
+    lastGoodRef.current = value;
+  }
+  const display = value != null && Number.isFinite(value) && value !== 0
+    ? value
+    : lastGoodRef.current;
   const baseColor = side === "bid" ? "text-red-500" : "text-emerald-500";
   const flashColor =
     dir === "up"
@@ -672,7 +754,19 @@ function FlashCell({
         flashColor,
       )}
     >
-      {value != null ? formatPrice(value, segment, exchange) : "—"}
+      {display != null ? formatPrice(display, segment, exchange) : "—"}
     </span>
   );
+}
+
+/** Returns the latest non-null/non-zero value the cell has ever held.
+ *  Use for the change% chip — same flicker reason as the price cells:
+ *  during REST/WS hand-off it briefly becomes null and the percentage
+ *  pill disappears. Sticky version keeps the last good % on screen. */
+function useStickyNumber(value: number | null | undefined): number | null {
+  const lastGoodRef = useRef<number | null>(null);
+  if (value != null && Number.isFinite(value)) {
+    lastGoodRef.current = value as number;
+  }
+  return lastGoodRef.current;
 }

@@ -228,7 +228,14 @@ export function PositionsTabs({ positions, pendingOrders, history, cancelled, to
       });
       return;
     }
-    if (!oneClick && !confirm(`Close this ${symbol} trade at market?`)) return;
+    // Mobile UX — skip the native confirm() on phones (user spec:
+    // "close karne par pop mat aaye, direct close ho jaye"); desktop
+    // still gets the confirm step. one-click trade mode already
+    // bypasses the confirm regardless of viewport.
+    const isMobileUi =
+      typeof window !== "undefined" &&
+      window.matchMedia("(max-width: 767px)").matches;
+    if (!oneClick && !isMobileUi && !confirm(`Close this ${symbol} trade at market?`)) return;
     playClosedTone();
 
     qc.cancelQueries({ queryKey: ["active-trades"] });

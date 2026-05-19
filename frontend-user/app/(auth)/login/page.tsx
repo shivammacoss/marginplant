@@ -13,6 +13,7 @@ import { ApiError, ProfileAPI, setTokens } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { InstallPwaButton } from "@/components/common/InstallPwaButton";
 
 const schema = z.object({
   identifier: z.string().min(3, "Enter your email or mobile"),
@@ -198,6 +199,15 @@ function LoginPageInner() {
           Create one
         </Link>
       </p>
+
+      {/* PWA "Install app" affordance — only shows on browsers that
+          support installation AND when the user hasn't already
+          installed. On iOS Safari (no beforeinstallprompt) it renders
+          a hint with the manual Share → Add to Home Screen path
+          instead. Invisible inside the installed standalone shell. */}
+      <div className="flex justify-center">
+        <InstallPwaButton variant="compact" />
+      </div>
     </div>
   );
 }

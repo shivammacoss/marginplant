@@ -17,6 +17,7 @@ import {
   Zap,
 } from "lucide-react";
 import { HeroAnimation } from "@/components/marketing/HeroAnimation";
+import { InstallPwaButton } from "@/components/common/InstallPwaButton";
 
 export const metadata: Metadata = {
   title: "MarginPlant Broker — India's Modern Multi-Segment Trading Platform",
@@ -180,6 +181,12 @@ export default function HomePage() {
               >
                 Explore the platform
               </Link>
+              {/* PWA install affordance — Chrome/Edge/Samsung Internet
+                  render a real button once the manifest + service worker
+                  are picked up. Falls back to a Safari iOS hint on
+                  iPhones. Hidden when the user is already inside the
+                  installed standalone shell. */}
+              <InstallPwaButton className="h-12" />
             </div>
 
             <div className="mp-fade-up mp-fade-up-d4 mt-5 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-xs text-muted-foreground lg:justify-start">

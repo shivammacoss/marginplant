@@ -1,21 +1,44 @@
 "use client";
 
-import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, Search, TrendingDown, TrendingUp } from "lucide-react";
 import { OptionChainAPI } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/common/PageHeader";
+import { TradeDetailSheet } from "@/components/trading/TradeDetailSheet";
 import { cn, formatNumber, pnlColor } from "@/lib/utils";
 
 const UNDERLYINGS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"] as const;
 
 export default function OptionChainPage() {
+  const router = useRouter();
   const [underlying, setUnderlying] = useState<string>("NIFTY");
   const [expiry, setExpiry] = useState<string | undefined>(undefined);
   const [strikeFilter, setStrikeFilter] = useState("");
+  // Mobile-only: tapped strike/leg opens the compact TradeDetailSheet
+  // instead of full-route navigating to /terminal — user spec:
+  // "stcick price click pe card open ho, bina chart me gaye buy/sell".
+  // Desktop keeps the old behaviour (Link → terminal) because the wider
+  // viewport actually benefits from the full chart + order panel.
+  const [sheetToken, setSheetToken] = useState<string | null>(null);
+
+  const openTrade = useCallback(
+    (token: string) => {
+      if (!token) return;
+      const isMobileUi =
+        typeof window !== "undefined" &&
+        window.matchMedia("(max-width: 767px)").matches;
+      if (isMobileUi) {
+        setSheetToken(token);
+      } else {
+        router.push(`/terminal?token=${encodeURIComponent(token)}`);
+      }
+    },
+    [router],
+  );
 
   const { data, isFetching } = useQuery({
     queryKey: ["option-chain", underlying, expiry],
@@ -45,10 +68,16 @@ export default function OptionChainPage() {
 
   return (
     <div className="space-y-4">
-      <PageHeader
-        title="Option chain"
-        description="Live CE | STRIKE | PE grid. Click any leg to open the trading terminal."
-      />
+      {/* Title only on desktop — mobile screens are short, the page
+          header was eating ~88 px of vertical room before the user
+          could even see the chain. User asked to drop it from the
+          mobile view ("option chain hata dena upar se"). */}
+      <div className="hidden md:block">
+        <PageHeader
+          title="Option chain"
+          description="Live CE | STRIKE | PE grid. Click any leg to open the trading terminal."
+        />
+      </div>
 
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex gap-1 rounded-md bg-muted/40 p-1">
@@ -168,22 +197,46 @@ export default function OptionChainPage() {
                     !isATM && (isITMCall || isITMPut) && "bg-muted/10"
                   )}
                 >
-                  <ChainCell leg={r.ce} side="ce" align="right" />
-                  <td className={cn("px-2 py-1 text-center font-tabular", isATM && "font-semibold text-primary")}>
+                  <ChainCell leg={r.ce} side="ce" align="right" onOpenTrade={openTrade} />
+                  <td
+                    className={cn(
+                      "cursor-pointer px-2 py-1 text-center font-tabular hover:bg-primary/10",
+                      isATM && "font-semibold text-primary",
+                    )}
+                    onClick={() => openTrade(r.ce?.token || r.pe?.token || "")}
+                  >
                     {r.strike.toLocaleString("en-IN")}
                   </td>
-                  <ChainCell leg={r.pe} side="pe" align="left" />
+                  <ChainCell leg={r.pe} side="pe" align="left" onOpenTrade={openTrade} />
                 </tr>
               );
             })}
           </tbody>
         </table>
       </div>
+
+      {/* Mobile trade sheet — opens when a strike or leg is tapped on
+          phones. Desktop still gets the /terminal navigation above. */}
+      <TradeDetailSheet
+        token={sheetToken}
+        open={!!sheetToken}
+        onClose={() => setSheetToken(null)}
+      />
     </div>
   );
 }
 
-function ChainCell({ leg, side, align }: { leg: any; side: "ce" | "pe"; align: "left" | "right" }) {
+function ChainCell({
+  leg,
+  side,
+  align,
+  onOpenTrade,
+}: {
+  leg: any;
+  side: "ce" | "pe";
+  align: "left" | "right";
+  onOpenTrade: (token: string) => void;
+}) {
   if (!leg) {
     return (
       <>
@@ -196,25 +249,48 @@ function ChainCell({ leg, side, align }: { leg: any; side: "ce" | "pe"; align: "
     );
   }
   const Trend = (leg.change_pct ?? 0) >= 0 ? TrendingUp : TrendingDown;
-  const link = `/terminal?token=${encodeURIComponent(leg.token)}`;
+  // Replace the previous next/link Link with a plain <button> + onClick
+  // so the OPENTRADE branch can dispatch differently per viewport
+  // (mobile → bottom sheet, desktop → /terminal navigate). Keeping the
+  // visual treatment identical to the old Link so the chain looks the
+  // same in both modes.
+  const onClick = () => onOpenTrade(leg.token);
   const cells = [
     <td key="vol" className="px-2 py-1 text-right text-muted-foreground">
       {leg.volume?.toLocaleString("en-IN") || "—"}
     </td>,
     <td key="bid" className="px-2 py-1 text-right">
-      <Link href={link} className={side === "ce" ? "text-buy hover:underline" : "text-sell hover:underline"}>
+      <button
+        type="button"
+        onClick={onClick}
+        className={cn(
+          "rounded hover:underline",
+          side === "ce" ? "text-buy" : "text-sell",
+        )}
+      >
         {formatNumber(leg.bid)}
-      </Link>
+      </button>
     </td>,
     <td key="ltp" className="px-2 py-1 text-right">
-      <Link href={link} className="font-medium hover:underline">
+      <button
+        type="button"
+        onClick={onClick}
+        className="rounded font-medium hover:underline"
+      >
         {formatNumber(leg.ltp)}
-      </Link>
+      </button>
     </td>,
     <td key="ask" className="px-2 py-1 text-right">
-      <Link href={link} className={side === "ce" ? "text-buy hover:underline" : "text-sell hover:underline"}>
+      <button
+        type="button"
+        onClick={onClick}
+        className={cn(
+          "rounded hover:underline",
+          side === "ce" ? "text-buy" : "text-sell",
+        )}
+      >
         {formatNumber(leg.ask)}
-      </Link>
+      </button>
     </td>,
     <td key="chg" className={cn("px-2 py-1 text-right", pnlColor(leg.change_pct))}>
       <span className="inline-flex items-center gap-1">

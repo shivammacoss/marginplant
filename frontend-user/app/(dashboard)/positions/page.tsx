@@ -45,6 +45,25 @@ function fmtFeedPrice(
   return formatPrice(value, segment, exchange);
 }
 
+/**
+ * Extract a readable expiry chip from an NSE/MCX derivative symbol.
+ * Handles the monthly pattern that all FUT / monthly options share:
+ *   CRUDEOIL26JUNFUT → "26 JUN"
+ *   SILVERM26JUNFUT  → "26 JUN"
+ *   NIFTY26JUN23700PE → "26 JUN"
+ * Returns null for spot stocks, indices, or weekly contracts whose
+ * encoding is purely numeric (NIFTY2651923700PE = 19-May-26 weekly —
+ * needs a separate parser that we can layer in later if the user asks).
+ */
+function extractExpiryLabel(symbol: string | null | undefined): string | null {
+  if (!symbol) return null;
+  const m = /(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)/i.exec(
+    symbol,
+  );
+  if (!m) return null;
+  return `${m[1]} ${m[2].toUpperCase()}`;
+}
+
 // Compact pill that translates Position.close_reason into a human label
 // with a tone-matching color. Same legal set as
 // marginplant_ind/backend/app/models/position.py:close_reason.
@@ -197,16 +216,48 @@ export default function PositionsPage() {
   }, [open, activeTrades]);
   const liveQuotes = useMarketStream(streamTokens);
 
-  /** For a given position row, return the live LTP using the WS stream
-   *  if available, else the REST snapshot's stored ltp. */
-  function liveLtpFor(row: any): number {
+  /** Side-aware close-side price for a position row.
+   *
+   * User reported the position card's CURRENT column was labelled "BID"
+   * but the value matched the underlying's LTP, not the actual bid
+   * shown on a real broker terminal. That mislabel cascaded into P&L
+   * too — we computed (ltp - avg) but the realised price on exit is
+   * the close-side of the book (bid for BUY, ask for SELL). Same
+   * bug the APK had, fixed there in c11d619; this is the web mirror.
+   *
+   * Priority: live bid/ask (side-aware) → live ltp → stored row.ltp.
+   * `side` ("BUY"/"SELL") drives whether we ask for bid or ask. When
+   * called without a side (legacy callers / aggregate previews) we
+   * fall back to plain ltp, identical to the old behaviour.
+   */
+  function liveLtpFor(row: any, side?: "BUY" | "SELL"): number {
     const tok = String(row?.instrument_token ?? row?.token ?? "");
     if (tok) {
       const tick = liveQuotes.get(tok);
+      if (side === "BUY") {
+        const liveBid = Number(tick?.bid ?? 0);
+        if (liveBid > 0) return liveBid;
+      } else if (side === "SELL") {
+        const liveAsk = Number(tick?.ask ?? 0);
+        if (liveAsk > 0) return liveAsk;
+      }
       const liveLtp = Number(tick?.ltp ?? 0);
       if (liveLtp > 0) return liveLtp;
     }
     return Number(row?.ltp ?? 0);
+  }
+
+  /** Resolve the side ("BUY"/"SELL") of a position row. Looks at the
+   * explicit `opened_side` first (survives close), then `action` (active
+   * trades), then the signed quantity (legacy positions without
+   * opened_side). Centralises the "which side is this row?" decision so
+   * every close-price lookup uses the same answer. */
+  function resolveSide(row: any): "BUY" | "SELL" {
+    const raw = String(row?.opened_side ?? row?.action ?? row?.side ?? "")
+      .toUpperCase();
+    if (raw === "BUY" || raw === "SELL") return raw as "BUY" | "SELL";
+    const q = Number(row?.quantity ?? 0);
+    return q < 0 ? "SELL" : "BUY";
   }
 
   // ── Header description: M2M snapshot ────────────────────────────────
@@ -214,16 +265,18 @@ export default function PositionsPage() {
   // unrealized_pnl is 3-s stale; using live ticks here keeps the header
   // tracker in lockstep with the table rows below.
   const totalMtm = (open ?? []).reduce((s: number, p: any) => {
-    // Always compute on the frontend from the raw price diff. We never
-    // fall back to backend's `unrealized_pnl` because legacy/stale
-    // backend builds may still apply the (now-disabled) USD→INR ×83
-    // conversion to it. Frontend math = (ltp − avg) × qty in INR,
-    // matching the Active Trades P&L column on the same row.
-    const ltp = liveLtpFor(p) || Number(p.ltp ?? 0);
+    // Realisable P&L if the user squared off every position right now:
+    // BUY rows close at the live BID, SELL rows at the live ASK. Falls
+    // back to LTP when bid/ask aren't on the tick yet. Matches the
+    // matching-engine fill behaviour (matching_engine.execute_market_order
+    // uses BID/ASK for execution), so M2M never overstates what the
+    // user would actually book.
+    const side = resolveSide(p);
+    const price = liveLtpFor(p, side) || Number(p.ltp ?? 0);
     const avg = Number(p.avg_price ?? 0);
     const qty = Number(p.quantity ?? 0);
-    if (!ltp || !avg || !qty) return s;
-    return s + (ltp - avg) * qty;
+    if (!price || !avg || !qty) return s;
+    return s + (price - avg) * qty;
   }, 0);
 
   // CF Required (carry-forward margin) — sums each non-Infoway position's
@@ -267,12 +320,25 @@ export default function PositionsPage() {
       toast.error("Order still settling — try again in a second");
       return;
     }
-    if (!confirm("Square off this position at market?")) return;
-    // Sync toast: pops in the same frame as the confirm-OK click, not
-    // after the API round-trip. Dismissed on rejection.
-    const pendingToastId = toast.success("Submitted");
+    // Mobile UX — skip the native confirm() dialog and just fire. The
+    // user explicitly asked for "close karne par pop mat aaye" on
+    // phones; desktop still gets the confirm step to protect against
+    // accidental clicks on a wider hit-area. Bootstrap-md breakpoint
+    // (768px) matches the rest of the responsive layout here.
+    const isMobileUi =
+      typeof window !== "undefined" &&
+      window.matchMedia("(max-width: 767px)").matches;
+    if (!isMobileUi && !confirm("Square off this position at market?")) return;
+    // Sync toast: pops in the same frame as the click, not after the
+    // API round-trip. Dismissed on rejection so we don't leave a
+    // misleading "Submitted" up next to the error.
+    const pendingToastId = toast.success(
+      isMobileUi ? "Closing position…" : "Submitted",
+    );
     try {
       await PositionAPI.squareoff(id);
+      toast.dismiss(pendingToastId);
+      toast.success("Position closed");
       qc.invalidateQueries({ queryKey: ["positions"] });
     } catch (e: any) {
       toast.dismiss(pendingToastId);
@@ -281,9 +347,12 @@ export default function PositionsPage() {
   }
   async function squareoffAll() {
     if (!open?.length) return;
-    if (!confirm("Square off ALL open positions?")) return;
+    const isMobileUi =
+      typeof window !== "undefined" &&
+      window.matchMedia("(max-width: 767px)").matches;
+    if (!isMobileUi && !confirm("Square off ALL open positions?")) return;
     // Provisional toast — the final count comes from the server response,
-    // but the user sees an instant ack right after confirming.
+    // but the user sees an instant ack right after the tap.
     const pendingToastId = toast.success(`Squaring off ${open.length}…`);
     try {
       const r = await PositionAPI.squareoffAll();
@@ -333,7 +402,7 @@ export default function PositionsPage() {
       align: "right",
       render: (r) => (
         <CurrentPriceCell
-          value={liveLtpFor(r)}
+          value={liveLtpFor(r, resolveSide(r))}
           quote={r.currency_quote}
           segment={r.segment_type}
           exchange={r.exchange}
@@ -345,14 +414,17 @@ export default function PositionsPage() {
       header: "M2M",
       align: "right",
       render: (r) => {
-        // Always recompute on the frontend: WS-LTP first, then row's
-        // stored ltp, never trust backend's `unrealized_pnl` because
-        // legacy builds may still have applied the (now-disabled) FX
-        // ×83 conversion to it. Raw INR P&L only.
-        const ltp = liveLtpFor(r) || Number(r.ltp ?? 0);
+        // Always recompute on the frontend: live close-side price
+        // (BID for BUY, ASK for SELL) so the M2M matches the matching
+        // engine's actual fill behaviour. Falls back to row.ltp when
+        // bid/ask aren't on the tick yet. Never trust backend's
+        // `unrealized_pnl` because legacy builds may still have applied
+        // the (now-disabled) FX ×83 conversion to it.
+        const side = resolveSide(r);
+        const price = liveLtpFor(r, side) || Number(r.ltp ?? 0);
         const avg = Number(r.avg_price ?? 0);
         const qty = Number(r.quantity ?? 0);
-        const pnl = (ltp > 0 && avg > 0 && qty !== 0) ? (ltp - avg) * qty : 0;
+        const pnl = (price > 0 && avg > 0 && qty !== 0) ? (price - avg) * qty : 0;
         return (
           <span className={pnlColor(pnl)}>{formatINR(pnl)}</span>
         );
@@ -628,7 +700,7 @@ export default function PositionsPage() {
       align: "right",
       render: (r) => (
         <CurrentPriceCell
-          value={liveLtpFor(r)}
+          value={liveLtpFor(r, resolveSide(r))}
           quote={r.currency_quote}
           segment={r.segment}
           exchange={r.exchange}
@@ -657,17 +729,17 @@ export default function PositionsPage() {
       header: "P&L",
       align: "right",
       render: (r) => {
-        // Recompute per-fill from the live LTP × (ltp − entry) × qty,
-        // with the BUY/SELL direction sign. Matches the Positions
-        // M2M math so the two surfaces agree on the same row. Never
-        // trust backend's `pnl` since legacy builds may have FX-
-        // multiplied it.
-        const ltp = liveLtpFor(r) || Number(r.ltp ?? 0);
+        // Recompute per-fill at the live close-side (BID for BUY,
+        // ASK for SELL) × (price − entry) × qty, with BUY/SELL sign.
+        // Matches the matching engine's actual fill behaviour so the
+        // P&L equals what the user would book on exit, not the LTP-
+        // approximated number.
+        const side = resolveSide(r);
+        const price = liveLtpFor(r, side) || Number(r.ltp ?? 0);
         const entry = Number(r.price ?? 0);
         const qty = Number(r.quantity ?? 0);
-        const side = String(r.action ?? r.side ?? "").toUpperCase();
         const dir = side === "SELL" ? -1 : 1;
-        const pnl = (ltp > 0 && entry > 0 && qty !== 0) ? dir * (ltp - entry) * qty : 0;
+        const pnl = (price > 0 && entry > 0 && qty !== 0) ? dir * (price - entry) * qty : 0;
         return <span className={pnlColor(pnl)}>{formatINR(pnl)}</span>;
       },
     },
@@ -1175,7 +1247,7 @@ function ClosedMobileList({ rows, loading }: { rows: any[]; loading: boolean }) 
     );
   }
   return (
-    <ul className="divide-y divide-border rounded-md border border-border bg-card">
+    <ul className="space-y-3">
       {rows.map((r) => (
         <ClosedMobileCard key={r.id} row={r} />
       ))}
@@ -1208,6 +1280,7 @@ function ClosedMobileCard({ row: r }: { row: any }) {
     r.trading_symbol && r.trading_symbol !== r.symbol
       ? r.trading_symbol
       : r.exchange;
+  const expiry = extractExpiryLabel(r.symbol);
 
   function timeOnly(v: string | null | undefined): string {
     if (!v) return "—";
@@ -1219,7 +1292,7 @@ function ClosedMobileCard({ row: r }: { row: any }) {
   }
 
   return (
-    <li className="p-3">
+    <li className="rounded-xl border border-border bg-card p-3 shadow-sm">
       {/* Top row: BUY/SELL · qty · CLOSED · product */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
@@ -1253,8 +1326,13 @@ function ClosedMobileCard({ row: r }: { row: any }) {
           <div className="truncate text-base font-bold leading-tight">
             {r.symbol}
           </div>
-          <div className="mt-0.5 truncate text-[11px] uppercase tracking-wide text-muted-foreground">
-            {subLine}
+          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] uppercase tracking-wide text-muted-foreground">
+            <span className="truncate">{subLine}</span>
+            {expiry ? (
+              <span className="rounded bg-primary/10 px-1.5 py-0.5 font-semibold text-primary">
+                Exp {expiry}
+              </span>
+            ) : null}
           </div>
         </div>
         <div className="shrink-0 text-right">
@@ -1312,7 +1390,9 @@ function ActiveMobileList({
 }: {
   rows: any[];
   loading: boolean;
-  liveLtpFor: (row: any) => number;
+  // Now side-aware — pass "BUY"/"SELL" to get the real close-side
+  // price (BID for BUY, ASK for SELL) instead of plain LTP.
+  liveLtpFor: (row: any, side?: "BUY" | "SELL") => number;
   onEdit: (row: any, kind: "TP" | "SL") => void;
   onExit: (id: string) => void;
 }) {
@@ -1331,16 +1411,31 @@ function ActiveMobileList({
     );
   }
   return (
-    <ul className="divide-y divide-border rounded-md border border-border bg-card">
-      {rows.map((r) => (
-        <ActiveMobileCard
-          key={r.id}
-          row={r}
-          liveLtp={liveLtpFor(r)}
-          onEdit={onEdit}
-          onExit={onExit}
-        />
-      ))}
+    <ul className="space-y-3">
+      {rows.map((r) => {
+        // Pass side so the helper returns BID for BUY rows, ASK for
+        // SELL — the same close-side price the matching engine fills
+        // at. Without this the card was showing LTP under a "BID"
+        // label, which mismatched both the broker's quote and the
+        // P&L the user would actually realise on exit.
+        const sideRaw = String(r?.opened_side ?? r?.action ?? r?.side ?? "")
+          .toUpperCase();
+        const side: "BUY" | "SELL" =
+          sideRaw === "BUY" || sideRaw === "SELL"
+            ? (sideRaw as "BUY" | "SELL")
+            : Number(r?.quantity ?? 0) < 0
+              ? "SELL"
+              : "BUY";
+        return (
+          <ActiveMobileCard
+            key={r.id}
+            row={r}
+            liveLtp={liveLtpFor(r, side)}
+            onEdit={onEdit}
+            onExit={onExit}
+          />
+        );
+      })}
     </ul>
   );
 }
@@ -1401,9 +1496,15 @@ function ActiveMobileCard({
     r.trading_symbol && r.trading_symbol !== r.symbol
       ? r.trading_symbol
       : r.exchange;
+  // Expiry derived from the symbol's monthly token (CRUDEOIL26JUNFUT
+  // → "26 JUN"). Renders as a small chip next to the sub-line so the
+  // user can see at a glance how far out the contract is — was
+  // missing entirely on the mobile card before, the only way to tell
+  // was to mentally parse the symbol.
+  const expiry = extractExpiryLabel(r.symbol);
 
   return (
-    <li className="p-3">
+    <li className="rounded-xl border border-border bg-card p-3 shadow-sm">
       {/* Top row: BUY/SELL · qty · NRML/MIS · time */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
@@ -1437,8 +1538,13 @@ function ActiveMobileCard({
           <div className="truncate text-base font-bold leading-tight">
             {r.symbol}
           </div>
-          <div className="mt-0.5 truncate text-[11px] uppercase tracking-wide text-muted-foreground">
-            {subLine}
+          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] uppercase tracking-wide text-muted-foreground">
+            <span className="truncate">{subLine}</span>
+            {expiry ? (
+              <span className="rounded bg-primary/10 px-1.5 py-0.5 font-semibold text-primary">
+                Exp {expiry}
+              </span>
+            ) : null}
           </div>
         </div>
         <div className="shrink-0 text-right">
