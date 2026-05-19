@@ -7,6 +7,9 @@ import pytest
 import pytest_asyncio
 from bson import Decimal128
 
+from app.models._base import Exchange, ProductType
+from app.models.order import InstrumentRef
+from app.models.position import Position, PositionStatus
 from app.models.pnl_sharing import (
     AgreementStatus,
     PnlSharingAgreement,
@@ -175,3 +178,64 @@ async def test_find_due_yields_when_failed_row_exists(db, auto_monthly_agreement
 
     due = await svc.find_due_settlements(now=now)
     assert len(due) == 1
+
+
+@pytest.mark.asyncio
+async def test_scheduler_loop_fires_settle_for_due(
+    db, admin_user, broker_user, client_user, auto_daily_agreement, monkeypatch,
+):
+    """One iteration of the scheduler loop should call settle_period for each due item."""
+    # Set up a closed position for yesterday so there's data to settle.
+    # The DAILY agreement's previous period is "yesterday" from `now`.
+    now = datetime(2026, 5, 15, 10, 0, tzinfo=timezone.utc)
+    yesterday_close = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
+
+    instrument = InstrumentRef(
+        token="3045",
+        symbol="SBIN",
+        trading_symbol="SBIN-EQ",
+        exchange=Exchange.NSE,
+        segment="NSE_EQUITY",
+        lot_size=1,
+        tick_size=Decimal128("0.05"),
+    )
+
+    pos = Position(
+        user_id=client_user.id,
+        instrument=instrument,
+        segment_type="NSE_EQUITY",
+        product_type=ProductType.MIS,
+        quantity=0.0,
+        opening_quantity=1.0,
+        realized_pnl=Decimal128("-1000"),
+        status=PositionStatus.CLOSED,
+        opened_at=yesterday_close,
+        closed_at=yesterday_close,
+    )
+    await pos.insert()
+
+    # Capture settle_period calls
+    calls: list[dict] = []
+    original = svc.settle_period
+
+    async def fake_settle(**kwargs):
+        calls.append(kwargs)
+        return await original(**kwargs)
+
+    monkeypatch.setattr(svc, "settle_period", fake_settle)
+
+    # Drive one iteration manually (skip the sleep, so this test runs instantly)
+    due = await svc.find_due_settlements(now=now)
+    for agreement, period_start, period_end in due:
+        await svc.settle_period(
+            agreement_id=agreement.id,
+            period_start=period_start,
+            period_end=period_end,
+            cadence=agreement.settlement_cadence,
+            triggered_by="AUTO",
+            actor=None,
+        )
+
+    assert len(calls) == 1
+    assert calls[0]["triggered_by"] == "AUTO"
+    assert calls[0]["actor"] is None

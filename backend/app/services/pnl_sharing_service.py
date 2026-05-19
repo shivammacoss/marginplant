@@ -6,7 +6,9 @@ CRUD and settle helpers will be appended in later tasks.
 
 from __future__ import annotations
 
+import asyncio
 import calendar
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -743,3 +745,65 @@ async def find_due_settlements(
 
         due.append((agreement, period_start, period_end))
     return due
+
+
+# ── Scheduler loop ───────────────────────────────────────────────────
+logger = logging.getLogger(__name__)
+
+_pnl_sharing_scheduler_stop = False
+
+
+async def pnl_sharing_scheduler_loop(interval_sec: float = 300.0) -> None:
+    """Background scheduler — auto-settle AUTO-mode agreements at period close.
+
+    Polls every `interval_sec` seconds (default 5 min). Each tick:
+      1. Calls find_due_settlements() to identify (agreement, period) pairs
+         that should be settled.
+      2. For each, calls settle_period(triggered_by="AUTO"). Idempotency is
+         guaranteed by the unique (agreement_id, period_start) index.
+      3. FAILED rows are retried on each subsequent tick until SETTLED, or
+         until the agreement is PAUSED/ENDED.
+
+    Started in main.py lifespan; stopped via stop_pnl_sharing_scheduler().
+    """
+    global _pnl_sharing_scheduler_stop
+    _pnl_sharing_scheduler_stop = False
+    logger.info(
+        "pnl_sharing_scheduler_started",
+        extra={"interval_sec": interval_sec},
+    )
+    while not _pnl_sharing_scheduler_stop:
+        try:
+            due = await find_due_settlements()
+            for agreement, period_start, period_end in due:
+                try:
+                    await settle_period(
+                        agreement_id=agreement.id,
+                        period_start=period_start,
+                        period_end=period_end,
+                        cadence=agreement.settlement_cadence,
+                        triggered_by="AUTO",
+                        actor=None,
+                    )
+                except Exception:
+                    # Per-agreement failure shouldn't stop the loop.
+                    logger.exception(
+                        "pnl_sharing_auto_settle_failed",
+                        extra={"agreement_id": str(agreement.id)},
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("pnl_sharing_scheduler_tick_error")
+
+        try:
+            await asyncio.sleep(interval_sec)
+        except asyncio.CancelledError:
+            break
+    logger.info("pnl_sharing_scheduler_stopped")
+
+
+def stop_pnl_sharing_scheduler() -> None:
+    """Signal the scheduler loop to exit on its next tick. Called from main.py shutdown."""
+    global _pnl_sharing_scheduler_stop
+    _pnl_sharing_scheduler_stop = True
