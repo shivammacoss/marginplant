@@ -14,7 +14,6 @@ import { TradingViewChart } from "@/components/trading/TradingViewChart";
 import { ChartTabs, type ChartTab } from "@/components/trading/ChartTabs";
 import { TIMEFRAMES, type Timeframe } from "@/components/trading/ChartToolbar";
 import { MobileQuickTradeBar } from "@/components/trading/MobileQuickTradeBar";
-import { MobilePositionsDrawer } from "@/components/trading/MobilePositionsDrawer";
 import { WalletStrip } from "@/components/trading/WalletStrip";
 import { cn, formatPercent, pnlColor } from "@/lib/utils";
 
@@ -373,85 +372,14 @@ export default function TradingTerminalPage() {
             </button>
           )}
 
-          {/* Tabs — desktop only on mobile the user explicitly asked for a
-              minimal chart screen (APK parity), so the multi-tab strip
-              eats vertical room without earning its keep on a phone. */}
-          <div className="hidden lg:block">
-            <ChartTabs
-              tabs={tabsWithSelected}
-              active={selectedToken}
-              onSelect={setSelectedToken}
-              onClose={closeTab}
-              onAdded={(token) => setSelectedToken(token)}
-            />
-          </div>
-
-          {/* Mobile-only: APK-style quick trade strip ABOVE the chart with
-              the bid/ask price baked into each side button, plus a blue
-              ± lot stepper. Matches the reference screenshots — sell/buy
-              live at the top where the thumb already rests when the user
-              is reading the chart. Hidden on lg+ (OrderPanel takes over). */}
-          <MobileQuickTradeBar
-            instrument={instrument}
-            ltp={Number(quote?.ltp ?? 0)}
-            bid={bestBid}
-            ask={bestAsk}
+          {/* Tabs */}
+          <ChartTabs
+            tabs={tabsWithSelected}
+            active={selectedToken}
+            onSelect={setSelectedToken}
+            onClose={closeTab}
+            onAdded={(token) => setSelectedToken(token)}
           />
-
-          {/* Mobile-only symbol info strip — symbol · interval · exchange
-              on row 1, then a %change pill + volume + provider tag on
-              row 2. APK shows the same shape under the trade strip; this
-              replaces the duplicate desktop strip below (which stays
-              `hidden lg:flex`). */}
-          <div className="flex flex-col gap-1 border-b border-border px-3 py-1.5 text-[11px] lg:hidden">
-            <div className="flex items-baseline gap-2">
-              <span className="truncate text-sm font-semibold text-foreground">
-                {instrument?.symbol ?? "Select an instrument"}
-              </span>
-              <span className="text-muted-foreground">· {tf.label} ·</span>
-              <span className="text-muted-foreground">
-                {(instrument?.exchange ?? "MARKET").toUpperCase()}
-              </span>
-              <span className="ml-auto flex items-baseline gap-1 font-tabular text-muted-foreground">
-                <span>C</span>
-                <span className={cn(pnlColor(quote?.change_pct ?? 0))}>
-                  {quote?.ltp?.toFixed?.(2) ?? "—"}
-                </span>
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span
-                className={cn(
-                  "rounded px-1.5 py-0.5 text-[11px] font-medium",
-                  (quote?.change_pct ?? 0) >= 0
-                    ? "bg-buy/10 text-buy"
-                    : "bg-sell/10 text-sell",
-                )}
-              >
-                {(quote?.change ?? 0).toFixed(2)} ({formatPercent(quote?.change_pct ?? 0)})
-              </span>
-              <span className="text-muted-foreground">
-                Vol{" "}
-                <span className="font-tabular text-foreground">
-                  {((quote?.volume ?? 0)).toLocaleString("en-IN")}
-                </span>
-              </span>
-              {quote?.source && (
-                <span
-                  className={cn(
-                    "ml-auto rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider",
-                    quote.source === "zerodha"
-                      ? "bg-buy/15 text-buy"
-                      : quote.source === "infoway"
-                        ? "bg-info/15 text-info"
-                        : "bg-muted text-muted-foreground",
-                  )}
-                >
-                  {quote.source}
-                </span>
-              )}
-            </div>
-          </div>
 
           {/* Symbol header strip — OHLC / change.
               The custom ChartToolbar that previously sat here was duplicating
@@ -517,13 +445,24 @@ export default function TradingTerminalPage() {
               concrete height down to the TradingView iframe — the widget
               ends up rendering at its initial 0 × 0 bounds and never
               recovers. Explicit pixel height = TV gets a definite size on
-              first paint = chart fills the viewport. Chrome budget after
-              the wallet footer was removed: terminal header (3rem) +
-              ChartTabs (~2.5rem) + bottom SELL/LOTS/BUY bar (~4.5rem) +
-              border / gap (~0.5rem) ≈ 10.5rem. lg+ switches back to flex
-              sizing so the desktop layout's chart card can share height
-              with the positions strip below. */}
-          <div className="relative h-[calc(100vh-10.5rem)] lg:h-auto lg:min-h-0 lg:flex-1">
+              first paint = chart fills the viewport.
+              Chrome budget (mobile):
+                terminal header     ~3.0 rem
+                ChartTabs strip     ~2.5 rem
+                bottom SELL/BUY bar ~4.5 rem
+                main pb-20 padding   5.0 rem  (reserved for compact BottomNav)
+                border / gap         0.5 rem
+              ───────────────────────────────
+              total chrome         ~15.5 rem
+              Earlier this was 10.5 rem which did NOT account for the
+              compact BottomNav's 5 rem of padding-bottom, so the chart
+              card overflowed by ~5 rem and the bottom SELL/BUY strip
+              tucked under the pill nav — the overlap the user flagged
+              ("trade page me button nav bar me ober lap ho rha hai").
+              lg+ switches back to flex sizing so the desktop layout's
+              chart card can share height with the positions strip
+              below. */}
+          <div className="relative h-[calc(100vh-15.5rem)] lg:h-auto lg:min-h-0 lg:flex-1">
             {/* Floating vertical "Option Chain" tab removed per user
                 request — it overlapped the TradingView right-side price
                 scale on phones, making the live price labels unreadable.
@@ -543,17 +482,18 @@ export default function TradingTerminalPage() {
             )}
           </div>
 
-          {/* Mobile-only: APK-style "SHOW POSITIONS" pull-up at the bottom
-              of the chart card. Sits just above the page-level BottomNav
-              (compact pill). Tapping it expands an inline strip with the
-              open positions list — chart stays in view above. Replaces
-              the previous bottom MobileQuickTradeBar which has moved to
-              the TOP of the card so the bid/ask sits next to the price
-              scale where the user expects it. */}
-          <MobilePositionsDrawer
-            positions={positionsLive ?? []}
-            totalPnL={totalPnL}
-            onJumpToToken={(tok) => setSelectedToken(tok)}
+          {/* Mobile-only sticky action bar at the BOTTOM of the chart card:
+              SELL price · ± lot stepper · BUY price. Anchored where the
+              thumb already rests on a phone — replaces the bottom
+              positions drawer experiment (reverted per user request:
+              "chart ko phle jaisa hi kar do ve postion ka seeen remoev
+              kar do bay sell bbhi niche kar do"). Hidden on lg+ where
+              the full OrderPanel column handles entry. */}
+          <MobileQuickTradeBar
+            instrument={instrument}
+            ltp={Number(quote?.ltp ?? 0)}
+            bid={bestBid}
+            ask={bestAsk}
           />
         </div>
 
