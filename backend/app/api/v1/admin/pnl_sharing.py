@@ -11,6 +11,8 @@ each handler:
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from beanie import PydanticObjectId
 from fastapi import APIRouter, HTTPException, Query, status
 
@@ -18,15 +20,20 @@ from app.core.dependencies import CurrentAdmin
 from app.models.pnl_sharing import (
     AgreementStatus,
     PnlSharingAgreement,
+    PnlSharingSettlement,
+    SharingSettlementStatus,
 )
 from app.models.user import User, UserRole
 from app.schemas.common import APIResponse
 from app.schemas.pnl_sharing import (
     AgreementDTO,
     CreateAgreementRequest,
+    ManualSettleRequest,
+    SettlementDTO,
     UpdateAgreementRequest,
 )
 from app.services import pnl_sharing_service as svc
+from app.utils.time_utils import now_utc
 
 router = APIRouter(prefix="/pnl-sharing", tags=["pnl-sharing"])
 
@@ -68,6 +75,30 @@ async def _serialize_agreement(a: PnlSharingAgreement) -> AgreementDTO:
         effective_until=a.effective_until,
         created_at=a.created_at,
         updated_at=a.updated_at,
+    )
+
+
+async def _serialize_settlement(s: PnlSharingSettlement) -> SettlementDTO:
+    return SettlementDTO(
+        id=str(s.id),
+        agreement_id=str(s.agreement_id),
+        admin_id=str(s.admin_id),
+        broker_id=str(s.broker_id),
+        period_start=s.period_start,
+        period_end=s.period_end,
+        cadence=s.cadence,
+        net_client_pnl_inr=str(s.net_client_pnl_inr),
+        net_client_bkg_inr=str(s.net_client_bkg_inr),
+        total_of_both_inr=str(s.total_of_both_inr),
+        actual_pnl_inr=str(s.actual_pnl_inr),
+        sharing_pnl_inr=str(s.sharing_pnl_inr),
+        sharing_bkg_inr=str(s.sharing_bkg_inr),
+        sharing_total_inr=str(s.sharing_total_inr),
+        share_pct_snapshot=str(s.share_pct_snapshot),
+        status=s.status,
+        settled_at=s.settled_at,
+        failure_reason=s.failure_reason,
+        retry_count=s.retry_count,
     )
 
 
@@ -187,3 +218,87 @@ async def end_endpoint(agreement_id: PydanticObjectId, actor: CurrentAdmin):
     except svc.AgreementValidationError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     return APIResponse(data=await _serialize_agreement(updated))
+
+
+@router.get("/settlements", response_model=APIResponse[list[SettlementDTO]])
+async def list_settlements(
+    actor: CurrentAdmin,
+    agreement_id: PydanticObjectId | None = Query(default=None),
+    status_filter: SharingSettlementStatus | None = Query(default=None, alias="status"),
+    from_date: datetime | None = Query(default=None),
+    to_date: datetime | None = Query(default=None),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    q = PnlSharingSettlement.find()
+    if actor.role == UserRole.ADMIN:
+        q = q.find(PnlSharingSettlement.admin_id == actor.id)
+    elif actor.role == UserRole.BROKER:
+        q = q.find(PnlSharingSettlement.broker_id == actor.id)
+    if agreement_id is not None:
+        q = q.find(PnlSharingSettlement.agreement_id == agreement_id)
+    if status_filter is not None:
+        q = q.find(PnlSharingSettlement.status == status_filter)
+    if from_date is not None:
+        q = q.find(PnlSharingSettlement.period_start >= from_date)
+    if to_date is not None:
+        q = q.find(PnlSharingSettlement.period_end <= to_date)
+    rows = await (
+        q.sort(-PnlSharingSettlement.period_start)
+         .skip(skip)
+         .limit(limit)
+         .to_list()
+    )
+    return APIResponse(data=[await _serialize_settlement(r) for r in rows])
+
+
+@router.post("/settlements/manual", response_model=APIResponse[SettlementDTO])
+async def manual_settle(body: ManualSettleRequest, actor: CurrentAdmin):
+    agreement = await PnlSharingAgreement.get(body.agreement_id)
+    if agreement is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "agreement not found")
+    if not _can_edit(actor, agreement):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "no settle access")
+    ref = body.period_start or now_utc()
+    period_start, period_end = svc.compute_period_bounds(body.cadence, ref)
+    try:
+        settlement = await svc.settle_period(
+            agreement_id=agreement.id,
+            period_start=period_start,
+            period_end=period_end,
+            cadence=body.cadence,
+            triggered_by="MANUAL",
+            actor=actor,
+        )
+    except svc.AgreementValidationError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    return APIResponse(data=await _serialize_settlement(settlement))
+
+
+@router.post(
+    "/settlements/{settlement_id}/retry",
+    response_model=APIResponse[SettlementDTO],
+)
+async def retry_settlement(settlement_id: PydanticObjectId, actor: CurrentAdmin):
+    s = await PnlSharingSettlement.get(settlement_id)
+    if s is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "settlement not found")
+    if s.status != SharingSettlementStatus.FAILED:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "only FAILED settlements can be retried"
+        )
+    agreement = await PnlSharingAgreement.get(s.agreement_id)
+    if agreement is None or not _can_edit(actor, agreement):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "no retry access")
+    try:
+        settlement = await svc.settle_period(
+            agreement_id=s.agreement_id,
+            period_start=s.period_start,
+            period_end=s.period_end,
+            cadence=s.cadence,
+            triggered_by="MANUAL",
+            actor=actor,
+        )
+    except svc.AgreementValidationError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    return APIResponse(data=await _serialize_settlement(settlement))
