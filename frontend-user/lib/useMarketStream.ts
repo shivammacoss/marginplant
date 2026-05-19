@@ -18,12 +18,17 @@ export type MarketQuote = {
  * subscribes to the given tokens, and returns a `{token → quote}` map that
  * updates as ticks arrive. Auto-reconnects with exponential backoff.
  *
- * Why a hook instead of `useQuery` polling: the order panel quotes at 1 s,
- * positions used to quote at 2 s, and the WS pump now runs at 250 ms. By
- * subscribing here we get sub-second tick updates on every consumer of
- * `position.ltp` (CURRENT column, P/L, totals) without paying for repeat
- * REST round-trips.
+ * Throttling — display refresh is coalesced to ~500 ms (matches Zerodha
+ * Kite / Dhan; Groww + Upstox sit at ~1 s). The WS itself still receives
+ * every upstream tick at full rate so data freshness is preserved; we just
+ * apply the LATEST per-token snapshot to React state at most twice per
+ * second so the PnL number doesn't flicker 4-10× per second. User-reported
+ * symptom before this change: "PnL bahut jada fast move ho raha hai, glitch
+ * jaisa lag raha". Setting this to 0 would restore the old behaviour
+ * (every tick → re-render).
  */
+const DISPLAY_THROTTLE_MS = 500;
+
 export function useMarketStream(tokens: string[]): Map<string, MarketQuote> {
   const [quotes, setQuotes] = useState<Map<string, MarketQuote>>(new Map());
   const wsRef = useRef<WebSocket | null>(null);
@@ -36,16 +41,35 @@ export function useMarketStream(tokens: string[]): Map<string, MarketQuote> {
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
 
-    function applyTicks(snaps: any[]) {
+    // Per-token buffer of the latest tick. Every WS message overwrites the
+    // entry for that token; a single timer flushes the buffer into React
+    // state at most every DISPLAY_THROTTLE_MS. Net effect: smooth,
+    // readable PnL updates at ~2 fps instead of 4-10 fps, without dropping
+    // any data — the LAST tick for each token always wins.
+    const pending = new Map<string, MarketQuote>();
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function flushPending() {
+      flushTimer = null;
+      if (pending.size === 0) return;
+      const drained = new Map(pending);
+      pending.clear();
       setQuotes((prev) => {
         const next = new Map(prev);
-        for (const q of snaps) {
-          const tok = String(q?.token ?? "");
-          if (!tok) continue;
-          next.set(tok, q as MarketQuote);
-        }
+        for (const [tok, q] of drained) next.set(tok, q);
         return next;
       });
+    }
+
+    function applyTicks(snaps: any[]) {
+      for (const q of snaps) {
+        const tok = String(q?.token ?? "");
+        if (!tok) continue;
+        pending.set(tok, q as MarketQuote);
+      }
+      if (flushTimer === null) {
+        flushTimer = setTimeout(flushPending, DISPLAY_THROTTLE_MS);
+      }
     }
 
     function connect() {
@@ -106,6 +130,8 @@ export function useMarketStream(tokens: string[]): Map<string, MarketQuote> {
     return () => {
       stopped = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (flushTimer) clearTimeout(flushTimer);
+      pending.clear();
       wsRef.current?.close();
     };
     // intentionally empty deps — the WS stays open for the lifetime of the
