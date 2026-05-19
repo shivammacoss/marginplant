@@ -282,7 +282,10 @@ export default function WalletPage() {
               <WalletIcon className="size-3.5" /> Available balance
             </div>
             <div className="font-tabular text-3xl font-bold md:text-4xl">
-              {formatINR(summary?.available_balance ?? 0)}
+              {/* Never display a negative balance on the user-facing hero —
+                  any shortfall is surfaced as settlement_outstanding in
+                  the banner below. */}
+              {formatINR(Math.max(0, Number(summary?.available_balance ?? 0)))}
             </div>
             <div className="text-[11px] opacity-80">Wallet · {selectedBank?.account_holder ?? "MarginPlant Broker"}</div>
           </div>
@@ -360,14 +363,21 @@ export default function WalletPage() {
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         {(() => {
           // Wallet page transaction history is the deposit/withdrawal ledger
-          // only — TRADE / BROKERAGE / CHARGES / PNL etc. live on the
-          // dedicated /reports and /ledger pages and used to swamp this
-          // panel after a single active session. Filtering here (rather
-          // than the API) keeps the existing 50-row fetch usable for any
-          // future "all transactions" view without a second round trip.
+          // PLUS settlement-outstanding events (booked + recovered) — both
+          // are wallet-level, non-trade activities. TRADE / BROKERAGE /
+          // CHARGES / PNL live on the dedicated /reports and /ledger pages
+          // and used to swamp this panel after a single active session.
+          // Filtering here (rather than the API) keeps the existing 50-row
+          // fetch usable for any future "all transactions" view without a
+          // second round trip.
           const cashOnlyTxns = (txns ?? []).filter((t: any) => {
             const tt = String(t?.transaction_type ?? "").toUpperCase();
-            return tt === "DEPOSIT" || tt === "WITHDRAWAL";
+            return (
+              tt === "DEPOSIT" ||
+              tt === "WITHDRAWAL" ||
+              tt === "SETTLEMENT_OUTSTANDING_BOOKED" ||
+              tt === "SETTLEMENT_OUTSTANDING_RECOVERY"
+            );
           });
           return (
         <PanelCard title="Transaction history" subtitle={`Last ${cashOnlyTxns.length} entries`} className="lg:col-span-2">
