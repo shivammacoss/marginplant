@@ -91,7 +91,7 @@ export default function PnlSharingDetailPage() {
     <div className="space-y-6 p-6">
       <Link
         href="/management/pnl-sharing"
-        className="text-sm text-gray-400 hover:underline"
+        className="text-sm text-muted-foreground hover:underline"
       >
         ← Back to list
       </Link>
@@ -102,7 +102,7 @@ export default function PnlSharingDetailPage() {
             {agreement.admin_name || agreement.admin_user_code} ⇄{" "}
             {agreement.broker_name || agreement.broker_user_code}
           </h1>
-          <div className="text-sm text-gray-400 mt-1">
+          <div className="text-sm text-muted-foreground mt-1">
             {agreement.share_pct}% · {agreement.settlement_mode}
             {agreement.settlement_cadence &&
               ` · ${agreement.settlement_cadence}`}

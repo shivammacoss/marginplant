@@ -16,9 +16,9 @@ export function SettlementHistoryTable({
   onRetry,
 }: Props) {
   return (
-    <div className="overflow-x-auto border border-zinc-800 rounded-lg">
+    <div className="overflow-x-auto border border-border rounded-lg">
       <table className="w-full text-sm">
-        <thead className="bg-zinc-900/60 text-gray-400">
+        <thead className="bg-muted text-muted-foreground">
           <tr>
             <th className="px-4 py-2 text-left">Period</th>
             <th className="px-4 py-2 text-right">Sharing PNL</th>
@@ -33,14 +33,14 @@ export function SettlementHistoryTable({
             <tr>
               <td
                 colSpan={canRetry ? 6 : 5}
-                className="px-4 py-8 text-center text-gray-500"
+                className="px-4 py-8 text-center text-muted-foreground"
               >
                 No settlements yet
               </td>
             </tr>
           )}
           {settlements.map((s) => (
-            <tr key={s.id} className="border-t border-zinc-800">
+            <tr key={s.id} className="border-t border-border">
               <td className="px-4 py-2">
                 {new Date(s.period_start).toLocaleDateString()} →{" "}
                 {new Date(s.period_end).toLocaleDateString()}
@@ -58,16 +58,16 @@ export function SettlementHistoryTable({
                 <span
                   className={
                     s.status === "SETTLED"
-                      ? "text-emerald-400"
+                      ? "text-profit"
                       : s.status === "FAILED"
-                        ? "text-red-400"
-                        : "text-amber-400"
+                        ? "text-loss"
+                        : "text-atm"
                   }
                 >
                   {s.status}
                 </span>
                 {s.failure_reason && (
-                  <div className="text-xs text-red-300/70 mt-0.5">
+                  <div className="text-xs text-loss/70 mt-0.5">
                     {s.failure_reason}
                   </div>
                 )}

@@ -26,9 +26,9 @@ export function AgreementTable({
   const router = useRouter();
   const hasActions = !!(onEdit || onPauseResume || onEnd);
   return (
-    <div className="overflow-x-auto border border-zinc-800 rounded-lg">
+    <div className="overflow-x-auto border border-border rounded-lg">
       <table className="w-full text-sm">
-        <thead className="bg-zinc-900/60 text-gray-400">
+        <thead className="bg-muted text-muted-foreground">
           <tr>
             {showAdminColumn && <th className="px-4 py-2 text-left">Admin</th>}
             <th className="px-4 py-2 text-left">Broker</th>
@@ -44,7 +44,7 @@ export function AgreementTable({
             <tr>
               <td
                 colSpan={showAdminColumn ? (hasActions ? 7 : 6) : hasActions ? 6 : 5}
-                className="px-4 py-8 text-center text-gray-500"
+                className="px-4 py-8 text-center text-muted-foreground"
               >
                 No agreements
               </td>
@@ -54,7 +54,7 @@ export function AgreementTable({
             <tr
               key={a.id}
               onClick={() => router.push(`/management/pnl-sharing/${a.id}`)}
-              className="border-t border-zinc-800 hover:bg-zinc-900/30 cursor-pointer"
+              className="border-t border-border hover:bg-muted/50 cursor-pointer"
             >
               {showAdminColumn && (
                 <td className="px-4 py-2">
@@ -84,10 +84,10 @@ export function AgreementTable({
                 <span
                   className={
                     a.status === "ACTIVE"
-                      ? "text-emerald-400"
+                      ? "text-profit"
                       : a.status === "PAUSED"
-                        ? "text-amber-400"
-                        : "text-gray-500"
+                        ? "text-atm"
+                        : "text-muted-foreground"
                   }
                 >
                   {a.status}

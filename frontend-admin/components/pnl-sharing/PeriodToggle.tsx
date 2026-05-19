@@ -16,7 +16,7 @@ const OPTIONS: { value: SettlementCadence; label: string }[] = [
 
 export function PeriodToggle({ value, onChange }: Props) {
   return (
-    <div className="inline-flex bg-zinc-900 border border-zinc-800 rounded-lg p-1 gap-1">
+    <div className="inline-flex bg-muted border border-border rounded-lg p-1 gap-1">
       {OPTIONS.map((opt) => (
         <Button
           key={opt.value}

@@ -16,9 +16,9 @@ function fmt(n: string): string {
 
 function colorFor(n: string): string {
   const num = Number(n);
-  if (num > 0) return "text-emerald-400";
-  if (num < 0) return "text-red-400";
-  return "text-gray-300";
+  if (num > 0) return "text-profit";
+  if (num < 0) return "text-loss";
+  return "text-muted-foreground";
 }
 
 interface Props {
@@ -39,11 +39,11 @@ export function SharingCard({
   onDownloadPdf,
 }: Props) {
   return (
-    <Card className="p-6 bg-zinc-900 border-zinc-800 max-w-md">
+    <Card className="p-6 max-w-md">
       <div className="flex items-start gap-3 mb-4">
         <div className="flex-1">
-          <div className="text-sm text-gray-400">Account ID</div>
-          <div className="text-2xl font-bold tracking-wide">
+          <div className="text-sm text-muted-foreground">Account ID</div>
+          <div className="text-2xl font-bold tracking-wide text-foreground">
             {agreement.admin_user_code || "—"}
           </div>
         </div>
@@ -80,13 +80,13 @@ export function SharingCard({
         <Row label="NET CLIENT PNL" value={row.net_client_pnl_inr} />
         <Row label="NET CLIENT BKG" value={row.net_client_bkg_inr} positive />
 
-        <hr className="border-zinc-700" />
+        <hr className="border-border" />
 
         <Row label="TOTAL OF BOTH" value={row.total_of_both_inr} />
 
-        <hr className="border-zinc-700" />
+        <hr className="border-border" />
 
-        <div className="bg-indigo-950/40 -mx-2 px-2 py-2 rounded">
+        <div className="bg-accent -mx-2 px-2 py-2 rounded">
           <Row label="= ACTUAL PNL" value={row.actual_pnl_inr} bold />
         </div>
 
@@ -108,10 +108,10 @@ function Row({
   bold?: boolean;
   positive?: boolean;
 }) {
-  const cls = positive ? "text-sky-400" : colorFor(value);
+  const cls = positive ? "text-info" : colorFor(value);
   return (
     <div className={`flex justify-between ${bold ? "font-bold" : ""}`}>
-      <span className="text-gray-400">{label}</span>
+      <span className="text-muted-foreground">{label}</span>
       <span className={cls}>{fmt(value)}</span>
     </div>
   );

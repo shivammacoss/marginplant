@@ -170,7 +170,7 @@ function AdminListView({
       </div>
 
       {isLoading ? (
-        <div className="text-gray-500">Loading...</div>
+        <div className="text-muted-foreground">Loading...</div>
       ) : (
         <AgreementTable
           agreements={agreements}
@@ -233,7 +233,7 @@ function BrokerView() {
     return (
       <div className="p-6 max-w-md">
         <h1 className="text-2xl font-bold">P&amp;L Sharing</h1>
-        <p className="text-gray-400 mt-4">No P&amp;L sharing agreement active.</p>
+        <p className="text-muted-foreground mt-4">No P&amp;L sharing agreement active.</p>
       </div>
     );
   }
@@ -247,7 +247,7 @@ function BrokerView() {
           P&amp;L Sharing — Agreement with{" "}
           {agreement.admin_name || agreement.admin_user_code}
         </h1>
-        <div className="text-sm text-gray-400">
+        <div className="text-sm text-muted-foreground">
           {agreement.share_pct}% · {agreement.settlement_mode}
           {agreement.settlement_cadence &&
             ` · ${agreement.settlement_cadence}`}
