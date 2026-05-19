@@ -1006,6 +1006,24 @@ async def delete_position(
     return APIResponse(data={"ok": True, "id": position_id})
 
 
+@router.post("/positions/reconcile-trackers", response_model=APIResponse[dict])
+async def reconcile_trackers(admin: SuperAdmin):
+    """Manual trigger for the per-(user, segment, instrument) tracker
+    reconciler.
+
+    The same job runs automatically every 15 min in the background
+    (`tracker_reconcile_loop`). This endpoint lets an operator force an
+    immediate pass — useful after a deploy / when a user reports being
+    blocked by a stale `holding_lots` / `intraday_lots` counter.
+
+    Super-admin only because it touches every user's trackers.
+    """
+    from app.services.position_service import reconcile_all_trackers
+
+    summary = await reconcile_all_trackers()
+    return APIResponse(data={"ok": True, **summary})
+
+
 @router.post("/positions/emergency-squareoff", response_model=APIResponse[dict])
 async def emergency_squareoff_all(admin: SuperAdmin):
     """Panic button — squares off every open position across the platform.

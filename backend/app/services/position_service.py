@@ -203,15 +203,19 @@ async def apply_fill(
                 pos.target = Decimal128(str(target))
         await pos.save()
 
-    # Tracker
-    await _bump_tracker(
-        user_id=user_id,
-        segment_type=segment_type,
-        token=instrument.token,
-        product_type=product_type,
-        delta_lots=quantity / max(1, instrument.lot_size),
-        delta_margin=margin_used,
-        signed_qty=signed_qty,
+    # Tracker — RECOMPUTE from the live Position rows for this
+    # (user, instrument) rather than incrementally adjusting by delta_lots.
+    # Delta-based updates drift over time (partial fills retried by the
+    # network, position flips where signed_qty crosses zero, mid-fill
+    # backend restarts, etc.) — symptom: `holding_lots=47` on an
+    # instrument with NO open position, which then blocks every future
+    # buy/sell because the validator reads stale lots.
+    # Recomputing from the authoritative Position docs after each fill
+    # turns the tracker into a derived cache that can never drift past
+    # one fill. Self-heal job (see periodic reconciler) catches any
+    # historical drift.
+    await _recompute_tracker(
+        user_id=user_id, segment_type=segment_type, token=instrument.token
     )
 
     # CNC also updates long-term Holding
@@ -246,16 +250,46 @@ async def apply_fill(
     return pos
 
 
-async def _bump_tracker(
+async def _recompute_tracker(
     *,
     user_id: PydanticObjectId,
     segment_type: str,
     token: str,
-    product_type: ProductType,
-    delta_lots: float,
-    delta_margin: Decimal,
-    signed_qty: float,
 ) -> None:
+    """Source-of-truth tracker rebuild.
+
+    Sums the open `Position` rows for this (user, instrument) and writes
+    the result into `UserPositionTracker`. Replaces the older
+    `_bump_tracker` delta-increment path which drifted whenever a fill
+    retry / position flip / mid-flow restart skewed the running counter
+    (production symptom: BTCUSD `holding_lots=47` with zero open
+    positions, blocking every subsequent order via the validator's
+    holding-limit check).
+
+    Idempotent — running it twice with the same DB state produces the
+    same tracker row.
+    """
+    open_positions = await Position.find(
+        Position.user_id == user_id,
+        Position.instrument.token == token,  # type: ignore[union-attr]
+        Position.status == PositionStatus.OPEN,
+    ).to_list()
+
+    intraday_lots = 0.0
+    holding_lots = 0.0
+    margin_blocked: Decimal = ZERO
+
+    for p in open_positions:
+        # Lot size 0 / missing on legacy rows → treat as 1 so |qty| ÷ 1
+        # = qty (matches the pre-fix behaviour for those rows).
+        lot_size = max(1, int(p.instrument.lot_size or 1))
+        lots = abs(float(p.quantity or 0)) / lot_size
+        if p.product_type == ProductType.MIS:
+            intraday_lots += lots
+        else:
+            holding_lots += lots
+        margin_blocked = add(margin_blocked, to_decimal(p.margin_used or 0))
+
     t = await UserPositionTracker.find_one(
         UserPositionTracker.user_id == user_id,
         UserPositionTracker.segment_type == segment_type,
@@ -265,13 +299,168 @@ async def _bump_tracker(
         t = UserPositionTracker(
             user_id=user_id, segment_type=segment_type, instrument_token=token
         )
-    if product_type == ProductType.MIS:
-        t.intraday_lots = max(0.0, t.intraday_lots + (delta_lots if signed_qty > 0 else -delta_lots))
-    else:
-        t.holding_lots = max(0.0, t.holding_lots + (delta_lots if signed_qty > 0 else -delta_lots))
-    t.total_lots = abs(t.intraday_lots) + abs(t.holding_lots)
-    t.margin_blocked = to_decimal128(add(t.margin_blocked, delta_margin))
+    t.intraday_lots = intraday_lots
+    t.holding_lots = holding_lots
+    t.total_lots = intraday_lots + holding_lots
+    t.margin_blocked = to_decimal128(margin_blocked)
     await t.save()
+
+
+async def reconcile_all_trackers() -> dict[str, int]:
+    """Platform-wide tracker reconciliation. Walks every tracker row in
+    the system and rebuilds it from the live Position docs.
+
+    Cheap because the unique index on `user_position_tracker` is
+    (user_id, segment_type, instrument_token) — each recompute is one
+    indexed Position query. On a system with N users and avg M tracker
+    rows per user, total work is O(N·M) but each unit is sub-millisecond.
+
+    Designed to be called by a slow background loop (15-30 min cadence)
+    so any drift introduced by a bug or unexpected restart self-heals
+    without operator intervention. Returns a summary the loop logs.
+    """
+    import logging
+
+    log = logging.getLogger(__name__)
+    trackers = await UserPositionTracker.find_all().to_list()
+    scanned = 0
+    repaired = 0
+    deleted = 0
+    for t in trackers:
+        scanned += 1
+        before = (t.intraday_lots, t.holding_lots)
+        try:
+            await _recompute_tracker(
+                user_id=t.user_id,
+                segment_type=t.segment_type,
+                token=t.instrument_token,
+            )
+        except Exception:
+            log.warning(
+                "tracker_reconcile_failed user=%s token=%s",
+                t.user_id,
+                t.instrument_token,
+                exc_info=True,
+            )
+            continue
+        fresh = await UserPositionTracker.find_one(
+            UserPositionTracker.user_id == t.user_id,
+            UserPositionTracker.segment_type == t.segment_type,
+            UserPositionTracker.instrument_token == t.instrument_token,
+        )
+        if fresh is None:
+            continue
+        if (fresh.intraday_lots, fresh.holding_lots) != before:
+            repaired += 1
+        if (
+            fresh.intraday_lots == 0
+            and fresh.holding_lots == 0
+            and to_decimal(fresh.margin_blocked or 0) == ZERO
+        ):
+            still_open = await Position.find_one(
+                Position.user_id == t.user_id,
+                Position.instrument.token == fresh.instrument_token,  # type: ignore[union-attr]
+                Position.status == PositionStatus.OPEN,
+            )
+            if still_open is None:
+                await fresh.delete()
+                deleted += 1
+    if repaired or deleted:
+        log.info(
+            "tracker_reconcile scanned=%s repaired=%s deleted=%s",
+            scanned,
+            repaired,
+            deleted,
+        )
+    return {"scanned": scanned, "repaired": repaired, "deleted": deleted}
+
+
+_tracker_loop_stop = False
+
+
+def stop_tracker_reconcile_loop() -> None:
+    global _tracker_loop_stop
+    _tracker_loop_stop = True
+
+
+async def tracker_reconcile_loop(interval_sec: float = 900.0) -> None:
+    """Background self-heal — recomputes every tracker row from positions
+    every `interval_sec` (default 15 min). Catches any historical drift
+    that would otherwise block users via the order validator's
+    holding/intraday limit checks.
+
+    Safe to run alongside live fills: `_recompute_tracker` is idempotent
+    and races resolve to the latest Position state on its next pass.
+    """
+    import asyncio as _asyncio
+    import logging
+
+    log = logging.getLogger(__name__)
+    log.info("tracker_reconcile_loop starting interval_sec=%s", interval_sec)
+    # Initial 60-second delay so we don't fight boot-time tasks for the
+    # connection pool.
+    try:
+        await _asyncio.sleep(60.0)
+    except Exception:
+        return
+    while not _tracker_loop_stop:
+        try:
+            await reconcile_all_trackers()
+        except Exception:
+            log.warning("tracker_reconcile_loop_iteration_failed", exc_info=True)
+        try:
+            await _asyncio.sleep(interval_sec)
+        except Exception:
+            break
+
+
+async def reconcile_trackers_for_user(user_id: PydanticObjectId) -> dict[str, int]:
+    """Walk every tracker row this user owns and recompute it from the
+    live Position docs. Returns a small summary so an admin endpoint /
+    cron can log what was repaired.
+
+    Two passes:
+      1. Recompute existing tracker rows.
+      2. Delete tracker rows that aren't referenced by any open position
+         AND now show all-zeros — they're harmless but clutter the
+         collection. We only delete the all-zero, no-position case to
+         avoid racing with an in-flight fill that's just about to
+         create the position.
+    """
+    trackers = await UserPositionTracker.find(
+        UserPositionTracker.user_id == user_id
+    ).to_list()
+    repaired = 0
+    deleted = 0
+    for t in trackers:
+        before = (t.intraday_lots, t.holding_lots)
+        await _recompute_tracker(
+            user_id=user_id, segment_type=t.segment_type, token=t.instrument_token
+        )
+        # Re-read (the helper may have flipped fields)
+        fresh = await UserPositionTracker.find_one(
+            UserPositionTracker.user_id == user_id,
+            UserPositionTracker.segment_type == t.segment_type,
+            UserPositionTracker.instrument_token == t.instrument_token,
+        )
+        if fresh is None:
+            continue
+        if (fresh.intraday_lots, fresh.holding_lots) != before:
+            repaired += 1
+        if (
+            fresh.intraday_lots == 0
+            and fresh.holding_lots == 0
+            and to_decimal(fresh.margin_blocked or 0) == ZERO
+        ):
+            still_open = await Position.find_one(
+                Position.user_id == user_id,
+                Position.instrument.token == fresh.instrument_token,  # type: ignore[union-attr]
+                Position.status == PositionStatus.OPEN,
+            )
+            if still_open is None:
+                await fresh.delete()
+                deleted += 1
+    return {"scanned": len(trackers), "repaired": repaired, "deleted": deleted}
 
 
 async def _apply_holding(
@@ -570,14 +759,15 @@ async def convert_intraday_to_carry(segment_set: frozenset[str] | set[str]) -> d
             await pos.save()
 
             # Tracker counters — same magnitude, different bucket.
-            tracker = await UserPositionTracker.find_one(
-                UserPositionTracker.user_id == pos.user_id
+            # Recompute (don't increment) — same drift-immunity reasoning as
+            # apply_fill above. After product_type flips MIS→NRML on the
+            # Position doc, _recompute_tracker reads the new state and
+            # rewrites the (intraday_lots, holding_lots) split exactly.
+            await _recompute_tracker(
+                user_id=pos.user_id,
+                segment_type=pos.segment_type,
+                token=pos.instrument.token,
             )
-            if tracker is not None:
-                lots_for_tracker = float(cur_qty_abs / to_decimal(max(1, int(pos.instrument.lot_size or 1))))
-                tracker.intraday_lots = max(0.0, tracker.intraday_lots - lots_for_tracker)
-                tracker.holding_lots = tracker.holding_lots + lots_for_tracker
-                await tracker.save()
 
             try:
                 await audit_service.log_event(

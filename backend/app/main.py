@@ -142,6 +142,18 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     setattr(app, "_intraday_to_carry_task", rollover_task)
     setattr(app, "_expiry_cleanup_task", expiry_task)
 
+    # Tracker self-heal: every 15 min, walk every UserPositionTracker row
+    # and recompute it from the live Position docs. Catches any drift
+    # introduced by an unexpected restart / fill retry / partial flow,
+    # so users never get stuck with stale holding_lots blocking their
+    # next order (root-cause fix for the BTCUSD holding_lots=47
+    # incident on 2026-05-19).
+    from app.services.position_service import tracker_reconcile_loop
+    tracker_heal_task: _asyncio.Task = _asyncio.create_task(
+        tracker_reconcile_loop(interval_sec=900.0)
+    )
+    setattr(app, "_tracker_reconcile_task", tracker_heal_task)
+
     # P&L sharing auto-settle scheduler: every 5 min, scan ACTIVE+AUTO agreements
     # and settle the most recently closed period. Idempotent via unique
     # (agreement_id, period_start) index — duplicate fires are no-ops.
@@ -271,6 +283,20 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             itask.cancel()
             try:
                 await itask
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Stop tracker self-heal loop cleanly
+    try:
+        from app.services.position_service import stop_tracker_reconcile_loop
+        stop_tracker_reconcile_loop()
+        ttask = getattr(app, "_tracker_reconcile_task", None)
+        if ttask is not None:
+            ttask.cancel()
+            try:
+                await ttask
             except Exception:
                 pass
     except Exception:
