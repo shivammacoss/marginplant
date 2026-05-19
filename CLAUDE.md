@@ -129,6 +129,11 @@ User JWT and admin JWT are **separate audiences** with separate login endpoints 
 
 Multiple FastAPI instances stay in sync via Redis pub/sub channels: `user:{id}`, `market:tick`, `admin:events`. If you add a new realtime event, publish through Redis — don't broadcast direct from one instance.
 
+Known `admin:events` event types (consumed by [frontend-admin/components/common/AdminWsBridge.tsx](frontend-admin/components/common/AdminWsBridge.tsx)):
+
+- `position_update` / `order_update` / `wallet_update` / `deposit_update` / `withdrawal_update` / `kyc_update` — existing events; each invalidates the matching admin React Query keys.
+- `pnl_sharing_update` — published from the matching-engine close path when a closed Position has a user whose broker has an active sharing agreement. Bridge invalidates `["pnl-sharing"]` query keys so the SharingCard refetches live.
+
 ### Frontend axios + React Query patterns
 
 - Both apps use a shared axios client ([frontend-user/lib/api.ts](frontend-user/lib/api.ts), [frontend-admin/lib/api.ts](frontend-admin/lib/api.ts)) with single-flight refresh on 401 and uniform `ApiError` unwrap. The admin client always attaches `X-Admin-Api-Key` from `NEXT_PUBLIC_ADMIN_KEY`.
