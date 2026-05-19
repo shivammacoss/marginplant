@@ -26,7 +26,11 @@ export default function manifest(): MetadataRoute.Manifest {
     display: "standalone",
     orientation: "portrait",
     background_color: "#0a0a0a",
-    theme_color: "#10b981",
+    // Manifest `theme_color` only sets the install splash + initial PWA
+    // window chrome before JS boots — once <ThemeColorSync> runs it
+    // overrides this in the running tab. Defaulting to dark matches the
+    // app's primary surface (most users keep dark mode for trading).
+    theme_color: "#0a0a0a",
     categories: ["finance", "business"],
     icons: [
       {

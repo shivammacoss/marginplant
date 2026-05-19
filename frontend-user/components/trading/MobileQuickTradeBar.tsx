@@ -149,82 +149,78 @@ export function MobileQuickTradeBar({ instrument, ltp, bid, ask }: Props) {
     }
   }
 
-  // Sticky bottom-of-chart layout — three big tiles (SELL · LOTS · BUY).
-  // Matches the minimal screenshot the user signed off on: no symbol /
-  // price duplication, no "Trade" header, no "1 lot = X units" footer —
-  // the chart itself shows price on the right scale, and the bottom bar
-  // is just for ACTION. Lots are tappable + editable inline; tap-and-
-  // hold isn't supported on mobile so we use small +/- spans inside the
-  // box to keep the touch target reachable without crowding the buttons.
+  // APK-parity layout — each side button shows its PRICE as the big
+  // number and the side label ("sell"/"buy") as a small caption in the
+  // top-right corner. The blue ± lot stepper sits between them with the
+  // bare lot count in the middle (no "Lots" label — matches the
+  // reference screenshot). Heights stay tall enough for confident
+  // thumb-taps but the strip is short overall so the chart below it
+  // doesn't lose vertical room on phones.
   function fmtAria(price: number) {
     return `${fmtPrice(price)}`;
   }
   return (
-    <div className="shrink-0 border-t border-border bg-card lg:hidden">
-      <div className="grid grid-cols-[1fr_auto_1fr] items-stretch gap-2 p-2">
+    <div className="shrink-0 bg-card lg:hidden">
+      <div className="grid grid-cols-[1fr_auto_1fr_auto_1fr] items-stretch gap-1.5 p-2">
         <button
           type="button"
           onClick={() => place("SELL")}
           disabled={submitting !== null || !instrument}
           aria-label={`Sell ${instrument?.symbol ?? ""} at market ${fmtAria(sellPrice)}`}
           className={cn(
-            "flex items-center justify-center rounded-md bg-sell py-3 text-base font-bold uppercase tracking-wider text-white shadow-sm transition-opacity",
+            "relative flex flex-col items-center justify-center rounded-lg bg-sell px-3 py-2.5 text-white shadow-sm transition-opacity",
             (submitting !== null || !instrument) && "opacity-50",
             submitting === "SELL" && "animate-pulse",
           )}
         >
-          SELL
+          <span className="absolute right-2 top-1 text-[10px] font-medium uppercase tracking-wider opacity-90">
+            sell
+          </span>
+          <span className="font-tabular text-xl font-bold tabular-nums leading-tight">
+            {fmtPrice(sellPrice)}
+          </span>
         </button>
 
-        <div className="flex min-w-[88px] flex-col items-center justify-center rounded-md border border-border bg-background px-2">
-          <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-            Lots
-          </span>
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => setLots((x) => +Math.max(minLot, x - lotStep).toFixed(3))}
-              aria-label="Decrease lots"
-              className="grid size-6 place-items-center rounded text-muted-foreground hover:bg-muted/40 hover:text-foreground"
-            >
-              <Minus className="size-3" />
-            </button>
-            {/* Editable lot input — was a read-only <span> earlier, so on
-                phones the user could only step via +/− and couldn't punch
-                in a specific size (e.g. 0.5 BTC instead of forty taps
-                from 0.001). `inputMode=decimal` pops the numeric keypad,
-                onBlur clamps to [minLot, ∞) and rounds to 3 dp so float
-                noise doesn't leak into the order payload. */}
-            <input
-              type="text"
-              inputMode="decimal"
-              value={lotInput}
-              onChange={(e) => setLotInput(e.target.value)}
-              onFocus={(e) => e.currentTarget.select()}
-              onBlur={() => {
-                const n = Number(lotInput);
-                if (!Number.isFinite(n) || n < minLot) {
-                  setLots(minLot);
-                } else {
-                  setLots(+n.toFixed(3));
-                }
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-              }}
-              aria-label="Lot size"
-              className="w-14 min-w-[28px] bg-transparent text-center font-tabular text-lg font-bold tabular-nums outline-none"
-            />
-            <button
-              type="button"
-              onClick={() => setLots((x) => +(x + lotStep).toFixed(3))}
-              aria-label="Increase lots"
-              className="grid size-6 place-items-center rounded text-muted-foreground hover:bg-muted/40 hover:text-foreground"
-            >
-              <Plus className="size-3" />
-            </button>
-          </div>
+        <button
+          type="button"
+          onClick={() => setLots((x) => +Math.max(minLot, x - lotStep).toFixed(3))}
+          aria-label="Decrease lots"
+          className="grid size-11 place-items-center self-center rounded-lg bg-info text-white shadow-sm transition-opacity active:opacity-80"
+        >
+          <Minus className="size-5" />
+        </button>
+
+        <div className="flex items-center justify-center">
+          <input
+            type="text"
+            inputMode="decimal"
+            value={lotInput}
+            onChange={(e) => setLotInput(e.target.value)}
+            onFocus={(e) => e.currentTarget.select()}
+            onBlur={() => {
+              const n = Number(lotInput);
+              if (!Number.isFinite(n) || n < minLot) {
+                setLots(minLot);
+              } else {
+                setLots(+n.toFixed(3));
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+            }}
+            aria-label="Lot size"
+            className="w-12 bg-transparent text-center font-tabular text-xl font-bold tabular-nums text-foreground outline-none"
+          />
         </div>
+
+        <button
+          type="button"
+          onClick={() => setLots((x) => +(x + lotStep).toFixed(3))}
+          aria-label="Increase lots"
+          className="grid size-11 place-items-center self-center rounded-lg bg-info text-white shadow-sm transition-opacity active:opacity-80"
+        >
+          <Plus className="size-5" />
+        </button>
 
         <button
           type="button"
@@ -232,12 +228,17 @@ export function MobileQuickTradeBar({ instrument, ltp, bid, ask }: Props) {
           disabled={submitting !== null || !instrument}
           aria-label={`Buy ${instrument?.symbol ?? ""} at market ${fmtAria(buyPrice)}`}
           className={cn(
-            "flex items-center justify-center rounded-md bg-buy py-3 text-base font-bold uppercase tracking-wider text-white shadow-sm transition-opacity",
+            "relative flex flex-col items-center justify-center rounded-lg bg-buy px-3 py-2.5 text-white shadow-sm transition-opacity",
             (submitting !== null || !instrument) && "opacity-50",
             submitting === "BUY" && "animate-pulse",
           )}
         >
-          BUY
+          <span className="absolute right-2 top-1 text-[10px] font-medium uppercase tracking-wider opacity-90">
+            buy
+          </span>
+          <span className="font-tabular text-xl font-bold tabular-nums leading-tight">
+            {fmtPrice(buyPrice)}
+          </span>
         </button>
       </div>
     </div>

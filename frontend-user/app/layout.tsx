@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import { Providers } from "./providers";
 import { PwaRegister } from "@/components/common/PwaRegister";
+import { ThemeColorSync } from "@/components/common/ThemeColorSync";
 import "./globals.css";
 
 // Inter is what ChatGPT / Linear / Vercel / Stripe / most modern fintech
@@ -36,10 +37,30 @@ export const metadata: Metadata = {
   // Manifest path is auto-injected by Next when app/manifest.ts
   // exists; declaring it here is belt-and-braces for older crawlers.
   manifest: "/manifest.webmanifest",
+  // Disable Chrome's "Translate page?" infobar — refreshing the app
+  // kept surfacing the prompt on Hindi/regional-locale devices, and
+  // the trading numbers MUST NOT be auto-translated (entry → "prawesh",
+  // BUY/SELL → "kharidein/bechein") because the broker UI relies on
+  // exact English labels for SOPs/screen-shares. The pair of <meta>s
+  // is the canonical opt-out (Google + W3C).
+  other: {
+    google: "notranslate",
+    "google-site-verification": "",
+  },
 };
 
 export const viewport: Viewport = {
-  themeColor: "#10b981",
+  // Match the OS chrome (Android status bar / Chrome address bar) to
+  // the app's current theme instead of the brand emerald everywhere.
+  // The two media-keyed entries let the BROWSER pick the right one
+  // when there's no user-set theme; the <ThemeColorSync> client
+  // component below overrides this in real time when the user flips
+  // light/dark from Profile → Preferences so the top safe-area band
+  // never stays green on a light-theme app screen.
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
+    { media: "(prefers-color-scheme: dark)", color: "#0a0a0a" },
+  ],
   width: "device-width",
   initialScale: 1,
   // Lock pinch-zoom / double-tap-zoom on mobile so the installed PWA
@@ -54,10 +75,18 @@ export const viewport: Viewport = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  // `translate="no"` on <html> is the canonical W3C signal to all
+  // translation engines (Chrome, Edge, Safari, third-party widgets)
+  // that the page must not be auto-translated. Combined with the
+  // <meta name="google" content="notranslate" /> in metadata.other,
+  // it prevents the "Translate page?" popup from showing on refresh
+  // — important because mistranslated trading labels (BUY → kharidein)
+  // would be unsafe.
   return (
-    <html lang="en" suppressHydrationWarning className={inter.variable}>
+    <html lang="en" translate="no" suppressHydrationWarning className={inter.variable}>
       <body className="font-sans antialiased">
         <PwaRegister />
+        <ThemeColorSync />
         <Providers>{children}</Providers>
       </body>
     </html>
