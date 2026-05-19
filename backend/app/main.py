@@ -94,6 +94,24 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logger.exception("heal_legacy_percent_seeds_failed_continuing")
 
+    # Backfill agreement_type on legacy P&L sharing agreements and drop the
+    # old (admin_id, broker_id) unique index — replaced by the per-type
+    # index so the same pair can hold both PNL_AND_BROKERAGE and
+    # BROKERAGE_ONLY agreements simultaneously. Idempotent — no-op after
+    # the first successful boot post-deploy.
+    try:
+        from app.services.pnl_sharing_service import (
+            heal_pnl_sharing_agreement_type,
+        )
+
+        healed_pnl = await heal_pnl_sharing_agreement_type()
+        if healed_pnl:
+            logger.info(
+                "startup_healed_pnl_sharing_agreement_type count=%d", healed_pnl
+            )
+    except Exception:
+        logger.exception("heal_pnl_sharing_agreement_type_failed_continuing")
+
     # Start mock market data tick loop
     import asyncio as _asyncio
 

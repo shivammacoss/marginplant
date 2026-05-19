@@ -90,7 +90,9 @@ export function SharingCard({
           <Row label="= ACTUAL PNL" value={row.actual_pnl_inr} bold />
         </div>
 
-        <Row label="SHARING PNL" value={row.sharing_pnl_inr} />
+        {agreement.agreement_type !== "BROKERAGE_ONLY" && (
+          <Row label="SHARING PNL" value={row.sharing_pnl_inr} />
+        )}
         <Row label="SHARING BKG" value={row.sharing_bkg_inr} />
       </div>
     </Card>

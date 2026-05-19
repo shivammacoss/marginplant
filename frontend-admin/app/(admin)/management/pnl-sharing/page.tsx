@@ -23,6 +23,7 @@ import {
   PnlSharingAPI,
   type AgreementDTO,
   type AgreementStatus,
+  type AgreementType,
   type SettlementCadence,
 } from "@/lib/api/pnl-sharing";
 
@@ -81,11 +82,15 @@ function AdminListView({
   const [statusFilter, setStatusFilter] = useState<AgreementStatus | undefined>(
     undefined
   );
+  const [typeFilter, setTypeFilter] = useState<AgreementType | undefined>(
+    undefined
+  );
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<AgreementDTO | null>(null);
 
   const { data: agreements = [], isLoading } = useAgreements({
     status: statusFilter,
+    agreement_type: typeFilter,
   });
   const createMut = useCreateAgreement();
   const updateMut = useUpdateAgreement();
@@ -169,6 +174,19 @@ function AdminListView({
         ))}
       </div>
 
+      <div className="flex gap-2 mt-2">
+        {(["PNL_AND_BROKERAGE", "BROKERAGE_ONLY"] as const).map((t) => (
+          <Button
+            key={t}
+            size="sm"
+            variant={typeFilter === t ? "default" : "outline"}
+            onClick={() => setTypeFilter(typeFilter === t ? undefined : t)}
+          >
+            {t === "PNL_AND_BROKERAGE" ? "PNL + Brokerage" : "Brokerage only"}
+          </Button>
+        ))}
+      </div>
+
       {isLoading ? (
         <div className="text-muted-foreground">Loading...</div>
       ) : (
@@ -248,7 +266,11 @@ function BrokerView() {
           {agreement.admin_name || agreement.admin_user_code}
         </h1>
         <div className="text-sm text-muted-foreground">
-          {agreement.share_pct}% · {agreement.settlement_mode}
+          {agreement.share_pct}% ·{" "}
+          {agreement.agreement_type === "BROKERAGE_ONLY"
+            ? "Brokerage only"
+            : "PNL + Brokerage"}
+          {" · "}{agreement.settlement_mode}
           {agreement.settlement_cadence &&
             ` · ${agreement.settlement_cadence}`}
           {" · "}

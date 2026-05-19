@@ -103,7 +103,11 @@ export default function PnlSharingDetailPage() {
             {agreement.broker_name || agreement.broker_user_code}
           </h1>
           <div className="text-sm text-muted-foreground mt-1">
-            {agreement.share_pct}% · {agreement.settlement_mode}
+            {agreement.share_pct}% ·{" "}
+            {agreement.agreement_type === "BROKERAGE_ONLY"
+              ? "Brokerage only"
+              : "PNL + Brokerage"}
+            {" · "}{agreement.settlement_mode}
             {agreement.settlement_cadence &&
               ` · ${agreement.settlement_cadence}`}
             {" · "}

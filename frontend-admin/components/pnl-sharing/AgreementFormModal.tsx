@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import type {
   AgreementDTO,
+  AgreementType,
   SettlementCadence,
   SettlementMode,
 } from "@/lib/api/pnl-sharing";
@@ -45,6 +46,7 @@ interface Props {
     share_pct: string;
     settlement_mode: SettlementMode;
     settlement_cadence?: SettlementCadence;
+    agreement_type?: AgreementType;
   }) => Promise<void>;
 }
 
@@ -67,6 +69,9 @@ export function AgreementFormModal({
   );
   const [cadence, setCadence] = useState<SettlementCadence>(
     existing?.settlement_cadence ?? "MONTHLY"
+  );
+  const [agreementType, setAgreementType] = useState<AgreementType>(
+    existing?.agreement_type ?? "PNL_AND_BROKERAGE"
   );
   const [brokers, setBrokers] = useState<BrokerLite[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -101,6 +106,7 @@ export function AgreementFormModal({
         share_pct: sharePct,
         settlement_mode: mode,
         settlement_cadence: mode === "AUTO" ? cadence : undefined,
+        agreement_type: agreementType,
       });
       onClose();
     } catch (e: unknown) {
@@ -162,6 +168,38 @@ export function AgreementFormModal({
               value={sharePct}
               onChange={(e) => setSharePct(e.target.value)}
             />
+          </div>
+          <div>
+            <Label>Sharing Type</Label>
+            <div className="flex gap-4 mt-1">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="agreement_type"
+                  value="PNL_AND_BROKERAGE"
+                  checked={agreementType === "PNL_AND_BROKERAGE"}
+                  onChange={() => setAgreementType("PNL_AND_BROKERAGE")}
+                  disabled={isEdit}
+                />
+                PNL + Brokerage
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="agreement_type"
+                  value="BROKERAGE_ONLY"
+                  checked={agreementType === "BROKERAGE_ONLY"}
+                  onChange={() => setAgreementType("BROKERAGE_ONLY")}
+                  disabled={isEdit}
+                />
+                Brokerage only
+              </label>
+            </div>
+            {isEdit && (
+              <p className="text-xs text-muted-foreground mt-1">
+                Type is immutable after creation.
+              </p>
+            )}
           </div>
           <div>
             <Label>Settlement Mode</Label>
