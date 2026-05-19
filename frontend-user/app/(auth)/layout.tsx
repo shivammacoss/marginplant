@@ -56,7 +56,22 @@ function AuthLayoutInner({ children }: { children: React.ReactNode }) {
             © {new Date().getFullYear()} MarginPlant Broker · All rights reserved
           </div>
         </div>
-        <div className="flex items-center justify-center p-6">
+        <div className="flex flex-col items-center justify-start p-6 pt-10 lg:justify-center lg:pt-6">
+          {/* Mobile-only branded header — desktop already has the full
+              brand panel on the left, but on phones the form used to
+              start cold with no logo or welcome text. User asked:
+              "login page mobile view me logo and branding kar do".
+              Compact (~120 px), centred, gradient backdrop tile around
+              the icon so the brand mark reads even on a light theme. */}
+          <div className="mb-6 flex w-full flex-col items-center gap-2 text-center lg:hidden">
+            <div className="rounded-2xl bg-gradient-to-br from-primary/20 via-primary/10 to-transparent p-3">
+              <BrandLogo href={null} size="lg" iconOnly />
+            </div>
+            <BrandLogo href={null} size="md" />
+            <p className="max-w-xs text-xs text-muted-foreground">
+              Trade Indian markets — fast, fair, focused.
+            </p>
+          </div>
           <div className="w-full max-w-md">{children}</div>
         </div>
       </div>
