@@ -12,9 +12,11 @@ each handler:
 from __future__ import annotations
 
 from datetime import datetime
+from io import BytesIO
 
 from beanie import PydanticObjectId
 from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 
 from app.core.dependencies import CurrentAdmin
 from app.models.pnl_sharing import (
@@ -345,3 +347,53 @@ async def my_agreement(actor: CurrentAdmin):
     if a is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no active agreement")
     return APIResponse(data=await _serialize_agreement(a))
+
+
+@router.get("/reports/{agreement_id}/download")
+async def download_report(
+    agreement_id: PydanticObjectId,
+    actor: CurrentAdmin,
+    period: SettlementCadence = Query(...),
+    from_date: datetime = Query(..., alias="from"),
+    to_date: datetime = Query(..., alias="to"),
+    format: str = Query(..., regex="^(pdf|excel)$"),
+):
+    """Stream a PDF or Excel report. Same auth scope as GET /reports/{id}."""
+    a = await PnlSharingAgreement.get(agreement_id)
+    if a is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "agreement not found")
+    if not _can_view(actor, a):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "no access")
+    if from_date > to_date:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "from > to")
+    report = await svc.build_report(
+        agreement=a, cadence=period, from_dt=from_date, to_dt=to_date,
+    )
+    response = ReportResponse(
+        agreement=await _serialize_agreement(a),
+        rows=report.rows,
+        summary=report.summary,
+    )
+
+    if format == "pdf":
+        from app.services.pnl_sharing_pdf_service import render_report_pdf
+        data = render_report_pdf(response)
+        media_type = "application/pdf"
+        ext = "pdf"
+    else:  # excel
+        from app.services.pnl_sharing_excel_service import render_report_excel
+        data = render_report_excel(response)
+        media_type = (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        ext = "xlsx"
+
+    filename = (
+        f"pnl_sharing_{a.admin_user_code or 'admin'}_"
+        f"{a.broker_user_code or 'broker'}_{period}.{ext}"
+    )
+    return StreamingResponse(
+        BytesIO(data),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
