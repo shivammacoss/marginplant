@@ -129,9 +129,18 @@ class SharingSnapshot:
 async def _broker_client_ids(
     broker_id: PydanticObjectId,
 ) -> list[PydanticObjectId]:
-    """User ids of direct clients under this broker (``assigned_broker_id``)."""
+    """User ids in this broker's entire subtree (direct clients + sub-brokers + their clients).
+
+    Matches via ``broker_ancestry`` multikey index — captures everyone whose
+    ancestor chain includes ``broker_id``: direct clients (parent broker is
+    in their ancestry), nested sub-brokers, and clients of those sub-brokers.
+
+    Brokers themselves don't have closed Positions of their own, so including
+    them in the lookup is harmless — the Position query filters by
+    ``status=CLOSED`` and brokers don't trade.
+    """
     coll = User.get_motor_collection()
-    cursor = coll.find({"assigned_broker_id": broker_id}, {"_id": 1})
+    cursor = coll.find({"broker_ancestry": broker_id}, {"_id": 1})
     return [doc["_id"] async for doc in cursor]
 
 

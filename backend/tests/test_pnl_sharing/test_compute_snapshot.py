@@ -169,3 +169,76 @@ async def test_snapshot_outside_window_excluded(db, agreement, client_user):
     assert snap.sharing_pnl_inr == Decimal("0.00")
     assert snap.sharing_bkg_inr == Decimal("0.00")
     assert snap.sharing_total_inr == Decimal("0.00")
+
+
+# ── Subtree test: sub-broker descendants should be INCLUDED in agreement ─────
+
+
+async def test_snapshot_includes_subbroker_clients_in_subtree(
+    db, admin_user, broker_user, agreement
+):
+    """Agreement is admin↔parent_broker. If broker has a sub-broker, and
+    that sub-broker has clients, those clients trades should ALSO count
+    toward this agreement (subtree-inclusive sharing).
+
+    Setup:
+      parent_broker  ← agreement here
+      └─ sub_broker
+          └─ sub_client
+
+    sub_client trades and loses 10000. Brokerage 500. 30% share.
+    Expected: admin gets 3000 PNL + 150 BKG = 3150 total.
+    """
+    from beanie import PydanticObjectId
+    from app.models.user import User, UserRole, UserStatus
+
+    sub_broker = User(
+        user_code="TBRK_SUB",
+        email="subbroker@example.com",
+        mobile="9999900099",
+        full_name="Sub Broker",
+        password_hash="x",
+        role=UserRole.BROKER,
+        status=UserStatus.ACTIVE,
+        assigned_admin_id=admin_user.id,
+        assigned_broker_id=broker_user.id,
+        broker_ancestry=[broker_user.id],
+    )
+    await sub_broker.insert()
+
+    sub_client = User(
+        user_code="TCLI_SUB",
+        email="subclient@example.com",
+        mobile="9999900100",
+        full_name="Sub Client",
+        password_hash="x",
+        role=UserRole.CLIENT,
+        status=UserStatus.ACTIVE,
+        assigned_admin_id=admin_user.id,
+        assigned_broker_id=sub_broker.id,
+        broker_ancestry=[broker_user.id, sub_broker.id],
+    )
+    await sub_client.insert()
+
+    period_start = datetime(2026, 5, 18, 0, 0, tzinfo=UTC)
+    period_end = datetime(2026, 5, 18, 23, 59, 59, tzinfo=UTC)
+
+    await _make_position(
+        user_id=sub_client.id,
+        realized_pnl="-10000",
+        closed_at=datetime(2026, 5, 18, 12, 0, tzinfo=UTC),
+    )
+    await _make_brokerage_tx(
+        user_id=sub_client.id,
+        amount="-500",
+        created_at=datetime(2026, 5, 18, 12, 0, 1, tzinfo=UTC),
+    )
+
+    snap = await compute_sharing_snapshot(agreement, period_start, period_end)
+
+    assert snap.net_client_pnl_inr == Decimal("-10000.00")
+    assert snap.net_client_bkg_inr == Decimal("500.00")
+    assert snap.total_of_both_inr == Decimal("10500.00")
+    assert snap.sharing_pnl_inr == Decimal("3000.00")
+    assert snap.sharing_bkg_inr == Decimal("150.00")
+    assert snap.sharing_total_inr == Decimal("3150.00")
