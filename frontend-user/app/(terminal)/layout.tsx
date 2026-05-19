@@ -187,17 +187,22 @@ export default function TerminalLayout({ children }: { children: React.ReactNode
             narrow viewports, which is what made the chart appear tiny
             with a huge empty band below it on phones. lg+ stays fixed
             (no page scroll) — the grid columns there are self-contained.
-            `pb-20 md:pb-0` reserves room for the mobile-only compact
-            BottomNav pill mounted below so the order panel's last row
-            isn't hidden behind it. */}
-        <main className="min-h-0 flex-1 overflow-y-auto pb-20 md:pb-0 lg:overflow-hidden">{children}</main>
+            `pb-14` reserves EXACTLY the BottomNav's height (h-14 = 56px)
+            on mobile so there's no dead band between the chart card's
+            SELL/BUY strip and the nav. Earlier `pb-20` left a ~24 px
+            gap which the user flagged ("niche me jo khali jagah bach
+            rahi usko bhi ramove karo"). The nav adds its own
+            safe-area-inset-bottom padding so iPhone home-bar overlap
+            is handled there, not here. */}
+        <main className="min-h-0 flex-1 overflow-y-auto pb-14 md:pb-0 lg:overflow-hidden">{children}</main>
       </div>
 
-      {/* Mobile-only compact pill nav so the chart page gets the same
-          Home/Market/Trade/Orders/Profile thumb-reach as the rest of
-          the app. `compact` shrinks the bar's width and height — the
-          chart canvas stays the visual hero on phones. */}
-      <BottomNav compact />
+      {/* Mobile-only bottom nav — same edge-to-edge style as the rest
+          of the app (dashboard, marketwatch, positions) so the chart
+          page doesn't look out of place with a floating pill. User
+          rejected the "boxed" compact mode: "ye jo box ke andar rakh
+          hai waisa mat rakh yrr". */}
+      <BottomNav />
 
       {/* Footer status bar (Equity / Free / Margin / Balance / Margin
           level / connection) removed per user request — those numbers

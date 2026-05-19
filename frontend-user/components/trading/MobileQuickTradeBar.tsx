@@ -149,34 +149,35 @@ export function MobileQuickTradeBar({ instrument, ltp, bid, ask }: Props) {
     }
   }
 
-  // APK-parity layout — each side button shows its PRICE as the big
-  // number and the side label ("sell"/"buy") as a small caption in the
-  // top-right corner. The blue ± lot stepper sits between them with the
-  // bare lot count in the middle (no "Lots" label — matches the
-  // reference screenshot). Heights stay tall enough for confident
-  // thumb-taps but the strip is short overall so the chart below it
-  // doesn't lose vertical room on phones.
+  // APK-parity layout — each side button stacks a small "sell"/"buy"
+  // label above its price number. Price uses `text-sm` + `tabular-nums`
+  // + `truncate` so wide numbers (BTCUSD 80,000.00, crypto pairs with
+  // 2 dp) fit inside the button instead of pushing the side label out
+  // of bounds — user flagged this: "bay sell ke button me price over
+  // lap karta hai bhaut jada bada ho jata hai". Vertical stack
+  // (label-above-price) replaces the previous absolute-positioned
+  // corner caption so the label never overlaps the number.
   function fmtAria(price: number) {
     return `${fmtPrice(price)}`;
   }
   return (
     <div className="shrink-0 bg-card lg:hidden">
-      <div className="grid grid-cols-[1fr_auto_1fr_auto_1fr] items-stretch gap-1.5 p-2">
+      <div className="grid grid-cols-[1fr_auto_auto_auto_1fr] items-stretch gap-1.5 p-2">
         <button
           type="button"
           onClick={() => place("SELL")}
           disabled={submitting !== null || !instrument}
           aria-label={`Sell ${instrument?.symbol ?? ""} at market ${fmtAria(sellPrice)}`}
           className={cn(
-            "relative flex flex-col items-center justify-center rounded-lg bg-sell px-3 py-2.5 text-white shadow-sm transition-opacity",
+            "flex min-w-0 flex-col items-center justify-center rounded-lg bg-sell px-2 py-1.5 text-white shadow-sm transition-opacity",
             (submitting !== null || !instrument) && "opacity-50",
             submitting === "SELL" && "animate-pulse",
           )}
         >
-          <span className="absolute right-2 top-1 text-[10px] font-medium uppercase tracking-wider opacity-90">
+          <span className="text-[9px] font-medium uppercase tracking-[0.18em] opacity-90 leading-none">
             sell
           </span>
-          <span className="font-tabular text-xl font-bold tabular-nums leading-tight">
+          <span className="mt-0.5 w-full truncate text-center font-tabular text-sm font-bold tabular-nums leading-tight">
             {fmtPrice(sellPrice)}
           </span>
         </button>
@@ -185,12 +186,16 @@ export function MobileQuickTradeBar({ instrument, ltp, bid, ask }: Props) {
           type="button"
           onClick={() => setLots((x) => +Math.max(minLot, x - lotStep).toFixed(3))}
           aria-label="Decrease lots"
-          className="grid size-11 place-items-center self-center rounded-lg bg-info text-white shadow-sm transition-opacity active:opacity-80"
+          className="grid size-10 place-items-center self-center rounded-lg bg-info text-white shadow-sm transition-opacity active:opacity-80"
         >
-          <Minus className="size-5" />
+          <Minus className="size-4" />
         </button>
 
         <div className="flex items-center justify-center">
+          {/* Lot input grew from w-12 → w-16 + dropped from text-xl →
+              text-base so fractional crypto sizes (0.001 BTC, 1.234)
+              and 4-digit lot counts stay legible. tabular-nums keeps
+              digits monospaced so the box width is stable. */}
           <input
             type="text"
             inputMode="decimal"
@@ -209,7 +214,7 @@ export function MobileQuickTradeBar({ instrument, ltp, bid, ask }: Props) {
               if (e.key === "Enter") (e.target as HTMLInputElement).blur();
             }}
             aria-label="Lot size"
-            className="w-12 bg-transparent text-center font-tabular text-xl font-bold tabular-nums text-foreground outline-none"
+            className="w-16 bg-transparent text-center font-tabular text-base font-bold tabular-nums text-foreground outline-none"
           />
         </div>
 
@@ -217,9 +222,9 @@ export function MobileQuickTradeBar({ instrument, ltp, bid, ask }: Props) {
           type="button"
           onClick={() => setLots((x) => +(x + lotStep).toFixed(3))}
           aria-label="Increase lots"
-          className="grid size-11 place-items-center self-center rounded-lg bg-info text-white shadow-sm transition-opacity active:opacity-80"
+          className="grid size-10 place-items-center self-center rounded-lg bg-info text-white shadow-sm transition-opacity active:opacity-80"
         >
-          <Plus className="size-5" />
+          <Plus className="size-4" />
         </button>
 
         <button
@@ -228,15 +233,15 @@ export function MobileQuickTradeBar({ instrument, ltp, bid, ask }: Props) {
           disabled={submitting !== null || !instrument}
           aria-label={`Buy ${instrument?.symbol ?? ""} at market ${fmtAria(buyPrice)}`}
           className={cn(
-            "relative flex flex-col items-center justify-center rounded-lg bg-buy px-3 py-2.5 text-white shadow-sm transition-opacity",
+            "flex min-w-0 flex-col items-center justify-center rounded-lg bg-buy px-2 py-1.5 text-white shadow-sm transition-opacity",
             (submitting !== null || !instrument) && "opacity-50",
             submitting === "BUY" && "animate-pulse",
           )}
         >
-          <span className="absolute right-2 top-1 text-[10px] font-medium uppercase tracking-wider opacity-90">
+          <span className="text-[9px] font-medium uppercase tracking-[0.18em] opacity-90 leading-none">
             buy
           </span>
-          <span className="font-tabular text-xl font-bold tabular-nums leading-tight">
+          <span className="mt-0.5 w-full truncate text-center font-tabular text-sm font-bold tabular-nums leading-tight">
             {fmtPrice(buyPrice)}
           </span>
         </button>

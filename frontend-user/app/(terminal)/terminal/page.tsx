@@ -449,20 +449,18 @@ export default function TradingTerminalPage() {
               Chrome budget (mobile):
                 terminal header     ~3.0 rem
                 ChartTabs strip     ~2.5 rem
-                bottom SELL/BUY bar ~4.5 rem
-                main pb-20 padding   5.0 rem  (reserved for compact BottomNav)
+                bottom SELL/BUY bar ~4.0 rem
+                main pb-14 padding   3.5 rem  (= BottomNav h-14, exact)
                 border / gap         0.5 rem
               ───────────────────────────────
-              total chrome         ~15.5 rem
-              Earlier this was 10.5 rem which did NOT account for the
-              compact BottomNav's 5 rem of padding-bottom, so the chart
-              card overflowed by ~5 rem and the bottom SELL/BUY strip
-              tucked under the pill nav — the overlap the user flagged
-              ("trade page me button nav bar me ober lap ho rha hai").
+              total chrome         ~13.5 rem
+              pb shrank from 5 rem → 3.5 rem after the gap-between-trade-
+              strip-and-nav was removed; calc tracks that change so the
+              chart still fills the visible viewport with no overlap.
               lg+ switches back to flex sizing so the desktop layout's
               chart card can share height with the positions strip
               below. */}
-          <div className="relative h-[calc(100vh-15.5rem)] lg:h-auto lg:min-h-0 lg:flex-1">
+          <div className="relative h-[calc(100vh-13.5rem)] lg:h-auto lg:min-h-0 lg:flex-1">
             {/* Floating vertical "Option Chain" tab removed per user
                 request — it overlapped the TradingView right-side price
                 scale on phones, making the live price labels unreadable.

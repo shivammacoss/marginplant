@@ -28,40 +28,44 @@ const items = [
  * single nav surface there. Sits above the page in a translucent sticky
  * footer with safe-area padding.
  *
- * `compact` (used on the terminal/chart page) renders the bar as a
- * centered pill with side margins instead of edge-to-edge — keeps the
- * chart canvas visually wider while still giving thumb-reach navigation.
+ * Edge-to-edge, full-width — the previous "compact pill" mode was
+ * rejected by the user ("ye jo box ke andar rakh hai waisa mat rakh
+ * yrr"). One consistent shape across every mobile route now.
  */
-export function BottomNav({ compact = false }: { compact?: boolean } = {}) {
+export function BottomNav() {
   const pathname = usePathname();
   return (
     <nav
       className={cn(
-        "fixed bottom-0 z-40 bg-background/95 backdrop-blur",
+        "fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/95 backdrop-blur",
         "md:hidden",
         "supports-[backdrop-filter]:bg-background/80",
-        compact
-          ? "left-1/2 mb-2 w-[min(92vw,360px)] -translate-x-1/2 rounded-full border border-border shadow-lg shadow-black/20"
-          : "inset-x-0 border-t border-border",
       )}
-      style={{ paddingBottom: compact ? undefined : "env(safe-area-inset-bottom)" }}
+      style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
     >
-      <ul className={cn("grid grid-cols-5", compact && "rounded-full overflow-hidden")}>
+      <ul className="grid grid-cols-5">
         {items.map((it) => {
           const active = pathname === it.href || pathname?.startsWith(it.href + "/");
           const Icon = it.icon;
           if (it.accent) {
+            // Flat inline accent (no -mt floating bubble, no ring) — the
+            // previous floating pill looked broken on the terminal page
+            // because the chart card sat flush above the nav, so the
+            // raised disc had no breathing room. Going flat keeps the
+            // TRADE tab visually distinct (filled primary background)
+            // without sticking up into the chart edge.
             return (
-              <li key={it.href} className="relative">
+              <li key={it.href}>
                 <Link
                   href={it.href}
                   className={cn(
-                    "mx-auto flex flex-col items-center justify-center gap-0.5 rounded-full bg-primary text-primary-foreground shadow-lg shadow-primary/30 ring-4 ring-background",
-                    compact ? "h-11 w-11 -mt-3" : "h-14 w-14 -mt-5",
+                    "flex h-14 flex-col items-center justify-center gap-0.5 text-[10px] transition-colors",
+                    active ? "text-primary-foreground" : "text-primary-foreground/85 hover:text-primary-foreground",
+                    "bg-primary",
                   )}
                 >
-                  <Icon className={compact ? "size-4" : "size-5"} />
-                  <span className={cn("font-semibold uppercase tracking-wider", compact ? "text-[8px]" : "text-[9px]")}>{it.label}</span>
+                  <Icon className="size-5" />
+                  <span className="font-semibold uppercase tracking-wider">{it.label}</span>
                 </Link>
               </li>
             );
@@ -71,12 +75,11 @@ export function BottomNav({ compact = false }: { compact?: boolean } = {}) {
               <Link
                 href={it.href}
                 className={cn(
-                  "flex flex-col items-center justify-center gap-0.5 transition-colors",
-                  compact ? "h-12 text-[9px]" : "h-14 text-[10px]",
+                  "flex h-14 flex-col items-center justify-center gap-0.5 text-[10px] transition-colors",
                   active ? "text-primary" : "text-muted-foreground hover:text-foreground"
                 )}
               >
-                <Icon className={cn(compact ? "size-4" : "size-5", active && "scale-110")} />
+                <Icon className={cn("size-5", active && "scale-110")} />
                 <span className="font-medium">{it.label}</span>
               </Link>
             </li>
