@@ -278,3 +278,77 @@ async def bulk_reassign(
         except Exception as e:
             failed.append({"user_id": uid, "error": str(e)})
     return {"moved": moved, "failed": failed}
+
+
+async def delete_sub_admin(
+    sub_admin_id: PydanticObjectId,
+    *,
+    actor_id: PydanticObjectId,
+) -> None:
+    """Permanently delete a sub-admin. Reassigns their users back to the
+    platform pool (assigned_admin_id = None) so they don't become orphans.
+    Any ACTIVE / PAUSED P&L sharing agreements for this admin are ENDed to
+    preserve history. Caller must be SUPER_ADMIN (gated at the router level).
+    """
+    sa = await _get_sub_admin_or_404(sub_admin_id)
+
+    # Reassign assigned users back to platform pool
+    coll = User.get_motor_collection()
+    await coll.update_many(
+        {"assigned_admin_id": sa.id},
+        {"$set": {"assigned_admin_id": None}},
+    )
+
+    # End any active P&L sharing agreements for this admin (preserve history)
+    from app.models.pnl_sharing import AgreementStatus, PnlSharingAgreement
+    from app.utils.time_utils import now_utc
+
+    await PnlSharingAgreement.find(
+        PnlSharingAgreement.admin_id == sa.id,
+        PnlSharingAgreement.status != AgreementStatus.ENDED,
+    ).update_many({
+        "$set": {
+            "status": AgreementStatus.ENDED.value,
+            "effective_until": now_utc(),
+            "last_modified_by": actor_id,
+        }
+    })
+
+    await sa.delete()
+
+    await log_event(
+        action=AuditAction.DELETE,
+        entity_type="User",
+        entity_id=sa.id,
+        actor_id=actor_id,
+        target_user_id=sa.id,
+        new_values={
+            "user_code": sa.user_code,
+            "email": sa.email,
+            "role": "ADMIN",
+        },
+    )
+
+
+async def reset_password(
+    sub_admin_id: PydanticObjectId,
+    new_password: str,
+    *,
+    actor_id: PydanticObjectId,
+) -> User:
+    """Reset a sub-admin's password to a new value chosen by super-admin.
+    Sub-admin should change it on next login (no flag enforced in Phase 1)."""
+    from app.core.security import hash_password
+
+    sa = await _get_sub_admin_or_404(sub_admin_id)
+    sa.password_hash = hash_password(new_password)
+    await sa.save()
+
+    await log_event(
+        action=AuditAction.PASSWORD_RESET,
+        entity_type="User",
+        entity_id=sa.id,
+        actor_id=actor_id,
+        target_user_id=sa.id,
+    )
+    return sa

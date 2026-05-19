@@ -125,6 +125,7 @@ async def list_brokers(
     status: str | None = None,
     page: int = 1,
     page_size: int = 20,
+    admin_id: PydanticObjectId | None = None,
 ):
     # Permission gate inline. Super-admin always passes; admin needs
     # admin_permissions.brokers; broker needs broker_permissions.sub_brokers >= VIEW.
@@ -141,8 +142,16 @@ async def list_brokers(
         ):
             raise HTTPException(status_code=403, detail="Sub-brokers permission not granted")
 
+    # `admin_id` filter is super-admin only; ignore for other roles so they
+    # can't peek across pools.
+    effective_admin_id = admin_id if actor.role == UserRole.SUPER_ADMIN else None
     rows, total = await svc.list_brokers_for(
-        actor, status=status, q=q, page=page, page_size=page_size
+        actor,
+        status=status,
+        q=q,
+        page=page,
+        page_size=page_size,
+        admin_id=effective_admin_id,
     )
     items = [await _ser_broker(b) for b in rows]
     return APIResponse(
@@ -184,6 +193,7 @@ async def create_broker(payload: CreateBrokerRequest, actor: CurrentAdmin):
         full_name=payload.full_name,
         permissions=payload.permissions,
         pnl_share_pct=payload.pnl_share_pct,
+        assigned_admin_id=payload.assigned_admin_id,
     )
     return APIResponse(data=await _ser_broker(b))
 

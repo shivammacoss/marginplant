@@ -22,6 +22,7 @@ from app.schemas.admin.management import (
     CreateSubAdminRequest,
     MarkPaidRequest,
     RecomputeSettlementRequest,
+    ResetPasswordRequest,
     SettlementDTO,
     SubAdminDTO,
     UpdatePermissionsRequest,
@@ -165,6 +166,35 @@ async def block_sub_admin(sub_admin_id: str, admin: SuperAdmin):
 async def unblock_sub_admin(sub_admin_id: str, admin: SuperAdmin):
     sa = await mgmt.unblock_sub_admin(sub_admin_id, admin.id)
     return APIResponse(data=await _ser_sub_admin(sa))
+
+
+@router.delete(
+    "/sub-admins/{sub_admin_id}",
+    response_model=APIResponse[dict],
+)
+async def delete_sub_admin(
+    sub_admin_id: PydanticObjectId,
+    actor: SuperAdmin,
+):
+    """Permanently delete a sub-admin (super-admin only). Reassigns the
+    sub-admin's users back to the platform pool, ENDs any active P&L
+    sharing agreements, then removes the user row."""
+    await mgmt.delete_sub_admin(sub_admin_id, actor_id=actor.id)
+    return APIResponse(data={"deleted": str(sub_admin_id)})
+
+
+@router.post(
+    "/sub-admins/{sub_admin_id}/reset-password",
+    response_model=APIResponse[dict],
+)
+async def reset_sub_admin_password(
+    sub_admin_id: PydanticObjectId,
+    body: ResetPasswordRequest,
+    actor: SuperAdmin,
+):
+    """Reset a sub-admin's password (super-admin only)."""
+    await mgmt.reset_password(sub_admin_id, body.new_password, actor_id=actor.id)
+    return APIResponse(data={"reset": str(sub_admin_id)})
 
 
 @router.get(

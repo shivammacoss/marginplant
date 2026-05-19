@@ -24,7 +24,7 @@ redis-server --port 6379                              # or: brew services start 
 brew services start mongodb-community                 # only if installed via brew
 
 # Terminal 3: Backend
-cd /Users/tarundewangan/Downloads/setupfx_ind/backend
+cd /Users/tarundewangan/Downloads/Projects/marginplant/backend
 source .venv/bin/activate
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 
@@ -50,10 +50,20 @@ ruff check app/
 ruff format app/
 mypy app/
 
-# Tests (note: no tests/ dir exists yet — CI runs pytest only if backend/tests/**/*.py is present):
+# Tests — `backend/tests/` currently holds one end-to-end test (segment settings).
+# CI runs pytest only if backend/tests/**/*.py is present.
 pytest -q
-pytest -q tests/path/to/test_file.py::test_name
+pytest -q tests/test_segment_settings_end_to_end.py::test_name
 ```
+
+### Operational scripts ([backend/scripts/](backend/scripts/))
+
+One-shot maintenance scripts, run with `python -m scripts.<name>` from `backend/` after `source .venv/bin/activate`:
+
+- `reseed_super_admin.py` — re-create / reset the super admin account.
+- `create_test_user.py` — bootstrap a user for local UX checks.
+- `reset_user_margins.py` — clear margin state on a user (manual recovery).
+- `backfill_position_opened_side.py`, `fix_bogus_proceeds_credits.py` — historical data-fix migrations; check the docstring before running.
 
 MongoDB **replica set is required for transactions** in Phase 4+; a single node works for Phase 1. Default super admin: `admin@setupfx.com` / `Admin@123` — admin login requires 2FA, so enroll via the user app first.
 
@@ -72,7 +82,7 @@ npm run type-check   # tsc --noEmit
 
 ### Deploy
 
-`main` → GitHub Actions ([.github/workflows/deploy.yml](.github/workflows/deploy.yml)) → SSH to EC2 → [scripts/deploy.sh](scripts/deploy.sh). The script diffs `HEAD` against `origin/main` and only restarts the affected piece (backend systemd unit, PM2 frontend, nginx). Force everything with `FORCE_FULL=1 bash scripts/deploy.sh`. See [deploy/README.md](deploy/README.md) for one-time EC2 setup (passwordless sudo for systemctl/nginx, GitHub secrets).
+[scripts/deploy.sh](scripts/deploy.sh) is the on-server deploy script — it diffs `HEAD` against `origin/main` and only restarts the affected piece (backend systemd unit, PM2 frontend, nginx). Force everything with `FORCE_FULL=1 bash scripts/deploy.sh`. See [deploy/README.md](deploy/README.md) for one-time EC2 setup (passwordless sudo for systemctl/nginx). The matching `.github/workflows/deploy.yml` (Actions → SSH → EC2 → `deploy.sh`) is referenced in [deploy/README.md](deploy/README.md) but is not currently checked into this tree — verify on the deployment host before assuming CI auto-deploys.
 
 ## Architecture: things that aren't obvious from the file tree
 
@@ -102,6 +112,7 @@ These are long-running asyncio tasks held on `app._*_task`. They must start and 
 | `pending_order_poller` | `services/matching_engine.py` | 1.5 s | Fires LIMIT/SL-M when trigger hits |
 | `risk_enforcer_loop` | `services/risk_enforcer.py` | 1 s | Margin-call / stop-out / ledger breach → notify or auto-squareoff |
 | `expiry_cleanup_loop` | `services/expiry_cleanup.py` | 1 h | Drops day-after-expiry instruments from watchlists, Zerodha ticker, Instrument collection |
+| `pnl_sharing_scheduler` | `services/pnl_sharing_service.py` | 5 min | Auto-settles ACTIVE+AUTO P&L sharing agreements at period close (DAILY/WEEKLY/MONTHLY); MANUAL agreements unaffected |
 | Zerodha boot | inline `_zerodha_boot` | once | Cache-warm NSE/NFO/MCX + connect WS pool |
 | Infoway start | inline | once | Forex/crypto/metals/energy feed; off unless `INFOWAY_API_KEY` set and `INFOWAY_AUTO_CONNECT=true` |
 
@@ -117,6 +128,11 @@ User JWT and admin JWT are **separate audiences** with separate login endpoints 
 ### WebSocket fanout
 
 Multiple FastAPI instances stay in sync via Redis pub/sub channels: `user:{id}`, `market:tick`, `admin:events`. If you add a new realtime event, publish through Redis — don't broadcast direct from one instance.
+
+Known `admin:events` event types (consumed by [frontend-admin/components/common/AdminWsBridge.tsx](frontend-admin/components/common/AdminWsBridge.tsx)):
+
+- `position_update` / `order_update` / `wallet_update` / `deposit_update` / `withdrawal_update` / `kyc_update` — existing events; each invalidates the matching admin React Query keys.
+- `pnl_sharing_update` — published from the matching-engine close path when a closed Position has a user whose broker has an active sharing agreement. Bridge invalidates `["pnl-sharing"]` query keys so the SharingCard refetches live.
 
 ### Frontend axios + React Query patterns
 

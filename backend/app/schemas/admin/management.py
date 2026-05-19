@@ -49,6 +49,10 @@ class MarkPaidRequest(BaseModel):
     notes: str | None = None
 
 
+class ResetPasswordRequest(BaseModel):
+    new_password: str = Field(min_length=8, max_length=128)
+
+
 class SubAdminDTO(BaseModel):
     id: str
     user_code: str

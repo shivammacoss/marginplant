@@ -142,6 +142,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     setattr(app, "_intraday_to_carry_task", rollover_task)
     setattr(app, "_expiry_cleanup_task", expiry_task)
 
+    # P&L sharing auto-settle scheduler: every 5 min, scan ACTIVE+AUTO agreements
+    # and settle the most recently closed period. Idempotent via unique
+    # (agreement_id, period_start) index — duplicate fires are no-ops.
+    from app.services.pnl_sharing_service import pnl_sharing_scheduler_loop
+    pnl_sharing_task: _asyncio.Task = _asyncio.create_task(
+        pnl_sharing_scheduler_loop(interval_sec=300.0)
+    )
+    setattr(app, "_pnl_sharing_scheduler_task", pnl_sharing_task)
+
     # Infoway (forex + crypto + metals + energy) — auto-start if API key +
     # auto-connect both set.
     if settings.INFOWAY_AUTO_CONNECT and settings.INFOWAY_API_KEY.get_secret_value():
@@ -262,6 +271,20 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             itask.cancel()
             try:
                 await itask
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Stop P&L sharing scheduler cleanly
+    try:
+        from app.services.pnl_sharing_service import stop_pnl_sharing_scheduler
+        stop_pnl_sharing_scheduler()
+        ptask = getattr(app, "_pnl_sharing_scheduler_task", None)
+        if ptask is not None:
+            ptask.cancel()
+            try:
+                await ptask
             except Exception:
                 pass
     except Exception:
