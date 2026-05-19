@@ -19,6 +19,7 @@ import {
   Users,
   Crown,
   Wallet,
+  Handshake,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { canSee, isSuperAdmin, type PermissionKey } from "@/lib/permissions";
@@ -98,6 +99,7 @@ const groups: { title: string; items: NavItem[] }[] = [
       // super-admin because super-admin manages admins, not brokers (admins
       // create brokers).
       { href: "/management/brokers", label: "Brokers", icon: Crown, perm: "brokers", brokerPerm: "sub_brokers", brokerLabel: "Sub-brokers", hideForSuperAdmin: true },
+      { href: "/management/pnl-sharing", label: "P&L Sharing", icon: Handshake },
     ],
   },
   {
