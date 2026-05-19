@@ -1,6 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
+import { AlertCircle } from "lucide-react";
 import { PositionAPI, WalletAPI } from "@/lib/api";
 import { cn, formatINR, pnlColor } from "@/lib/utils";
 
@@ -101,6 +102,23 @@ export function WalletStrip({
         value={`${openUnrl >= 0 ? "+" : ""}${formatINR(openUnrl)}`}
         valueClass={pnlColor(openUnrl)}
       />
+      {Number(wallet?.settlement_outstanding ?? 0) > 0 && (
+        <>
+          <Sep />
+          <div className="flex items-center gap-2 text-red-500" role="alert">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <div className="flex flex-col">
+              <span className="text-[10px] uppercase tracking-wider opacity-80">Outstanding</span>
+              <span className="font-tabular text-xs font-semibold">
+                ₹{Number(wallet.settlement_outstanding).toLocaleString("en-IN", {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}
+              </span>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

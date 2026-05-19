@@ -32,7 +32,7 @@ import {
 } from "@/components/ui/dialog";
 import { PageHeader } from "@/components/common/PageHeader";
 import { StatusPill } from "@/components/common/StatusPill";
-import { formatINR } from "@/lib/utils";
+import { cn, formatINR } from "@/lib/utils";
 
 export default function UserDetailPage() {
   const params = useParams<{ id: string }>();
@@ -223,6 +223,13 @@ export default function UserDetailPage() {
               <Stat label="Realized P&L" value={formatINR(u.wallet?.realized_pnl)} />
               <Stat label="Deposits" value={formatINR(u.wallet?.total_deposits)} />
               <Stat label="Withdrawals" value={formatINR(u.wallet?.total_withdrawals)} />
+              {Number(u.wallet?.settlement_outstanding ?? 0) > 0 && (
+                <Stat
+                  label="Outstanding"
+                  value={formatINR(u.wallet?.settlement_outstanding)}
+                  highlighted
+                />
+              )}
             </div>
             <div className="space-y-2 border-t border-border pt-3">
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Manual adjust</Label>
@@ -347,11 +354,16 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value, highlighted }: { label: string; value: string; highlighted?: boolean }) {
   return (
-    <div className="rounded-md border border-border bg-muted/30 p-2">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
-      <div className="font-tabular text-sm">{value}</div>
+    <div className={cn(
+      "rounded-md border p-2",
+      highlighted
+        ? "border-red-500/50 bg-red-500/10"
+        : "border-border bg-muted/30"
+    )}>
+      <div className={cn("text-[10px] uppercase tracking-wider", highlighted ? "text-red-600" : "text-muted-foreground")}>{label}</div>
+      <div className={cn("font-tabular text-sm", highlighted && "text-red-700")}>{value}</div>
     </div>
   );
 }
