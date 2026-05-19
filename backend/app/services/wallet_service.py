@@ -116,6 +116,30 @@ async def adjust(
     w = await get_or_create(user_id)
     before = to_decimal(w.available_balance)
     after = add(before, amt)
+
+    # Cache the original requested amount BEFORE recovery mutation, so
+    # total_deposits reflects the user's actual deposit (not the post-
+    # recovery remainder).
+    original_amt = amt
+
+    # ── Settlement-outstanding recovery (DEPOSIT only) ────────────────
+    # When the user has accrued settlement_outstanding (from a previous
+    # stop-out shortfall) and is making a DEPOSIT, deduct the outstanding
+    # FIRST out of the deposit, then credit the remainder to balance.
+    # A separate SETTLEMENT_OUTSTANDING_RECOVERY transaction is written
+    # below (after the primary DEPOSIT txn) for auditability.
+    recovery_amount = Decimal("0")
+    if (
+        transaction_type == TransactionType.DEPOSIT
+        and amt > ZERO
+        and to_decimal(w.settlement_outstanding) > ZERO
+    ):
+        outstanding = to_decimal(w.settlement_outstanding)
+        recovery_amount = min(outstanding, amt)
+        w.settlement_outstanding = to_decimal128(outstanding - recovery_amount)
+        amt = amt - recovery_amount
+        after = add(before, amt)
+
     if amt < ZERO and after < ZERO:
         # Allow if credit_limit covers shortfall
         if add(after, w.credit_limit) < ZERO:
@@ -127,7 +151,9 @@ async def adjust(
     w.version += 1
 
     if transaction_type == TransactionType.DEPOSIT:
-        w.total_deposits = to_decimal128(add(w.total_deposits, amt))
+        # Use original_amt — total_deposits reflects what the user paid in,
+        # independent of how much was routed to outstanding recovery.
+        w.total_deposits = to_decimal128(add(w.total_deposits, original_amt))
     elif transaction_type == TransactionType.WITHDRAWAL:
         w.total_withdrawals = to_decimal128(add(w.total_withdrawals, abs(amt)))
     elif transaction_type == TransactionType.BROKERAGE:
@@ -150,6 +176,27 @@ async def adjust(
         created_by=PydanticObjectId(actor_id) if actor_id else None,
     )
     await txn.insert()
+
+    # Audit trail for the settlement-outstanding portion of the deposit.
+    # Recorded as a separate ledger entry so the user/admin can see the
+    # full deposit amount AND the portion routed to outstanding recovery,
+    # without commingling the two on a single row. balance_before equals
+    # balance_after because outstanding recovery does NOT touch the
+    # available_balance — it only reduces the settlement_outstanding field.
+    if recovery_amount > ZERO:
+        recovery_txn = WalletTransaction(
+            user_id=PydanticObjectId(user_id),
+            transaction_type=TransactionType.SETTLEMENT_OUTSTANDING_RECOVERY,
+            amount=Decimal128(str(-recovery_amount)),
+            balance_before=Decimal128(str(before)),
+            balance_after=Decimal128(str(before)),
+            reference_type=reference_type,
+            reference_id=reference_id,
+            narration=f"Settlement outstanding recovered from deposit (₹{recovery_amount})",
+            status=TransactionStatus.COMPLETED,
+            created_by=PydanticObjectId(actor_id) if actor_id else None,
+        )
+        await recovery_txn.insert()
 
     # Fire-and-forget WS push so the user's APK/web wallet reflects the
     # credit/debit immediately. NOT awaited — admin's approve-deposit
