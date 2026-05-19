@@ -183,6 +183,16 @@ class User(TimestampMixin):
 
     created_by: PydanticObjectId | None = None
 
+    # Pool transfer telemetry — stamped every time a super-admin /
+    # admin / broker moves this user into a new pool via the admin
+    # `Transfer User` action. Lets the destination dashboard render a
+    # "Transferred" badge so the new owner can spot users that landed
+    # in their pool through reassignment vs. ones they personally
+    # created. NULL on freshly-created users (the originating admin
+    # is `created_by`).
+    last_transferred_at: datetime | None = None
+    last_transferred_by: PydanticObjectId | None = None
+
     # Sub-admin ownership (CLIENT/DEALER/MASTER → which ADMIN owns them).
     # NULL ⇒ owned by super-admin (the platform itself).
     assigned_admin_id: PydanticObjectId | None = None

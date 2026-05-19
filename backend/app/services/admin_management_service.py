@@ -251,6 +251,13 @@ async def reassign_user(
 
     old = str(target.assigned_admin_id) if target.assigned_admin_id else None
     target.assigned_admin_id = new_oid
+    # Stamp transfer telemetry so the destination dashboard can render
+    # a "Transferred" badge and the audit trail of last-owner-change is
+    # readable without joining audit_logs.
+    from app.utils.time_utils import now_utc as _now_utc
+
+    target.last_transferred_at = _now_utc()
+    target.last_transferred_by = actor_id
     await target.save()
     await log_event(
         action=AuditAction.USER_REASSIGN,

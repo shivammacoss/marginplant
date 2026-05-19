@@ -499,6 +499,12 @@ async def reassign_user_to_broker(
         target.assigned_broker_id = new_broker.id
         target.broker_ancestry = list(new_broker.broker_ancestry or []) + [new_broker.id]
 
+    # Stamp transfer telemetry — mirrors admin_management_service.reassign_user
+    # so the "Transferred" badge fires for broker hops too.
+    from app.utils.time_utils import now_utc as _now_utc
+
+    target.last_transferred_at = _now_utc()
+    target.last_transferred_by = actor.id
     await target.save()
     await log_event(
         action=AuditAction.USER_REASSIGN_TO_BROKER,

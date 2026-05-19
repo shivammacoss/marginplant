@@ -50,6 +50,14 @@ def _ser(u: User) -> dict:
         # "Broker: <name>" / "Admin: <name>" based on these.
         "assigned_admin_id": str(u.assigned_admin_id) if u.assigned_admin_id else None,
         "assigned_broker_id": str(u.assigned_broker_id) if u.assigned_broker_id else None,
+        # Transfer telemetry — non-null means this user landed in the
+        # current owner's pool via a `Transfer User` reassignment (vs.
+        # being originally created by them). Drives the "Transferred"
+        # chip on every user-list row.
+        "last_transferred_at": u.last_transferred_at,
+        "last_transferred_by": (
+            str(u.last_transferred_by) if u.last_transferred_by else None
+        ),
     }
 
 
