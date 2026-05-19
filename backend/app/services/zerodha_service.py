@@ -1743,7 +1743,13 @@ class ZerodhaService:
         s.wsStatus = status
         if error is not None:
             s.wsLastError = error
-        if status == WsStatus.CONNECTED:
+        # Clear the stale error whenever we step into CONNECTING or
+        # CONNECTED. Previously a failed-retries error message (red banner
+        # on the admin page) stuck around even after the next retry was
+        # in progress, making it look like nothing was happening. The
+        # self-heal loop retries every 30 s — admin should see "CONNECTING"
+        # without the obsolete error from the prior cycle.
+        if status in (WsStatus.CONNECTED, WsStatus.CONNECTING):
             s.wsLastError = None
         await s.save()
 
