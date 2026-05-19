@@ -35,27 +35,31 @@ async def market_ws(ws: WebSocket) -> None:
     pump_task: asyncio.Task | None = None
     listener_task: asyncio.Task | None = None
 
-    # Direct Redis pub/sub forward — gives the client every tick the moment
-    # zerodha_service / infoway_service publishes it. Previously this
-    # endpoint only ran a 250 ms polling pump (`get_quote()` for every
-    # subscribed token), which capped delivery at 4 fps and made the APK's
-    # P/L visibly trail the web terminal (which already consumes pub/sub
-    # directly). Subscribing per-token to both feeds means each individual
-    # tick arrives in ~10 ms instead of waiting for the next pump cycle.
+    # ── Realtime forward via Redis pub/sub ─────────────────────────────
+    # Previous design (per-token subscribe + listen race): calling
+    # `ps.subscribe()` from the receive coroutine while another coroutine
+    # was blocked inside `ps.listen()` deadlocked on redis-py asyncio's
+    # internal connection lock, dropping forward throughput to ~0.1 tick/sec
+    # while the feed itself was publishing 100+/sec (verified end-to-end
+    # 19-May with BTCUSDT psubscribe rate at 70/sec, the WS test client
+    # received 1 tick in 8s on the same token).
+    #
+    # New design: psubscribe to the TWO wildcard patterns once, before
+    # the listener starts (so the listen-loop has live subscriptions on
+    # the very first iteration), then filter incoming messages against
+    # the per-client `subscribed` set. No subscribe/unsubscribe call
+    # ever happens after the listener begins, so the race is gone. Cost:
+    # the listener parses every published tick across the platform, but
+    # the filter is an O(1) set lookup on a parsed JSON dict so even
+    # with 100+ ticks/sec it's negligible per-connection.
     ps = pubsub()
-
-    def _channels_for(tok: str) -> list[str]:
-        # Don't know upfront whether a token is Zerodha (numeric) or
-        # Infoway (e.g. "BTCUSDT"). Subscribe to BOTH channel patterns;
-        # whichever feed actually owns this token will be the only one
-        # that ever publishes — cheap.
-        return [f"market:tick:{tok}", f"infoway:tick:{tok}"]
+    await ps.psubscribe("market:tick:*", "infoway:tick:*")
 
     async def listener():
         """Forwards every pub/sub tick to the client WS in real time."""
         try:
             async for msg in ps.listen():
-                if msg.get("type") not in ("message", "pmessage"):
+                if msg.get("type") not in ("pmessage", "message"):
                     continue
                 raw = msg.get("data")
                 if isinstance(raw, bytes):
@@ -72,9 +76,14 @@ async def market_ws(ws: WebSocket) -> None:
                 # Normalise — APK expects `token` as a string. Infoway
                 # publishes with `symbol`; copy it across so the client's
                 # `toTick` mapper finds the field it expects.
-                tok = parsed.get("token") or parsed.get("symbol")
-                if tok is not None:
-                    parsed["token"] = str(tok)
+                tok_raw = parsed.get("token") or parsed.get("symbol")
+                if tok_raw is None:
+                    continue
+                tok = str(tok_raw)
+                # Filter — only forward if this client cares about it.
+                if tok not in subscribed:
+                    continue
+                parsed["token"] = tok
                 try:
                     await ws.send_text(
                         json.dumps({"type": "tick", "payload": [parsed]}, default=str)
@@ -87,11 +96,11 @@ async def market_ws(ws: WebSocket) -> None:
             logger.exception("market_ws_listener_failed")
 
     async def pump():
-        # Reduced from 250 ms → 5 s heartbeat snapshot. The pub/sub
-        # listener above carries the realtime path; this just guarantees
-        # eventual consistency if a publish ever gets dropped (Redis
-        # reconnect, pool exhaustion, etc.) — the client's stored LTP
-        # never drifts more than 5 s from reality even in worst case.
+        # 5 s heartbeat snapshot. The pub/sub listener above carries the
+        # realtime path; this just guarantees eventual consistency if a
+        # publish ever gets dropped (Redis reconnect, pool exhaustion,
+        # etc.) — the client's stored LTP never drifts more than 5 s
+        # from reality even in worst case.
         try:
             while True:
                 await asyncio.sleep(5)
@@ -128,26 +137,14 @@ async def market_ws(ws: WebSocket) -> None:
             t = msg.get("type")
             if t == "subscribe":
                 tokens = [str(x) for x in (msg.get("tokens") or []) if x]
-                new_tokens = [tok for tok in tokens if tok not in subscribed]
-                subscribed.update(new_tokens)
+                subscribed.update(tokens)
                 market_data_service.subscribe(tokens)
-                # Wire up the pub/sub listener for the new tokens.
-                if new_tokens:
-                    channels: list[str] = []
-                    for tok in new_tokens:
-                        channels.extend(_channels_for(tok))
-                    try:
-                        await ps.subscribe(*channels)
-                    except Exception:  # pragma: no cover
-                        logger.warning(
-                            "market_ws_pubsub_subscribe_failed",
-                            extra={"count": len(channels)},
-                        )
                 # Initial snapshots — parallel fetch so a freshly-typed
                 # search ("G" → 80 results) doesn't block the client for
                 # the sum of every quote's overlay latency. Failed quotes
                 # are silently dropped so one slow Zerodha REST call can't
-                # delay the whole batch.
+                # delay the whole batch. After this, the psubscribe
+                # listener above streams every subsequent tick in realtime.
                 if tokens:
                     results = await asyncio.gather(
                         *(market_data_service.get_quote(tok) for tok in tokens),
@@ -159,17 +156,10 @@ async def market_ws(ws: WebSocket) -> None:
                 await ws.send_text(json.dumps({"type": "snapshot", "payload": snaps}, default=str))
             elif t == "unsubscribe":
                 tokens = [str(x) for x in (msg.get("tokens") or []) if x]
-                drop = [tok for tok in tokens if tok in subscribed]
-                subscribed.difference_update(drop)
+                subscribed.difference_update(tokens)
                 market_data_service.unsubscribe(tokens)
-                if drop:
-                    channels = []
-                    for tok in drop:
-                        channels.extend(_channels_for(tok))
-                    try:
-                        await ps.unsubscribe(*channels)
-                    except Exception:  # pragma: no cover
-                        pass
+                # No pubsub unsubscribe needed — the filter in the
+                # listener simply stops matching dropped tokens.
             elif t == "ping":
                 await ws.send_text(json.dumps({"type": "pong"}))
             else:
@@ -183,11 +173,7 @@ async def market_ws(ws: WebSocket) -> None:
         if pump_task is not None:
             pump_task.cancel()
         try:
-            if subscribed:
-                channels = []
-                for tok in subscribed:
-                    channels.extend(_channels_for(tok))
-                await ps.unsubscribe(*channels)
+            await ps.punsubscribe("market:tick:*", "infoway:tick:*")
             await ps.close()
         except Exception:  # pragma: no cover
             pass
