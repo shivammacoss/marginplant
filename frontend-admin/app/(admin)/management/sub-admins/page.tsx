@@ -83,8 +83,12 @@ export default function SubAdminsPage() {
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<any | null>(null);
   const [loginAsId, setLoginAsId] = useState<string | null>(null);
-  const [resetPwTargetId, setResetPwTargetId] = useState<string | null>(null);
+  const [resetPwTarget, setResetPwTarget] = useState<{ id: string; label: string } | null>(null);
   const [newPw, setNewPw] = useState("");
+  // Eye-toggle for the reset-password dialog input, matching the
+  // create-sub-admin form's password field UX so super-admins get a
+  // consistent experience across both flows.
+  const [showNewPw, setShowNewPw] = useState(false);
   const [createBrokerForAdmin, setCreateBrokerForAdmin] = useState<{id: string; name: string} | null>(null);
 
   // Same-origin localStorage means we can't keep both super-admin and sub-admin
@@ -169,8 +173,9 @@ export default function SubAdminsPage() {
       ManagementAPI.resetSubAdminPassword(id, pw),
     onSuccess: () => {
       toast.success("Password reset");
-      setResetPwTargetId(null);
+      setResetPwTarget(null);
       setNewPw("");
+      setShowNewPw(false);
     },
     onError: (e: any) =>
       toast.error(e?.response?.data?.detail ?? e?.message ?? "Reset failed"),
@@ -272,7 +277,14 @@ export default function SubAdminsPage() {
                   Unblock
                 </DropdownMenuItem>
               )}
-              <DropdownMenuItem onSelect={() => setResetPwTargetId(r.id)}>
+              <DropdownMenuItem
+                onSelect={() =>
+                  setResetPwTarget({
+                    id: r.id,
+                    label: r.full_name || r.user_code || "admin",
+                  })
+                }
+              >
                 <KeyRound className="size-4" />
                 Reset Password
               </DropdownMenuItem>
@@ -339,33 +351,57 @@ export default function SubAdminsPage() {
       )}
 
       <Dialog
-        open={!!resetPwTargetId}
+        open={!!resetPwTarget}
         onOpenChange={(o) => {
           if (!o) {
-            setResetPwTargetId(null);
+            setResetPwTarget(null);
             setNewPw("");
+            setShowNewPw(false);
           }
         }}
       >
-        <DialogContent>
+        <DialogContent className="max-w-sm">
           <DialogHeader>
-            <DialogTitle>Reset Password</DialogTitle>
+            <DialogTitle>Reset password</DialogTitle>
           </DialogHeader>
-          <div className="space-y-3">
-            <Label>New password (min 8 chars)</Label>
-            <Input
-              type="password"
-              value={newPw}
-              onChange={(e) => setNewPw(e.target.value)}
-              autoFocus
-            />
-          </div>
+          {resetPwTarget && (
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                You're resetting the password for{" "}
+                <span className="font-semibold text-foreground">
+                  {resetPwTarget.label}
+                </span>
+                . They'll be able to sign in immediately with the new value.
+              </p>
+              <div className="space-y-1.5">
+                <Label>New password (min 8 chars)</Label>
+                <div className="relative">
+                  <Input
+                    type={showNewPw ? "text" : "password"}
+                    value={newPw}
+                    onChange={(e) => setNewPw(e.target.value)}
+                    autoFocus
+                    className="pr-9"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPw((v) => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    aria-label={showNewPw ? "Hide password" : "Show password"}
+                  >
+                    {showNewPw ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
           <DialogFooter>
             <Button
               variant="outline"
               onClick={() => {
-                setResetPwTargetId(null);
+                setResetPwTarget(null);
                 setNewPw("");
+                setShowNewPw(false);
               }}
             >
               Cancel
@@ -376,13 +412,13 @@ export default function SubAdminsPage() {
                   toast.error("Password must be at least 8 characters");
                   return;
                 }
-                if (resetPwTargetId) {
-                  resetPwMut.mutate({ id: resetPwTargetId, pw: newPw });
+                if (resetPwTarget) {
+                  resetPwMut.mutate({ id: resetPwTarget.id, pw: newPw });
                 }
               }}
               disabled={resetPwMut.isPending}
             >
-              {resetPwMut.isPending ? "Resetting..." : "Reset"}
+              {resetPwMut.isPending ? "Resetting…" : "Reset password"}
             </Button>
           </DialogFooter>
         </DialogContent>

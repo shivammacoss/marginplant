@@ -39,6 +39,7 @@ from app.schemas.admin.brokers import (
     UpdateBrokerPnlShareRequest,
     UpdateBrokerRequest,
 )
+from app.schemas.admin.management import ResetPasswordRequest
 from app.schemas.common import APIResponse
 from app.services import broker_management_service as svc
 from app.services import broker_settlement_service as stl
@@ -253,6 +254,24 @@ async def block_broker(broker_id: str, actor: CurrentAdmin):
 async def unblock_broker(broker_id: str, actor: CurrentAdmin):
     b = await svc.unblock_broker(actor, broker_id)
     return APIResponse(data=await _ser_broker(b))
+
+
+@router.post(
+    "/brokers/{broker_id}/reset-password",
+    response_model=APIResponse[dict],
+)
+async def reset_broker_password(
+    broker_id: str, body: ResetPasswordRequest, actor: CurrentAdmin
+):
+    """Reset a broker / sub-broker password to a value the actor
+    chooses. Scope (super-admin → any broker, admin → their brokers,
+    broker → their sub-brokers) is enforced inside the service via
+    `assert_broker_in_scope`. Mirrors the sub-admin reset endpoint at
+    `/management/sub-admins/{id}/reset-password` so the admin UI's
+    three-dot menu can expose the same flow for every tier.
+    """
+    b = await svc.reset_broker_password(actor, broker_id, body.new_password)
+    return APIResponse(data={"reset": str(b.id)})
 
 
 @router.get("/brokers/{broker_id}/users", response_model=APIResponse[dict])

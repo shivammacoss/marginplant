@@ -376,6 +376,10 @@ export const BrokerMgmtAPI = {
     unwrap<any>(api.put(`/admin/management/brokers/${id}/pnl-share`, { pct })),
   block: (id: string) => unwrap<any>(api.post(`/admin/management/brokers/${id}/block`)),
   unblock: (id: string) => unwrap<any>(api.post(`/admin/management/brokers/${id}/unblock`)),
+  resetPassword: (id: string, new_password: string) =>
+    unwrap<any>(
+      api.post(`/admin/management/brokers/${id}/reset-password`, { new_password }),
+    ),
 
   // Subtree clients (every CLIENT/DEALER/MASTER under this broker)
   listSubtreeUsers: (id: string, params?: { page?: number; page_size?: number }) =>
