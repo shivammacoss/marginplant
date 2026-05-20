@@ -113,6 +113,11 @@ async def _wipe_eff_cache_debounced() -> None:
         # prefix; same wipe semantics so an admin edit shows up on the
         # next chain poll instead of waiting 30 s for the cache to expire.
         await cache_delete_pattern("strike_far:*")
+        # Per-user blocked-symbols cache — admin toggling a script's
+        # isActive must hide that symbol from every user's search /
+        # option-chain / watchlist on the next request, not 30 s
+        # later.
+        await cache_delete_pattern("blocked_syms:*")
         # Drop the inactive-rows cache too — admin toggling `isActive` on
         # a row must hide/unhide that segment on the user side immediately
         # (this is one key, not a pattern, but `cache_delete_pattern`
@@ -1106,6 +1111,154 @@ async def get_sub_admin_segment_override(
         SubAdminSegmentOverride.sub_admin_id == PydanticObjectId(sub_admin_id),
         SubAdminSegmentOverride.segment_name == segment_name,
     )
+
+
+# ── Hide-blocked-from-user resolver ──────────────────────────────
+#
+# Returns a structured view of which symbols/patterns the user
+# shouldn't see in search / option chain / watchlist results because
+# an admin has flipped `isActive` or `tradingEnabled` to False on a
+# script-level OR user-specific per-symbol override.
+#
+# We DON'T filter on segment-level isActive here — that's handled
+# elsewhere via `cache_inactive_admin_rows()` so the side-panel
+# Browse chips show nothing from a fully-shut segment. This helper
+# focuses on per-symbol blocks specifically.
+#
+# Returned shape:
+#   {
+#     "symbols": {"SBIN", "RELIANCE"},           # exact-match block set
+#     "patterns": [("NIFTY", "FUT"), ("NIFTY", "CE")],  # base + suffix
+#   }
+#
+# Caller checks each candidate instrument:
+#   symbol in symbols → block
+#   OR any pattern (base, suffix) matches via _instrument_matches_pattern
+_BLOCKED_USER_CACHE_TTL = 30  # seconds
+
+
+def _is_blocked_row(row: Any) -> bool:
+    """A row blocks the symbol when EITHER `isActive` is explicitly
+    False OR `tradingEnabled` is explicitly False. NULL stays inherit-
+    able (not a block)."""
+    ia = getattr(row, "isActive", None)
+    te = getattr(row, "tradingEnabled", None)
+    return ia is False or te is False
+
+
+async def get_user_blocked_symbols(
+    user_id: str | PydanticObjectId,
+) -> dict[str, Any]:
+    """Compute the set of (symbol, pattern) entries that should be hidden
+    from a user's browse / search / option-chain results.
+
+    Layers consulted (any block at any layer hides the symbol):
+      - NettingScriptOverride at platform scope (super-admin authored)
+      - NettingScriptOverride at the user's admin scope
+      - NettingScriptOverride at the user's broker scope (immediate
+        broker from broker_ancestry)
+      - UserSegmentOverride for THIS user where symbol is non-null
+
+    Cached in Redis under `blocked_syms:<user_id>` for 30 s. The
+    `_wipe_eff_cache_debounced()` call already runs whenever a
+    script/user override is saved or deleted, so admin edits land
+    within one cache cycle.
+    """
+    cache_key = f"blocked_syms:{user_id}"
+    try:
+        cached = await cache_get(cache_key)
+        if cached is not None:
+            return cached
+    except Exception:
+        pass
+
+    user_doc = await User.get(PydanticObjectId(user_id))
+    if user_doc is None:
+        return {"symbols": [], "patterns": []}
+
+    user_admin_id = user_doc.assigned_admin_id
+    broker_anc = user_doc.broker_ancestry or []
+    user_broker_id = broker_anc[-1] if broker_anc else None
+
+    # Build the script-override filter — match platform OR the user's
+    # tier(s) only, so a broker B1's block on SBIN doesn't leak to
+    # admin A2's pool through this cache.
+    or_conditions: list[dict[str, Any]] = [
+        {"scope_admin_id": None, "scope_broker_id": None},  # platform
+    ]
+    if user_admin_id is not None:
+        or_conditions.append(
+            {"scope_admin_id": user_admin_id, "scope_broker_id": None}
+        )
+    if user_broker_id is not None:
+        or_conditions.append(
+            {"scope_admin_id": None, "scope_broker_id": user_broker_id}
+        )
+
+    script_rows_coll = NettingScriptOverride.get_motor_collection()
+    raw_script_rows = await script_rows_coll.find(
+        {"$or": or_conditions}
+    ).to_list(length=None)
+    script_rows = [NettingScriptOverride.model_validate(r) for r in raw_script_rows]
+
+    # User-specific per-symbol overrides take precedence over everything.
+    user_rows = await UserSegmentOverride.find(
+        UserSegmentOverride.user_id == PydanticObjectId(str(user_id)),
+    ).to_list()
+
+    symbols: set[str] = set()
+    patterns: list[tuple[str, str]] = []
+
+    def _ingest(sym_raw: str | None) -> None:
+        if not sym_raw:
+            return
+        sym = sym_raw.strip().upper()
+        split = _split_pattern(sym)
+        if split is not None:
+            patterns.append(split)
+        else:
+            symbols.add(sym)
+
+    for r in script_rows:
+        if _is_blocked_row(r):
+            _ingest(r.symbol)
+    for r in user_rows:
+        if _is_blocked_row(r) and r.symbol:
+            _ingest(r.symbol)
+
+    payload: dict[str, Any] = {
+        "symbols": sorted(symbols),
+        "patterns": [list(p) for p in patterns],
+    }
+    try:
+        await cache_set(cache_key, payload, ttl_sec=_BLOCKED_USER_CACHE_TTL)
+    except Exception:
+        pass
+    return payload
+
+
+def is_symbol_blocked_for(
+    instrument_symbol: str, blocked: dict[str, Any]
+) -> bool:
+    """Cheap O(P) check against the result of `get_user_blocked_symbols`.
+    P = number of pattern entries (typically < 10). Use this on every
+    candidate row in search / option-chain / watchlist endpoints.
+    """
+    if not instrument_symbol:
+        return False
+    sym = instrument_symbol.strip().upper()
+    symbols_set = blocked.get("symbols") or []
+    if isinstance(symbols_set, list):
+        symbols_set = set(symbols_set)
+    if sym in symbols_set:
+        return True
+    for entry in blocked.get("patterns") or []:
+        if not entry or len(entry) != 2:
+            continue
+        base, suffix = entry[0], entry[1]
+        if _instrument_matches_pattern(sym, base, suffix):
+            return True
+    return False
 
 
 async def upsert_sub_admin_segment_override(

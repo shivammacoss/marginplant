@@ -176,8 +176,10 @@ async def search(
     from app.services.zerodha_service import zerodha as _zerodha
     from app.services.netting_service import (
         _SEGMENT_NAME_MAP,
+        get_user_blocked_symbols,
         inactive_admin_rows,
         inactive_instrument_segments,
+        is_symbol_blocked_for,
     )
 
     # Admin-side "Block → isActive = No" → segment is hidden from user
@@ -187,6 +189,12 @@ async def search(
     # search (super-admin / global only would miss sub-admin overrides).
     inactive_admin = await inactive_admin_rows(user_id=user.id)
     inactive_segs = await inactive_instrument_segments(user_id=user.id)
+    # Per-symbol blocks (script-level + user-specific). Hides exact
+    # symbols (e.g. SBIN) plus pattern hits (NIFTYFUT, NIFTYCE) so
+    # the user's search never returns instruments their admin has
+    # disabled for them. User-flagged: "agar koi script block hai
+    # to user ke search me dikhe hi mat".
+    blocked = await get_user_blocked_symbols(user.id)
 
     def _kite_row_admin_row(row: dict) -> str | None:
         ex = (row.get("exchange") or "").upper()
@@ -225,6 +233,12 @@ async def search(
         try:
             fast_results = await _zerodha.search_instruments_fast(q, exchange=exchange, limit=limit)
             fast_results = [r for r in (fast_results or []) if _kite_row_active(r)]
+            # Drop rows whose symbol is blocked by an admin / broker /
+            # user-level override for this caller.
+            fast_results = [
+                r for r in fast_results
+                if not is_symbol_blocked_for(r.get("symbol") or "", blocked)
+            ]
             if fast_results:
                 return APIResponse(data=[_kite_row_to_payload(r) for r in fast_results])
         except Exception:
@@ -256,6 +270,11 @@ async def search(
                             continue
                     # Hide instruments whose admin row is currently isActive=false.
                     if not _kite_row_active(inst):
+                        continue
+                    # Per-symbol block check — drops script-level and
+                    # user-specific blocked rows before they reach the
+                    # search results.
+                    if is_symbol_blocked_for(inst.get("symbol") or "", blocked):
                         continue
                     if q_upper:
                         sym = (inst.get("symbol") or "").upper()
@@ -296,6 +315,11 @@ async def search(
     # Done post-fetch (after `limit`) so the filter is cheap; if it ever
     # noticeably trims a 100-row page we can push it into the Mongo query.
     results = [i for i in results if _mongo_inst_active(i)]
+    # And drop per-symbol blocks (script + user overrides) the same way.
+    results = [
+        i for i in results
+        if not is_symbol_blocked_for(getattr(i, "symbol", "") or "", blocked)
+    ]
     return APIResponse(data=[_serialize(i) for i in results])
 
 

@@ -144,7 +144,11 @@ async def option_chain(
     und_key = _norm_underlying(underlying)
 
     # ── Response cache hit? Bail out fast (matches the picker's 2 s poll). ──
-    cache_key = f"{und_key}|{(expiry or '').strip()}"
+    # Cache key includes user.id so each user's per-symbol block set
+    # produces a distinct cached payload — otherwise a row blocked
+    # for user A could be served from cache to user B who has access
+    # to it.
+    cache_key = f"{user.id}|{und_key}|{(expiry or '').strip()}"
     now_t = time.time()
     cached_resp = _CHAIN_CACHE.get(cache_key)
     if cached_resp and (now_t - cached_resp[1]) < _CHAIN_TTL:
@@ -389,10 +393,39 @@ async def option_chain(
             "source": source,
         }
 
-    enriched_rows = [
-        {"strike": r["strike"], "ce": enrich(r["ce"]), "pe": enrich(r["pe"])}
-        for r in rows
-    ]
+    # Per-symbol block — drop strikes whose CE / PE symbol is blocked
+    # for this user by an admin / broker / user-level override. If
+    # both legs are blocked the strike row disappears entirely; if
+    # only one side is blocked it's nulled so the chain still shows
+    # the remaining leg.
+    from app.services.netting_service import (
+        get_user_blocked_symbols,
+        is_symbol_blocked_for,
+    )
+
+    blocked = await get_user_blocked_symbols(user.id)
+
+    def _filter_leg(leg: dict[str, Any] | None) -> dict[str, Any] | None:
+        if leg is None:
+            return None
+        sym = leg.get("symbol") or ""
+        if is_symbol_blocked_for(sym, blocked):
+            return None
+        return leg
+
+    enriched_rows = []
+    for r in rows:
+        ce_leg = _filter_leg(r["ce"])
+        pe_leg = _filter_leg(r["pe"])
+        if ce_leg is None and pe_leg is None:
+            continue
+        enriched_rows.append(
+            {
+                "strike": r["strike"],
+                "ce": enrich(ce_leg),
+                "pe": enrich(pe_leg),
+            }
+        )
 
     # ATM: strike where |CE LTP - PE LTP| is smallest
     atm_strike = None

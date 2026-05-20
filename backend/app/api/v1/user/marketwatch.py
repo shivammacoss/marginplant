@@ -417,6 +417,20 @@ async def quotes(watchlist_id: str, user: CurrentUser):
     if wl is None or wl.user_id != user.id:
         raise HTTPException(status_code=404, detail="Watchlist not found")
     items = await WatchlistItem.find(WatchlistItem.watchlist_id == wl.id).to_list()
+
+    # Per-symbol block — hide watchlist rows whose symbol has been
+    # disabled for this user by an admin / broker / user-level
+    # override. Matches the same filter applied on search + option
+    # chain so a blocked symbol disappears from EVERY browse surface,
+    # not just one.
+    from app.services.netting_service import (
+        get_user_blocked_symbols,
+        is_symbol_blocked_for,
+    )
+
+    blocked = await get_user_blocked_symbols(user.id)
+    items = [it for it in items if not is_symbol_blocked_for(it.symbol or "", blocked)]
+
     quotes = await market_data_service.get_quotes([it.instrument_token for it in items])
     return APIResponse(
         data=[
