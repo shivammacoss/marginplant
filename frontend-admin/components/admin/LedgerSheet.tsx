@@ -176,8 +176,55 @@ export function LedgerSheet({ open, onClose, user }: Props) {
           </div>
         </div>
 
+        {/* Ledger History summary */}
+        {(() => {
+          let totalDeposits = 0;
+          let totalWithdrawals = 0;
+          for (const t of txns) {
+            const tt = String(t?.transaction_type ?? "").toUpperCase();
+            const amt = Number(t?.amount ?? 0);
+            if (tt === "DEPOSIT") totalDeposits += Math.abs(amt);
+            else if (tt === "WITHDRAWAL") totalWithdrawals += Math.abs(amt);
+          }
+          const net = totalDeposits - totalWithdrawals;
+          return (
+            <div className="mt-3">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-base">📊</span>
+                <span className="font-semibold text-sm">Ledger History</span>
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                <div className="rounded-lg border border-profit/30 bg-profit/5 p-3 text-center">
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                    Total Deposits
+                  </div>
+                  <div className="font-tabular text-lg font-bold text-profit mt-1">
+                    {formatINR(totalDeposits)}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-loss/30 bg-loss/5 p-3 text-center">
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                    Total Withdrawals
+                  </div>
+                  <div className="font-tabular text-lg font-bold text-loss mt-1">
+                    {formatINR(totalWithdrawals)}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-info/30 bg-info/5 p-3 text-center">
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                    Net Balance
+                  </div>
+                  <div className="font-tabular text-lg font-bold text-info mt-1">
+                    {formatINR(net)}
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
         {/* Transactions list */}
-        <div className="mt-2">
+        <div className="mt-4">
           <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2">
             Recent transactions
           </div>
