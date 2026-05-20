@@ -476,13 +476,36 @@ export class CustomDatafeed {
         // the chart's last candle exactly between SELL and BUY.
         const bid = Number(q.bid ?? q.ltp ?? NaN);
         const ask = Number(q.ask ?? q.ltp ?? NaN);
+        const ltp = Number(q.ltp ?? NaN);
         let price: number;
         if (Number.isFinite(bid) && Number.isFinite(ask) && bid > 0 && ask > 0) {
           price = (bid + ask) / 2;
-        } else if (Number.isFinite(Number(q.ltp))) {
-          price = Number(q.ltp);
+        } else if (Number.isFinite(ltp) && ltp > 0) {
+          price = ltp;
         } else {
           return;
+        }
+
+        // Guard against bad ticks corrupting the live bar:
+        //   1. Reject non-positive prices (zero / negative LTP that some
+        //      feeds emit pre-market or between sessions).
+        //   2. Reject obvious outliers — if the tick deviates >10% from
+        //      the previous bar's close it's almost certainly a glitch
+        //      (mis-decoded packet, stale bid/ask while the other side
+        //      is missing, etc.). Without this guard a single bad tick
+        //      with `low: 0` produces a candle that wicks all the way
+        //      down to the x-axis on the chart.
+        if (!Number.isFinite(price) || price <= 0) return;
+        const prevClose = Number(sub.lastBar?.close ?? NaN);
+        if (Number.isFinite(prevClose) && prevClose > 0) {
+          const deviation = Math.abs(price - prevClose) / prevClose;
+          if (deviation > 0.1) {
+            // Tick is >10% away from the last known good price — skip it.
+            // The next tick will usually be sane; persistent deviations
+            // (real spikes) will be picked up via the historical refetch
+            // on chart resolution change.
+            return;
+          }
         }
 
         const now = Math.floor(Date.now() / 1000);
