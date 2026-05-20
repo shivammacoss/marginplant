@@ -1092,6 +1092,20 @@ async def delete_position(
         # becomes a pattern.
         pass
 
+    # Wallet used_margin recompute — same source-of-truth idea but
+    # for the locked-margin counter. Admin-flagged: "0 open positions
+    # par USED MARGIN ₹1,728.70 dikh raha". `release_margin` is
+    # delta-based and drifts when admin hard-deletes a Position
+    # without a closing fill. Now every delete re-syncs the wallet
+    # to sum(open positions' margin_used) so the orphan margin is
+    # released back to available immediately.
+    try:
+        from app.services import wallet_service as _ws
+
+        await _ws.recompute_used_margin(user_id)
+    except Exception:
+        pass
+
     # Audit trail.
     try:
         await log_event(
@@ -1126,6 +1140,43 @@ async def delete_position(
             "realized_pnl_reversed_inr": str(reversed_amount),
         }
     )
+
+
+@router.post("/positions/reconcile-wallet-margin", response_model=APIResponse[dict])
+async def reconcile_wallet_margins(admin: SuperAdmin):
+    """Manual trigger for wallet `used_margin` reconciliation across
+    every user. Same job runs every 15 minutes alongside the tracker
+    reconciler, but admin can force an immediate pass when a user
+    reports a stuck used_margin (e.g. "0 open positions but
+    USED MARGIN dikh raha").
+
+    Super-admin only because it touches every wallet on the platform.
+    """
+    from app.services import wallet_service as _ws
+
+    summary = await _ws.reconcile_all_used_margins()
+    return APIResponse(data={"ok": True, **summary})
+
+
+@router.post(
+    "/positions/{user_id}/reconcile-wallet-margin",
+    response_model=APIResponse[dict],
+)
+async def reconcile_wallet_margin_for_user(
+    user_id: str,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("trading_view", "write")),
+):
+    """Per-user manual recompute. Use when a single user reports a
+    stuck used_margin and you don't want to wait for the next
+    reconcile cycle. Scope-checked so an admin can only reconcile
+    their own pool's users.
+    """
+    await assert_user_in_scope(admin, user_id)
+    from app.services import wallet_service as _ws
+
+    summary = await _ws.recompute_used_margin(user_id)
+    return APIResponse(data=summary)
 
 
 @router.post("/positions/reconcile-trackers", response_model=APIResponse[dict])

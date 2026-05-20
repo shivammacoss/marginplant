@@ -406,6 +406,19 @@ async def tracker_reconcile_loop(interval_sec: float = 900.0) -> None:
     while not _tracker_loop_stop:
         try:
             await reconcile_all_trackers()
+            # Wallet used_margin reconcile runs alongside the tracker
+            # reconcile so any drift introduced by an unexpected
+            # restart / admin hard-delete / partial-close math
+            # mismatch heals automatically within one cycle.
+            try:
+                from app.services import wallet_service as _ws
+
+                await _ws.reconcile_all_used_margins()
+            except Exception:
+                log.warning(
+                    "wallet_used_margin_reconcile_iteration_failed",
+                    exc_info=True,
+                )
         except Exception:
             log.warning("tracker_reconcile_loop_iteration_failed", exc_info=True)
         try:

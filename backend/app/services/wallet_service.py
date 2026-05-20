@@ -398,6 +398,133 @@ async def list_transactions(
     )
 
 
+async def recompute_used_margin(
+    user_id: str | PydanticObjectId,
+) -> dict[str, Any]:
+    """Source-of-truth reconciliation for wallet.used_margin.
+
+    `block_margin` / `release_margin` are delta operations — they
+    adjust the running counter as orders fill and positions close.
+    Over time that counter drifts because:
+      • admin hard-deletes a Position (no release_margin call)
+      • mid-flow crash between Position.save and release_margin
+      • partial-close math mismatches the original block amount
+      • legacy positions written before margin_used was tracked
+    Admin-flagged symptom: "0 open positions, 0 active trades, but
+    USED MARGIN shows ₹1,728.70 — bahut sare IDs me ho raha".
+
+    This helper computes the canonical used_margin as
+    ``sum(p.margin_used for p in open positions)`` and resets the
+    wallet's field to match. Any positive delta (real margin was
+    locked we're now releasing) is credited back to
+    available_balance. A negative delta (the wallet was UNDER-counting
+    locked margin, rare) is debited from available_balance.
+
+    Returns a small diff summary so an admin endpoint / periodic
+    loop can log what was repaired.
+
+    Note: this does NOT publish a ledger entry — released margin is
+    an internal lock, never a real money movement. Same semantics as
+    `release_margin` which also writes no ledger (only the
+    SETTLEMENT_OUTSTANDING_RECOVERY branch is ledger-bearing, and
+    that side-effect only kicks in for an actual close fill).
+    """
+    from app.models.position import Position, PositionStatus
+
+    uid = PydanticObjectId(str(user_id))
+    open_positions = await Position.find(
+        Position.user_id == uid,
+        Position.status == PositionStatus.OPEN,
+    ).to_list()
+    canonical = ZERO
+    for p in open_positions:
+        m = to_decimal(p.margin_used or 0)
+        if m > ZERO:
+            canonical = add(canonical, m)
+
+    w = await get_or_create(uid)
+    current = to_decimal(w.used_margin)
+    delta = sub(canonical, current)  # canonical - current
+    if delta == ZERO:
+        return {
+            "ok": True,
+            "changed": False,
+            "before_used": str(current),
+            "after_used": str(canonical),
+            "delta": "0",
+            "open_positions": len(open_positions),
+        }
+
+    if delta < ZERO:
+        # Wallet was over-counting → release the excess back to balance.
+        excess = -delta  # positive
+        w.used_margin = to_decimal128(canonical)
+        w.available_balance = to_decimal128(
+            add(to_decimal(w.available_balance), excess)
+        )
+    else:
+        # Wallet was under-counting (rare). Move the missing amount
+        # from available → used_margin so the invariant holds. If
+        # available can't cover it (very rare; would mean a position
+        # was opened on credit that exceeded the limit), we still
+        # commit the new used_margin and leave available negative —
+        # the operator can then audit and reset deliberately.
+        w.used_margin = to_decimal128(canonical)
+        w.available_balance = to_decimal128(
+            sub(to_decimal(w.available_balance), delta)
+        )
+    w.version += 1
+    await w.save()
+
+    return {
+        "ok": True,
+        "changed": True,
+        "before_used": str(current),
+        "after_used": str(canonical),
+        "delta": str(delta),
+        "open_positions": len(open_positions),
+    }
+
+
+async def reconcile_all_used_margins() -> dict[str, int]:
+    """Walk every wallet and reconcile its used_margin against the
+    user's open Position docs. Cheap (one query per user) — called
+    from the tracker reconcile loop every 15 minutes so any drift
+    self-heals without an operator opening the admin panel.
+    """
+    import logging
+
+    log = logging.getLogger(__name__)
+    wallets = await Wallet.find_all().to_list()
+    scanned = 0
+    repaired = 0
+    for w in wallets:
+        scanned += 1
+        try:
+            r = await recompute_used_margin(w.user_id)
+            if r.get("changed"):
+                repaired += 1
+                log.info(
+                    "wallet_margin_drift_fixed user=%s before=%s after=%s",
+                    w.user_id,
+                    r["before_used"],
+                    r["after_used"],
+                )
+        except Exception:
+            log.warning(
+                "recompute_used_margin_failed user=%s",
+                w.user_id,
+                exc_info=True,
+            )
+    if repaired:
+        log.info(
+            "wallet_used_margin_reconcile scanned=%s repaired=%s",
+            scanned,
+            repaired,
+        )
+    return {"scanned": scanned, "repaired": repaired}
+
+
 async def summary(user_id: str | PydanticObjectId) -> dict[str, Any]:
     """Wallet summary in Dabba/CFD presentation:
         - bal              = main_balance display (available + used, since
