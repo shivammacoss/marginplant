@@ -1149,20 +1149,43 @@ def _is_blocked_row(row: Any) -> bool:
 async def get_user_blocked_symbols(
     user_id: str | PydanticObjectId,
 ) -> dict[str, Any]:
-    """Compute the set of (symbol, pattern) entries that should be hidden
-    from a user's browse / search / option-chain results.
+    """Compute symbol / pattern lists for hiding from a specific user's
+    search / option-chain / watchlist results.
 
-    Layers consulted (any block at any layer hides the symbol):
-      - NettingScriptOverride at platform scope (super-admin authored)
-      - NettingScriptOverride at the user's admin scope
-      - NettingScriptOverride at the user's broker scope (immediate
-        broker from broker_ancestry)
-      - UserSegmentOverride for THIS user where symbol is non-null
+    REAL cascade (most-specific wins — admin reported "I allowed one
+    user and it leaked to everyone"; root cause was the older helper
+    only INGESTED blocks and never honoured per-user ALLOW overrides
+    that should reverse a tier-level block):
 
-    Cached in Redis under `blocked_syms:<user_id>` for 30 s. The
-    `_wipe_eff_cache_debounced()` call already runs whenever a
-    script/user override is saved or deleted, so admin edits land
-    within one cache cycle.
+        priority 0 (most specific)  user override symbol-specific
+        priority 1                  broker exact-symbol script row
+        priority 2                  admin exact-symbol script row
+        priority 3                  platform exact-symbol script row
+        priority 4                  broker pattern script row
+        priority 5                  admin pattern script row
+        priority 6                  platform pattern script row
+
+    For each candidate symbol, the highest-priority row's
+    `isActive` / `tradingEnabled` decides:
+      • explicit False  → blocked
+      • explicit True   → ALLOWED (overrides any lower-priority block)
+      • None on both    → fall through to next layer
+
+    Cached in Redis under `blocked_syms:<user_id>` for 30 s; admin
+    edits invalidate via `_wipe_eff_cache_debounced()` at the
+    segment / script / pool override save paths and via the
+    targeted `cache_delete_pattern("blocked_syms:{uid}")` on
+    user-override save / delete.
+
+    Returns a structured payload the filter functions consume:
+      {
+        "symbols": [...],        # exact-match blocks
+        "patterns": [[b, s]...], # pattern blocks (base + suffix)
+        "allow_symbols": [...],  # symbols a more-specific layer
+                                 # explicitly allowed (must take
+                                 # precedence over pattern hits at
+                                 # filter time)
+      }
     """
     cache_key = f"blocked_syms:{user_id}"
     try:
@@ -1174,15 +1197,12 @@ async def get_user_blocked_symbols(
 
     user_doc = await User.get(PydanticObjectId(user_id))
     if user_doc is None:
-        return {"symbols": [], "patterns": []}
+        return {"symbols": [], "patterns": [], "allow_symbols": []}
 
     user_admin_id = user_doc.assigned_admin_id
     broker_anc = user_doc.broker_ancestry or []
     user_broker_id = broker_anc[-1] if broker_anc else None
 
-    # Build the script-override filter — match platform OR the user's
-    # tier(s) only, so a broker B1's block on SBIN doesn't leak to
-    # admin A2's pool through this cache.
     or_conditions: list[dict[str, Any]] = [
         {"scope_admin_id": None, "scope_broker_id": None},  # platform
     ]
@@ -1201,34 +1221,105 @@ async def get_user_blocked_symbols(
     ).to_list(length=None)
     script_rows = [NettingScriptOverride.model_validate(r) for r in raw_script_rows]
 
-    # User-specific per-symbol overrides take precedence over everything.
     user_rows = await UserSegmentOverride.find(
         UserSegmentOverride.user_id == PydanticObjectId(str(user_id)),
     ).to_list()
 
+    # Layered store: for each (segment_name, symbol_upper) keep the
+    # highest-priority row's block / allow signal. Patterns get their
+    # own layered store keyed by (segment_name, base, suffix).
+    def _row_signal(r: Any) -> str | None:
+        """Return 'block' / 'allow' / None for this row."""
+        ia = getattr(r, "isActive", None)
+        te = getattr(r, "tradingEnabled", None)
+        # Explicit False on EITHER field → block. An explicit allow
+        # only counts when BOTH (or the relevant) fields aren't False.
+        if ia is False or te is False:
+            return "block"
+        if ia is True or te is True:
+            return "allow"
+        return None
+
+    # Priority lookup for script overrides
+    def _script_priority(r: Any, is_pattern: bool) -> int:
+        scope_broker = getattr(r, "scope_broker_id", None)
+        scope_admin = getattr(r, "scope_admin_id", None)
+        if is_pattern:
+            if scope_broker:
+                return 4
+            if scope_admin:
+                return 5
+            return 6
+        # exact
+        if scope_broker:
+            return 1
+        if scope_admin:
+            return 2
+        return 3
+
+    # First pass: aggregate per (segment, symbol_upper) — user rows first
+    by_exact: dict[tuple[str, str], tuple[int, str]] = {}
+    patterns_layered: dict[tuple[str, str, str], tuple[int, str]] = {}
+
+    # User overrides have priority 0 (symbol-specific). Segment-wide
+    # user overrides apply to every symbol in the segment but we
+    # can't enumerate; they're checked at filter time via
+    # allow_segments / block_segments.
+    for r in user_rows:
+        if not r.symbol:
+            continue
+        sig = _row_signal(r)
+        if sig is None:
+            continue
+        sym = r.symbol.strip().upper()
+        key = (r.segment_name, sym)
+        prev = by_exact.get(key)
+        if prev is None or 0 < prev[0]:
+            by_exact[key] = (0, sig)
+
+    # Script overrides
+    for r in script_rows:
+        if not r.symbol:
+            continue
+        sig = _row_signal(r)
+        if sig is None:
+            continue
+        sym_raw = r.symbol.strip().upper()
+        split = _split_pattern(sym_raw)
+        is_pat = split is not None
+        prio = _script_priority(r, is_pat)
+        if is_pat:
+            assert split is not None
+            base, suffix = split
+            pkey = (r.segment_name, base, suffix)
+            prev_p = patterns_layered.get(pkey)
+            if prev_p is None or prio < prev_p[0]:
+                patterns_layered[pkey] = (prio, sig)
+        else:
+            key = (r.segment_name, sym_raw)
+            prev = by_exact.get(key)
+            if prev is None or prio < prev[0]:
+                by_exact[key] = (prio, sig)
+
     symbols: set[str] = set()
     patterns: list[tuple[str, str]] = []
-
-    def _ingest(sym_raw: str | None) -> None:
-        if not sym_raw:
-            return
-        sym = sym_raw.strip().upper()
-        split = _split_pattern(sym)
-        if split is not None:
-            patterns.append(split)
-        else:
+    allow_symbols: set[str] = set()
+    for (_seg, sym), (_prio, sig) in by_exact.items():
+        if sig == "block":
             symbols.add(sym)
-
-    for r in script_rows:
-        if _is_blocked_row(r):
-            _ingest(r.symbol)
-    for r in user_rows:
-        if _is_blocked_row(r) and r.symbol:
-            _ingest(r.symbol)
+        else:
+            # explicit allow at the most-specific layer for this
+            # (segment, symbol) → carry forward as an allow that
+            # the filter checks BEFORE any pattern block.
+            allow_symbols.add(sym)
+    for (_seg, base, suffix), (_prio, sig) in patterns_layered.items():
+        if sig == "block":
+            patterns.append((base, suffix))
 
     payload: dict[str, Any] = {
         "symbols": sorted(symbols),
         "patterns": [list(p) for p in patterns],
+        "allow_symbols": sorted(allow_symbols),
     }
     try:
         await cache_set(cache_key, payload, ttl_sec=_BLOCKED_USER_CACHE_TTL)
@@ -1241,12 +1332,22 @@ def is_symbol_blocked_for(
     instrument_symbol: str, blocked: dict[str, Any]
 ) -> bool:
     """Cheap O(P) check against the result of `get_user_blocked_symbols`.
-    P = number of pattern entries (typically < 10). Use this on every
-    candidate row in search / option-chain / watchlist endpoints.
+
+    Filter order:
+      1. If symbol appears in the allow set → NOT blocked (explicit
+         user-level allow wins over any tier-level pattern block).
+      2. If symbol appears in the block set → blocked.
+      3. If symbol matches any pattern → blocked.
+      4. Otherwise → not blocked.
     """
     if not instrument_symbol:
         return False
     sym = instrument_symbol.strip().upper()
+    allow_set = blocked.get("allow_symbols") or []
+    if isinstance(allow_set, list):
+        allow_set = set(allow_set)
+    if sym in allow_set:
+        return False
     symbols_set = blocked.get("symbols") or []
     if isinstance(symbols_set, list):
         symbols_set = set(symbols_set)
@@ -1471,12 +1572,22 @@ async def upsert_user_override(
         if k in NETTING_FIELDS:
             setattr(existing, k, v)
     await existing.save()
-    # Wipe per-user effective-settings + per-user inactive-rows cache so
-    # next read reflects this override. `isActive` is in NETTING_FIELDS,
-    # so a per-user "Block → No" lands on UserSegmentOverride and must
-    # immediately re-resolve the user's inactive-set on next poll.
+    # Wipe per-user effective-settings + per-user inactive-rows +
+    # blocked-symbols cache so next read reflects this override.
+    # `isActive` / `tradingEnabled` are in NETTING_FIELDS, so a
+    # per-user allow / block lands on UserSegmentOverride and must
+    # immediately re-resolve the user's:
+    #   • netting_eff:{uid}:*       — effective margins / lots / etc.
+    #   • inactive_admin_rows:{uid} — segment-level inactive set
+    #   • blocked_syms:{uid}        — per-symbol block set (drives
+    #     search / option-chain / watchlist filtering)
+    # User-flagged regression: admin's "allow CRUDEOIL for U1" wasn't
+    # honoured because `blocked_syms:U1` stayed stale on a 30 s TTL
+    # and the helper itself wasn't honouring per-user allow rows;
+    # both ends are fixed now.
     await cache_delete_pattern(f"netting_eff:{uid}:*")
     await cache_delete_pattern(f"inactive_admin_rows:{uid}")
+    await cache_delete_pattern(f"blocked_syms:{uid}")
     return existing
 
 
@@ -1492,8 +1603,11 @@ async def delete_user_override(
         UserSegmentOverride.segment_name == segment_name,
         UserSegmentOverride.symbol == sym,
     ).delete()
+    # Same triple-wipe as upsert — removing a per-user allow / block
+    # must immediately re-resolve the affected user's block set.
     await cache_delete_pattern(f"netting_eff:{uid}:*")
     await cache_delete_pattern(f"inactive_admin_rows:{uid}")
+    await cache_delete_pattern(f"blocked_syms:{uid}")
 
 
 # ── Effective resolver (legacy field-name shim for order_validator) ─
