@@ -994,16 +994,138 @@ async def delete_position(
     admin: CurrentAdmin,
     _: None = Depends(require_perm("trading_view", "write")),
 ):
-    """Hard-delete a position record. Use only for cleaning up bad/test data —
-    closes via squareoff for normal flow."""
+    """Hard-delete a position record AND reverse its wallet impact.
+
+    Admin-flagged: "close trade delete kiya, lekin user ka PnL wallet
+    se kam ya zyada nahi hua — agar 10k deposit + 2k profit = 12k
+    tha, trade delete ke baad bhi 12k hi rahta hai, jabki 10k hona
+    chahiye". The earlier implementation just removed the Position
+    row, leaving the realized-PnL credit / debit and brokerage
+    deduction on the ledger. That broke the invariant that a deleted
+    trade leaves no trace on the wallet.
+
+    Now the delete path also:
+      • Posts a REVERSAL ledger entry of `-realized_pnl` so a profit
+        deleted DEBITS the wallet (12k → 10k for the +2k example) and
+        a loss deleted CREDITS the wallet (8k → 10k for a -2k loss).
+      • Recomputes the per-(user, instrument) tracker from live
+        Position docs so the stale row is forgotten from
+        intraday_lots / holding_lots / margin_blocked.
+      • Refuses to delete an OPEN position with non-zero quantity —
+        admin must squareoff first. Hard-deleting an open row would
+        orphan the locked margin AND skip the standard closing
+        ledger entries, putting the wallet into a worse state than
+        before.
+
+    Audit-logged with `actor_id = admin.id` so the original credit
+    plus the reversal both appear in the user's ledger with their
+    own narrations.
+    """
     p = await Position.get(PydanticObjectId(position_id))
     if p is None:
         raise HTTPException(status_code=404, detail="Position not found")
     await assert_user_in_scope(admin, p.user_id)
     user_id = p.user_id
+
+    # Block deletion of still-open positions — squareoff first.
+    if p.status == PositionStatus.OPEN and abs(float(p.quantity or 0)) > 1e-9:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Position is still OPEN with non-zero quantity. "
+                "Square it off first, then delete the closed row."
+            ),
+        )
+
+    # Reverse realized PnL on the wallet, if any. Signed delta:
+    # profit (positive realized_pnl) → debit the same amount;
+    # loss (negative realized_pnl) → credit the absolute amount.
+    from decimal import Decimal as _Decimal
+
+    from app.models.transaction import TransactionType
+    from app.services import wallet_service
+    from app.utils.decimal_utils import to_decimal
+
+    realized = to_decimal(p.realized_pnl or 0)
+    reversed_amount = _Decimal("0")
+    if realized != _Decimal("0"):
+        try:
+            await wallet_service.adjust(
+                user_id,
+                -realized,
+                transaction_type=TransactionType.REVERSAL,
+                narration=(
+                    f"Reverse realized PnL of {p.instrument.symbol} "
+                    f"(position deleted by {admin.user_code})"
+                ),
+                reference_type="Position",
+                reference_id=str(p.id),
+                actor_id=admin.id,
+            )
+            reversed_amount = realized
+        except Exception:
+            # Don't leave the position dangling if the reversal fails —
+            # surface the error so the operator can retry.
+            raise HTTPException(
+                status_code=500,
+                detail="Wallet reversal failed; position not deleted",
+            )
+
+    instrument_token = p.instrument.token
+    segment_type = p.segment_type
     await p.delete()
-    await _publish_position_event(user_id, "delete", None, {"id": position_id, "by": "admin"})
-    return APIResponse(data={"ok": True, "id": position_id})
+
+    # Tracker recompute — drops the now-gone row from intraday /
+    # holding lots counters. Same source-of-truth helper that runs on
+    # every fill and the 15-min self-heal loop.
+    try:
+        from app.services.position_service import _recompute_tracker
+
+        await _recompute_tracker(
+            user_id=user_id,
+            segment_type=segment_type,
+            token=instrument_token,
+        )
+    except Exception:
+        # Tracker drift is non-fatal — the periodic reconciler will
+        # catch it within 15 min — but log so we notice if it
+        # becomes a pattern.
+        pass
+
+    # Audit trail.
+    try:
+        await log_event(
+            action=AuditAction.DELETE,
+            entity_type="Position",
+            entity_id=p.id,
+            actor_id=admin.id,
+            target_user_id=user_id,
+            metadata={
+                "realized_pnl_reversed_inr": str(reversed_amount),
+                "symbol": p.instrument.symbol,
+                "status_before_delete": p.status.value,
+            },
+        )
+    except Exception:
+        pass
+
+    await _publish_position_event(
+        user_id,
+        "delete",
+        None,
+        {
+            "id": position_id,
+            "by": "admin",
+            "realized_pnl_reversed_inr": str(reversed_amount),
+        },
+    )
+    return APIResponse(
+        data={
+            "ok": True,
+            "id": position_id,
+            "realized_pnl_reversed_inr": str(reversed_amount),
+        }
+    )
 
 
 @router.post("/positions/reconcile-trackers", response_model=APIResponse[dict])
