@@ -351,6 +351,41 @@ async def unblock_broker(actor: User, broker_id: str | PydanticObjectId) -> User
     return b
 
 
+async def reset_broker_password(
+    actor: User,
+    broker_id: str | PydanticObjectId,
+    new_password: str,
+) -> User:
+    """Reset a broker's (or sub-broker's) password to a value chosen by
+    the actor. Mirrors `admin_management_service.reset_password` for the
+    sub-admin tier so the admin-side three-dot menu can expose the same
+    flow for every tier the actor owns.
+
+    Scope is enforced by `assert_broker_in_scope` — super-admins can
+    reset any broker, admins their own brokers, brokers their own sub-
+    brokers. The target itself is unblocked of any failed-login lockout
+    so the broker can sign in with the new password immediately.
+    """
+    from app.core.security import hash_password
+
+    b = await assert_broker_in_scope(actor, broker_id)
+    b.password_hash = hash_password(new_password)
+    # Mirror the unblock side-effects so a brand-new password isn't
+    # stalled behind a stale lockout. Doesn't change `status`.
+    b.failed_login_count = 0
+    b.locked_until = None
+    await b.save()
+    await log_event(
+        action=AuditAction.PASSWORD_RESET,
+        entity_type="User",
+        entity_id=b.id,
+        actor_id=actor.id,
+        target_user_id=b.id,
+        metadata={"kind": "BROKER"},
+    )
+    return b
+
+
 # ── Listing ──────────────────────────────────────────────────────────
 async def list_brokers_for(
     actor: User,

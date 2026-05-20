@@ -13,6 +13,7 @@ import {
   MoreVertical,
   Eye,
   EyeOff,
+  KeyRound,
 } from "lucide-react";
 
 import { BrokerMgmtAPI, ManagementAPI, setTokens } from "@/lib/api";
@@ -95,6 +96,12 @@ export default function BrokersPage() {
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<any | null>(null);
   const [loginAsId, setLoginAsId] = useState<string | null>(null);
+  // Reset-password dialog state — mirrors the sub-admins page so an
+  // admin can hand a broker / sub-broker a new password from the
+  // three-dot menu without bouncing through user.py reset flows.
+  const [resetPwTarget, setResetPwTarget] = useState<{ id: string; label: string } | null>(null);
+  const [newPw, setNewPw] = useState("");
+  const [showNewPw, setShowNewPw] = useState(false);
 
   // Cap drives the form greying — only fetched once per session.
   const { data: capRes } = useQuery({
@@ -140,6 +147,18 @@ export default function BrokersPage() {
       qc.invalidateQueries({ queryKey: ["admin", "brokers"] });
     },
     onError: (e: any) => toast.error(e.message),
+  });
+  const resetPwMut = useMutation({
+    mutationFn: ({ id, pw }: { id: string; pw: string }) =>
+      BrokerMgmtAPI.resetPassword(id, pw),
+    onSuccess: () => {
+      toast.success("Password reset");
+      setResetPwTarget(null);
+      setNewPw("");
+      setShowNewPw(false);
+    },
+    onError: (e: any) =>
+      toast.error(e?.response?.data?.detail ?? e?.message ?? "Reset failed"),
   });
 
   async function loginAs(broker: any) {
@@ -289,6 +308,17 @@ export default function BrokersPage() {
                   Unblock
                 </DropdownMenuItem>
               )}
+              <DropdownMenuItem
+                onSelect={() =>
+                  setResetPwTarget({
+                    id: r.id,
+                    label: r.full_name || r.user_code || "broker",
+                  })
+                }
+              >
+                <KeyRound className="size-4" />
+                Reset Password
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
@@ -343,6 +373,86 @@ export default function BrokersPage() {
           onSaved={() => qc.invalidateQueries({ queryKey: ["admin", "brokers"] })}
         />
       )}
+
+      {/* Reset Password dialog — minted via three-dot menu. Same UX as
+          the sub-admins page: show target name, password input with
+          eye-toggle, min 8 char client guard, error toast on backend
+          rejection. Backend enforces scope (assert_broker_in_scope)
+          so a broker can only reset their own sub-brokers, an admin
+          only their brokers, super-admin any broker. */}
+      <Dialog
+        open={!!resetPwTarget}
+        onOpenChange={(o) => {
+          if (!o) {
+            setResetPwTarget(null);
+            setNewPw("");
+            setShowNewPw(false);
+          }
+        }}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Reset password</DialogTitle>
+          </DialogHeader>
+          {resetPwTarget && (
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                You're resetting the password for{" "}
+                <span className="font-semibold text-foreground">
+                  {resetPwTarget.label}
+                </span>
+                . They'll be able to sign in immediately with the new value.
+              </p>
+              <div className="space-y-1.5">
+                <Label>New password (min 8 chars)</Label>
+                <div className="relative">
+                  <Input
+                    type={showNewPw ? "text" : "password"}
+                    value={newPw}
+                    onChange={(e) => setNewPw(e.target.value)}
+                    autoFocus
+                    className="pr-9"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPw((v) => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    aria-label={showNewPw ? "Hide password" : "Show password"}
+                  >
+                    {showNewPw ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setResetPwTarget(null);
+                setNewPw("");
+                setShowNewPw(false);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (newPw.length < 8) {
+                  toast.error("Password must be at least 8 characters");
+                  return;
+                }
+                if (resetPwTarget) {
+                  resetPwMut.mutate({ id: resetPwTarget.id, pw: newPw });
+                }
+              }}
+              disabled={resetPwMut.isPending}
+            >
+              {resetPwMut.isPending ? "Resetting…" : "Reset password"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
