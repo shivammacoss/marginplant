@@ -49,7 +49,20 @@ export function LedgerSheet({ open, onClose, user }: Props) {
     enabled: !!user && open,
   });
 
-  const txns: any[] = data?.items ?? [];
+  // Ledger sheet shows only deposit / withdrawal cash flows + settlement-
+  // outstanding events. Trade-related rows (PNL / CHARGES / BROKERAGE)
+  // live on the /ledger drill-down and the user's tradebook — keeping
+  // them out of this side panel makes the "what cash moved in/out" view
+  // readable for the admin.
+  const txns: any[] = (data?.items ?? []).filter((t: any) => {
+    const tt = String(t?.transaction_type ?? "").toUpperCase();
+    return (
+      tt === "DEPOSIT" ||
+      tt === "WITHDRAWAL" ||
+      tt === "SETTLEMENT_OUTSTANDING_BOOKED" ||
+      tt === "SETTLEMENT_OUTSTANDING_RECOVERY"
+    );
+  });
 
   const adjustMut = useMutation({
     mutationFn: ({

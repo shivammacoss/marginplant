@@ -52,8 +52,8 @@ export default function AdminUsersPage() {
       render: (r: any) => (
         <Button
           size="sm"
-          variant="ghost"
-          className="h-7 w-7 p-0 font-mono font-semibold"
+          variant="outline"
+          className="h-7 w-7 p-0 font-mono font-semibold border-primary/50 text-primary hover:bg-primary hover:text-primary-foreground"
           title="View ledger / Adjust wallet"
           onClick={(e) => {
             e.stopPropagation();
@@ -71,8 +71,8 @@ export default function AdminUsersPage() {
       render: (r: any) => (
         <Button
           size="sm"
-          variant="ghost"
-          className="h-7 w-7 p-0 font-mono font-semibold"
+          variant="outline"
+          className="h-7 w-7 p-0 font-mono font-semibold border-info/50 text-info hover:bg-info hover:text-info-foreground"
           title="Live trading stats"
           onClick={(e) => {
             e.stopPropagation();
@@ -80,6 +80,23 @@ export default function AdminUsersPage() {
           }}
         >
           S
+        </Button>
+      ),
+    },
+    {
+      key: "positions",
+      header: "POSITION",
+      align: "center",
+      render: (r: any) => (
+        <Button
+          asChild
+          size="sm"
+          variant="outline"
+          className="h-7 w-7 p-0 font-mono font-semibold border-atm/50 text-atm hover:bg-atm hover:text-atm-foreground"
+          title="View positions"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <Link href={`/positions?user_id=${r.id}`}>P</Link>
         </Button>
       ),
     },
