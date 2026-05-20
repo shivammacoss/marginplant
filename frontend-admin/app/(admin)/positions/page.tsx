@@ -7,6 +7,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { AlertOctagon, CalendarDays, Info, Pencil, Search, TrendingDown, TrendingUp, Trash2, X, X as XIcon } from "lucide-react";
 import { TradingAPI, UsersAPI } from "@/lib/api";
+import { useMarketStream } from "@/lib/useMarketStream";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -175,6 +176,55 @@ function AdminPositionsInner() {
   const rawRows = tab === "open" ? openRows : closedRows;
   const isFetching = tab === "open" ? openLoading : closedLoading;
 
+  // Live PnL overlay — subscribe to every open position's instrument
+  // token via the WS pump (250 ms server tick, throttled to ~500 ms
+  // display by the hook). Without this the admin table refreshed at
+  // the REST poll's 5 s cadence while the user app screen the admin
+  // was comparing against ticked sub-second — operators complained
+  // "PnL admin me slow ho raha hai". Overlay rebuilds `ltp` +
+  // `unrealized_pnl` per row using the same close-side rule the
+  // backend matching engine fills at (long → bid, short → ask, LTP
+  // fallback) so the number lines up exactly with what the user app
+  // shows.
+  const openTokens = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (openRows ?? [])
+            .map((r: any) => String(r.instrument_token ?? r.token ?? ""))
+            .filter(Boolean),
+        ),
+      ),
+    [openRows],
+  );
+  // Only subscribe while the user is on the Open tab — Closed tab
+  // rows have frozen prices and the WS noise would be pure waste.
+  const liveQuotes = useMarketStream(tab === "open" ? openTokens : []);
+
+  const openRowsLive = useMemo(() => {
+    if (tab !== "open" || liveQuotes.size === 0) return openRows;
+    return (openRows ?? []).map((r: any) => {
+      const tok = String(r.instrument_token ?? r.token ?? "");
+      const live = tok ? liveQuotes.get(tok) : undefined;
+      if (!live) return r;
+      const qty = Number(r.quantity ?? 0);
+      const isLong = qty >= 0;
+      const liveLtp = Number(live.ltp ?? 0) || Number(r.ltp) || 0;
+      const bid = Number(live.bid ?? 0);
+      const ask = Number(live.ask ?? 0);
+      const closePrice = (isLong ? bid : ask) || liveLtp;
+      if (!closePrice) return r;
+      const avg = Number(r.avg_price ?? 0);
+      const newPnl =
+        Number.isFinite(avg) && Number.isFinite(qty)
+          ? (closePrice - avg) * qty
+          : Number(r.unrealized_pnl ?? 0);
+      return { ...r, ltp: closePrice, unrealized_pnl: newPnl };
+    });
+  }, [openRows, liveQuotes, tab]);
+
+  const rawRowsLive = tab === "open" ? openRowsLive : closedRows;
+
   // Free-text search across user_code, user_name, last 8 of user_id,
   // and symbol — admins typing "CL49179" should narrow the table to
   // that user's rows, and typing "BTCUSD" should narrow to that
@@ -183,15 +233,15 @@ function AdminPositionsInner() {
   const [search, setSearch] = useState("");
   const data = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return rawRows;
-    return (rawRows ?? []).filter((r: any) => {
+    if (!q) return rawRowsLive;
+    return (rawRowsLive ?? []).filter((r: any) => {
       const code = String(r.user_code ?? "").toLowerCase();
       const name = String(r.user_name ?? "").toLowerCase();
       const uidTail = String(r.user_id ?? "").slice(-8).toLowerCase();
       const sym = String(r.symbol ?? "").toLowerCase();
       return code.includes(q) || name.includes(q) || uidTail.includes(q) || sym.includes(q);
     });
-  }, [rawRows, search]);
+  }, [rawRowsLive, search]);
 
   // PnL summary (today / current week / last week) — auto-refreshes with
   // the table. Honours the user filter so the dashboard tiles narrow to
@@ -306,16 +356,22 @@ function AdminPositionsInner() {
   // — typing "CL49179" should narrow both the visible rows AND the
   // PNL aggregate to that user's exposure.
   const filteredOpenRows = useMemo(() => {
+    // Use the WS-overlaid `openRowsLive` so the Open-PnL header tile
+    // ticks at the same 500 ms cadence as the table rows below — was
+    // `openRows` (raw REST) which made the header lag 5 s behind the
+    // body and confused operators ("number niche change ho rha, upar
+    // wahi pe ruka hai").
+    const base = openRowsLive ?? openRows ?? [];
     const q = search.trim().toLowerCase();
-    if (!q) return openRows ?? [];
-    return (openRows ?? []).filter((r: any) => {
+    if (!q) return base;
+    return base.filter((r: any) => {
       const code = String(r.user_code ?? "").toLowerCase();
       const name = String(r.user_name ?? "").toLowerCase();
       const uidTail = String(r.user_id ?? "").slice(-8).toLowerCase();
       const sym = String(r.symbol ?? "").toLowerCase();
       return code.includes(q) || name.includes(q) || uidTail.includes(q) || sym.includes(q);
     });
-  }, [openRows, search]);
+  }, [openRowsLive, openRows, search]);
 
   const totalPnl = filteredOpenRows.reduce(
     (s: number, r: any) => s + Number(r.unrealized_pnl || 0),
