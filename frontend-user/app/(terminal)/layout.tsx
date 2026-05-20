@@ -19,6 +19,7 @@ import { UserWsBridge } from "@/components/common/UserWsBridge";
 import { BottomNav } from "@/components/layout/BottomNav";
 import { InstrumentsPanel } from "@/components/trading/InstrumentsPanel";
 import { OptionChainPicker } from "@/components/trading/OptionChainPicker";
+import { TradeDetailSheet } from "@/components/trading/TradeDetailSheet";
 import { InstrumentAPI, OptionChainAPI } from "@/lib/api";
 
 type SidePanel = "instruments" | null;
@@ -40,6 +41,14 @@ export default function TerminalLayout({ children }: { children: React.ReactNode
 
   const [pickerOpen, setPickerOpen] = useState(false);
   const [sidePanel, setSidePanel] = useState<SidePanel>(null);
+  // Slide-up trade card token — mobile-only. When the user picks a
+  // strike from the Option Chain picker on the terminal page, instead
+  // of swapping the chart underneath (the old behaviour) we open the
+  // same TradeDetailSheet the marketwatch / option-chain pages use,
+  // so the trader can place an order without leaving the chart view
+  // for the underlying. Desktop still gets the chart-swap flow
+  // because the order panel is already on screen there.
+  const [sheetToken, setSheetToken] = useState<string | null>(null);
 
   // ── Option-chain warm cache ─────────────────────────────────────
   // The Option-chain dialog used to feel slow because its first network
@@ -222,10 +231,40 @@ export default function TerminalLayout({ children }: { children: React.ReactNode
           onOpenChange={setPickerOpen}
           onPick={(token) => {
             setPickerOpen(false);
-            router.push(`/terminal?token=${encodeURIComponent(token)}`);
+            // Mobile + tablet (< lg / 1024 px) get the slide-up trade
+            // card so they can place an order on the picked strike
+            // without losing the chart view. Desktop swaps the chart
+            // because the OrderPanel column is already on screen.
+            // User pain point that drove this: "trade nav bar ke chart
+            // page se option chain me click karta hu to chart open
+            // hota hai, card nahi". The four-iteration loop we were
+            // stuck in was because the matchMedia gate inside
+            // TradeDetailSheet handled the marketwatch / option-chain
+            // routes but the TERMINAL page's own picker was still
+            // doing a router.push.
+            const isMobileUi =
+              typeof window !== "undefined" &&
+              window.matchMedia("(max-width: 1023px)").matches;
+            if (isMobileUi) {
+              setSheetToken(token);
+            } else {
+              router.push(`/terminal?token=${encodeURIComponent(token)}`);
+            }
           }}
         />
       </Suspense>
+
+      {/* Mobile-only trade card — opens when a strike is picked from
+          the Option Chain picker on the terminal page. Same component
+          marketwatch + option-chain use; `onSwap` lets the in-sheet
+          picker change strikes without bouncing the user back to the
+          chart route. */}
+      <TradeDetailSheet
+        token={sheetToken}
+        open={!!sheetToken}
+        onClose={() => setSheetToken(null)}
+        onSwap={(tok) => setSheetToken(tok)}
+      />
     </div>
   );
 }
