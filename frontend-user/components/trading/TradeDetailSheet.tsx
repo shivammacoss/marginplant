@@ -897,7 +897,20 @@ function TradeDetailSheetInner({ token, open, onClose, onSwap }: Props) {
                       .replace(/(\..*)\./g, "$1");
                     setLotInput(cleaned);
                   }}
-                  onFocus={(e) => e.currentTarget.select()}
+                  onFocus={(e) => {
+                    // Only auto-select when the field still holds the
+                    // unedited canonical value (so first-tap-to-replace
+                    // works on mount). Once the user has typed anything
+                    // custom we LEAVE the cursor where they tapped —
+                    // earlier we always called `select()` on focus, so
+                    // appending a digit (e.g. wanting to turn "2." into
+                    // "2.5") wiped the field and the keystroke replaced
+                    // the whole value. User complaint: "qty ko sahi se
+                    // edit nahi kar pa raha".
+                    if (lotInput === displayValue) {
+                      e.currentTarget.select();
+                    }
+                  }}
                   onBlur={commitLotInput}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
@@ -906,7 +919,7 @@ function TradeDetailSheetInner({ token, open, onClose, onSwap }: Props) {
                       (e.currentTarget as HTMLInputElement).blur();
                     }
                   }}
-                  className="w-16 bg-transparent text-center text-base font-bold outline-none"
+                  className="w-24 bg-transparent text-center font-tabular text-lg font-semibold tabular-nums outline-none"
                 />
                 <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
                   {unit === "LOTS" ? "Lot" : "Qty"}
