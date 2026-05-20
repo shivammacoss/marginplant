@@ -20,6 +20,7 @@ import {
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { StatusPill } from "@/components/common/StatusPill";
+import { TradeDetailSheet } from "@/components/trading/TradeDetailSheet";
 import { cn, formatINR, formatIST, formatPrice, pnlColor } from "@/lib/utils";
 
 // Unified blotter tabs: Position (open) / Active (per-fill) / Closed
@@ -168,6 +169,14 @@ export default function PositionsPage() {
   const [editing, setEditing] = useState<
     { row: any; kind: "TP" | "SL"; source: "position" | "active" } | null
   >(null);
+  // Slide-up trade card token — mobile-only. When the user taps any
+  // position / active-trade card on a phone, open the same
+  // TradeDetailSheet used by /marketwatch and /option-chain so they
+  // can place a new BUY/SELL on the same instrument without leaving
+  // the Positions page. User-flagged: "potion page me kisi bhi
+  // potion ko click karne par bhi same buy/sell ke liye card open
+  // ho jaisa option chain me kiya hai".
+  const [sheetToken, setSheetToken] = useState<string | null>(null);
 
   // ── Data ────────────────────────────────────────────────────────────
   // Open positions are always fetched so the tab badge stays current and
@@ -998,6 +1007,7 @@ export default function PositionsPage() {
               liveLtpFor={liveLtpFor}
               onEdit={(row, kind) => setEditing({ row, kind, source: "active" })}
               onExit={exitActive}
+              onTrade={(tok) => setSheetToken(tok)}
             />
           </div>
           <div className="hidden md:block">
@@ -1018,6 +1028,7 @@ export default function PositionsPage() {
               liveLtpFor={liveLtpFor}
               onEdit={(row, kind) => setEditing({ row, kind, source: "position" })}
               onExit={squareoff}
+              onTrade={(tok) => setSheetToken(tok)}
             />
           </div>
           <div className="hidden md:block">
@@ -1048,6 +1059,19 @@ export default function PositionsPage() {
           qc.invalidateQueries({ queryKey: ["positions"] });
           setEditing(null);
         }}
+      />
+
+      {/* Mobile-only slide-up trade card — opens when a position /
+          active-trade card is tapped. `onSwap` lets the in-sheet
+          Option Chain picker swap strikes while keeping the sheet
+          open. Same component the marketwatch / option-chain /
+          terminal pages use, so the BUY/SELL flow stays identical
+          everywhere. */}
+      <TradeDetailSheet
+        token={sheetToken}
+        open={!!sheetToken}
+        onClose={() => setSheetToken(null)}
+        onSwap={(tok) => setSheetToken(tok)}
       />
     </div>
   );
@@ -1500,6 +1524,7 @@ function ActiveMobileList({
   liveLtpFor,
   onEdit,
   onExit,
+  onTrade,
 }: {
   rows: any[];
   loading: boolean;
@@ -1508,6 +1533,11 @@ function ActiveMobileList({
   liveLtpFor: (row: any, side?: "BUY" | "SELL") => number;
   onEdit: (row: any, kind: "TP" | "SL") => void;
   onExit: (id: string) => void;
+  /** Mobile: tap on the card body fires this with the row's
+   *  instrument token so the parent can open the slide-up
+   *  TradeDetailSheet. Inner TP/SL/Exit buttons stopPropagation
+   *  so they don't fire trade open simultaneously. */
+  onTrade?: (token: string) => void;
 }) {
   if (loading) {
     return (
@@ -1546,6 +1576,7 @@ function ActiveMobileList({
             liveLtp={liveLtpFor(r, side)}
             onEdit={onEdit}
             onExit={onExit}
+            onTrade={onTrade}
           />
         );
       })}
@@ -1558,11 +1589,13 @@ function ActiveMobileCard({
   liveLtp,
   onEdit,
   onExit,
+  onTrade,
 }: {
   row: any;
   liveLtp: number;
   onEdit: (row: any, kind: "TP" | "SL") => void;
   onExit: (id: string) => void;
+  onTrade?: (token: string) => void;
 }) {
   // The same card now drives both Active-trades rows (per-fill) AND
   // Position rows (per-instrument net). Field-name shims keep the
@@ -1616,8 +1649,21 @@ function ActiveMobileCard({
   // was to mentally parse the symbol.
   const expiry = extractExpiryLabel(r.symbol);
 
+  // Tap-anywhere-on-card → open the slide-up trade sheet for this
+  // instrument so the user can place a fresh BUY / SELL on the same
+  // symbol without leaving the Positions page. Inner action buttons
+  // (TP / SL / Exit) stopPropagation so they don't double-fire.
+  const tradeToken =
+    String(r?.instrument_token ?? r?.token ?? r?.instrument?.token ?? "") || "";
+  const cardOpensTrade = !!onTrade && !!tradeToken;
   return (
-    <li className="rounded-xl border border-border bg-card p-3 shadow-sm">
+    <li
+      className={cn(
+        "rounded-xl border border-border bg-card p-3 shadow-sm",
+        cardOpensTrade && "cursor-pointer transition-colors hover:bg-muted/20",
+      )}
+      onClick={cardOpensTrade ? () => onTrade!(tradeToken) : undefined}
+    >
       {/* Top row: BUY/SELL · qty · NRML/MIS · time */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
@@ -1701,7 +1747,14 @@ function ActiveMobileCard({
           <div className="grid grid-cols-2 gap-1.5">
             <button
               type="button"
-              onClick={() => onEdit(r, "TP")}
+              onClick={(e) => {
+                // Card wrapper's onClick opens the trade sheet; the
+                // inline TP/SL/Exit actions must stop propagation so a
+                // single tap doesn't fire BOTH "edit SL/TP" AND
+                // "open trade sheet" at once.
+                e.stopPropagation();
+                onEdit(r, "TP");
+              }}
               className="rounded-md border border-dashed border-border px-2 py-1.5 text-[11px] font-semibold hover:bg-muted/40"
             >
               TP{" "}
@@ -1711,7 +1764,10 @@ function ActiveMobileCard({
             </button>
             <button
               type="button"
-              onClick={() => onEdit(r, "SL")}
+              onClick={(e) => {
+                e.stopPropagation();
+                onEdit(r, "SL");
+              }}
               className="rounded-md border border-dashed border-border px-2 py-1.5 text-[11px] font-semibold hover:bg-muted/40"
             >
               SL{" "}
@@ -1722,7 +1778,10 @@ function ActiveMobileCard({
           </div>
           <Button
             size="sm"
-            onClick={() => onExit(r.id)}
+            onClick={(e) => {
+              e.stopPropagation();
+              onExit(r.id);
+            }}
             className="h-9 w-full gap-1 rounded-md bg-destructive/15 px-2.5 text-xs font-semibold text-destructive ring-1 ring-inset ring-destructive/30 hover:bg-destructive hover:text-destructive-foreground hover:ring-destructive"
           >
             <LogOut className="size-3.5" /> Exit

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, Search, TrendingDown, TrendingUp } from "lucide-react";
 import { OptionChainAPI } from "@/lib/api";
+import { useMarketStream } from "@/lib/useMarketStream";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -60,13 +61,70 @@ export default function OptionChainPage() {
   const atmStrike: number | null = data?.atm_strike ?? null;
   const atmSpot: number | null = data?.atm_spot ?? null;
 
-  const filteredRows = useMemo(() => {
-    if (!strikeFilter.trim()) return rows;
-    if (/^\d+$/.test(strikeFilter)) {
-      return rows.filter((r) => String(r.strike).includes(strikeFilter));
+  // ── Live WS overlay ──────────────────────────────────────────
+  // The REST query above refetches every 2.5 s — fine for the strike
+  // grid layout but the numbers FEEL static between polls. Mirror the
+  // marketwatch pattern: subscribe to every visible CE + PE token via
+  // `useMarketStream` so bid / ask / ltp tick at the upstream rate
+  // (throttled to ~500 ms display) and the grid feels live. User
+  // complaint: "option chain page me tick tick wali movement nahi
+  // ho rahi, esko start karo, user ko feel ho price move karte".
+  // Cap to the 200 nearest-to-ATM tokens so a 1000-strike feed
+  // (BANKNIFTY weeklies) doesn't open a huge subscription set.
+  const visibleTokens = useMemo<string[]>(() => {
+    if (!rows.length) return [];
+    const tokens: string[] = [];
+    for (const r of rows) {
+      if (r.ce?.token) tokens.push(String(r.ce.token));
+      if (r.pe?.token) tokens.push(String(r.pe.token));
     }
-    return rows;
-  }, [rows, strikeFilter]);
+    return tokens.slice(0, 400);
+  }, [rows]);
+  const liveQuotes = useMarketStream(visibleTokens);
+
+  // Overlay the live tick onto each row's CE / PE leg so the table
+  // renders sub-second movement. The original `r.ce` / `r.pe` keep
+  // every field (volume, oi, change_pct) and we just splice in the
+  // most recent bid / ask / ltp from the WS feed.
+  const liveRows = useMemo(() => {
+    if (liveQuotes.size === 0) return rows;
+    return rows.map((r) => {
+      const ceLive = r.ce?.token ? liveQuotes.get(String(r.ce.token)) : undefined;
+      const peLive = r.pe?.token ? liveQuotes.get(String(r.pe.token)) : undefined;
+      if (!ceLive && !peLive) return r;
+      return {
+        ...r,
+        ce: ceLive
+          ? {
+              ...r.ce,
+              bid: Number(ceLive.bid ?? r.ce?.bid ?? 0),
+              ask: Number(ceLive.ask ?? r.ce?.ask ?? 0),
+              ltp: Number(ceLive.ltp ?? r.ce?.ltp ?? 0),
+              change_pct: Number(ceLive.change_pct ?? r.ce?.change_pct ?? 0),
+              volume: Number(ceLive.volume ?? r.ce?.volume ?? 0),
+            }
+          : r.ce,
+        pe: peLive
+          ? {
+              ...r.pe,
+              bid: Number(peLive.bid ?? r.pe?.bid ?? 0),
+              ask: Number(peLive.ask ?? r.pe?.ask ?? 0),
+              ltp: Number(peLive.ltp ?? r.pe?.ltp ?? 0),
+              change_pct: Number(peLive.change_pct ?? r.pe?.change_pct ?? 0),
+              volume: Number(peLive.volume ?? r.pe?.volume ?? 0),
+            }
+          : r.pe,
+      };
+    });
+  }, [rows, liveQuotes]);
+
+  const filteredRows = useMemo(() => {
+    if (!strikeFilter.trim()) return liveRows;
+    if (/^\d+$/.test(strikeFilter)) {
+      return liveRows.filter((r) => String(r.strike).includes(strikeFilter));
+    }
+    return liveRows;
+  }, [liveRows, strikeFilter]);
 
   // Auto-scroll to ATM row on load / underlying change
   const atmRowRef = useRef<HTMLTableRowElement | null>(null);
