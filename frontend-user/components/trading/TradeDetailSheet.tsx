@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -146,6 +146,18 @@ function TradeDetailSheetInner({ token, open, onClose, onSwap }: Props) {
   // Option-chain picker open state. Only meaningful for Indian
   // equity/index/future rows (see `showOptionChain` below).
   const [optionChainOpen, setOptionChainOpen] = useState(false);
+  // True for ~250 ms while the in-sheet OptionChainPicker is swapping
+  // the parent's `token` to a freshly-picked strike. Used by the outer
+  // Dialog's `onOpenChange` below to ignore the spurious close event
+  // that the inner picker's Radix Dialog dismisses up the tree on
+  // some Android viewports (mobile tap-through on the stacked
+  // overlays). Without it, picking a strike in the sheet's option
+  // chain would call onClose() → parent setTradeToken(null) → outer
+  // sheet unmounts before the new token's setSheetToken can reach the
+  // parent. User-flagged: "marketwatch se stock open karne ke baad
+  // option chain me strike click karne par card open nahi hota,
+  // sheet band ho jata".
+  const swappingRef = useRef(false);
   const router = useRouter();
 
   // ── Segment + product ─────────────────────────────────────────────
@@ -709,7 +721,24 @@ function TradeDetailSheetInner({ token, open, onClose, onSwap }: Props) {
   }
 
   return (
-    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        if (v) return;
+        // In-sheet OptionChainPicker is in the middle of swapping the
+        // parent's token to a new strike — ignore the close event the
+        // inner picker bubbles up. Parent will re-evaluate `open`
+        // against the new token in the next render and the sheet
+        // stays mounted.
+        if (swappingRef.current) return;
+        // Picker is still open — the user tapped somewhere inside the
+        // picker's stack but didn't pick a strike. Don't tear down the
+        // outer sheet just because the inner Dialog is animating
+        // closed (mobile overlay stacking quirk).
+        if (optionChainOpen) return;
+        onClose();
+      }}
+    >
       <DialogContent className="flex max-h-[92vh] w-[calc(100%-1rem)] max-w-md flex-col gap-0 overflow-hidden p-0">
         <DialogTitle className="sr-only">
           Trade {instrument?.symbol ?? ""}
@@ -1132,23 +1161,33 @@ function TradeDetailSheetInner({ token, open, onClose, onSwap }: Props) {
             // would unmount the entire sheet, looking to the user like
             // "card hi nahi khula".
             if (!tok) return;
-            setOptionChainOpen(false);
-            // Parent-provided `onSwap` is now the SOLE signal that the
-            // sheet should stay open and swap to the new strike. Earlier
-            // we additionally gated on `matchMedia("(max-width: 767px)")`,
-            // but several Android browsers report a CSS viewport ≥ 768 px
-            // on phones (Xiaomi / Realme zoom defaults) — the gate fell
-            // through, the sheet closed, and the user got dumped on
-            // /terminal even though they were on a phone. Symptom user
-            // hit four times: "option chain me price click karne par
-            // card open nahi hota, chart khulta". Dropping the viewport
-            // check is safe because both consumers (marketwatch +
-            // option-chain) only pass `onSwap` when the slide-up sheet
-            // is the intended destination.
             if (onSwap) {
+              // ORDER MATTERS — set the swap flag and update the
+              // parent's token FIRST, dismiss the picker SECOND. This
+              // way:
+              //  • swappingRef stops the outer Dialog's onOpenChange
+              //    from honouring the inner picker's close event,
+              //  • parent's setTradeToken(newToken) runs in the same
+              //    React batch, so the outer Dialog's `open` prop
+              //    stays truthy across the commit (`open = !!token`),
+              //  • setOptionChainOpen(false) tears down the picker
+              //    after both of the above have already landed.
+              // The 250 ms timeout covers React's commit phase plus
+              // Radix's overlay dismiss animation — anything longer
+              // and a deliberate user tap to close the sheet would
+              // start failing.
+              swappingRef.current = true;
               onSwap(String(tok));
+              setOptionChainOpen(false);
+              window.setTimeout(() => {
+                swappingRef.current = false;
+              }, 250);
               return;
             }
+            // No onSwap → not a sheet-driven flow; close + navigate to
+            // /terminal so the picker still does something useful on
+            // pages that mount it without the swap callback.
+            setOptionChainOpen(false);
             onClose();
             router.push(`/terminal?token=${encodeURIComponent(tok)}`);
           }}
