@@ -197,16 +197,30 @@ export function OptionChainPicker({ open, onOpenChange, onPick, initialUnderlyin
             "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95"
           )}
         >
-          {/* Search bar */}
+          {/* Search bar — hidden on mobile. User explicitly asked to
+              drop the search row from the picker on phones ("option
+              chain se search vale remove kar do mobile view me"); the
+              underlying chip + strike grid already covers their need
+              for narrowing to NIFTY / BANKNIFTY / a specific
+              underlying. Desktop (md+) keeps the free-text search
+              because typing on a keyboard is faster than tapping the
+              underlying chips. The header itself stays so the LIVE /
+              CLOSE chip and the X close button remain reachable. */}
           <div className="flex items-center gap-2 border-b border-border px-4 py-3">
-            <Search className="size-4 text-muted-foreground" />
-            <input
-              autoFocus
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search instruments…"
-              className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-            />
+            <div className="hidden flex-1 items-center gap-2 md:flex">
+              <Search className="size-4 text-muted-foreground" />
+              <input
+                autoFocus
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search instruments…"
+                className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+              />
+            </div>
+            {/* On mobile the header collapses to "Option chain" so the
+                LIVE chip + close button still have somewhere to sit. */}
+            <span className="text-sm font-semibold md:hidden">Option chain</span>
+            <span className="flex-1 md:hidden" />
             {dataSource && (
               <span
                 title={
