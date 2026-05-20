@@ -122,16 +122,25 @@ async def adjust(
     # recovery remainder).
     original_amt = amt
 
-    # ── Settlement-outstanding recovery (DEPOSIT only) ────────────────
+    # ── Settlement-outstanding recovery (ANY positive credit) ─────────
     # When the user has accrued settlement_outstanding (from a previous
-    # stop-out shortfall) and is making a DEPOSIT, deduct the outstanding
-    # FIRST out of the deposit, then credit the remainder to balance.
+    # stop-out shortfall), every inbound credit clears that debt FIRST
+    # before any of the new amount lands on available_balance. Applies
+    # to DEPOSIT, BONUS, ADJUSTMENT, PROMO, INTER_USER, PNL credits on
+    # winning trades — the user must clear their tab before earning new
+    # liquidity. Excluded: REVERSAL and the SETTLEMENT_OUTSTANDING_*
+    # accounting types themselves (would loop or double-book).
     # A separate SETTLEMENT_OUTSTANDING_RECOVERY transaction is written
-    # below (after the primary DEPOSIT txn) for auditability.
+    # below (after the primary txn) for auditability.
+    _NO_RECOVERY_TYPES = {
+        TransactionType.REVERSAL,
+        TransactionType.SETTLEMENT_OUTSTANDING_BOOKED,
+        TransactionType.SETTLEMENT_OUTSTANDING_RECOVERY,
+    }
     recovery_amount = Decimal("0")
     if (
-        transaction_type == TransactionType.DEPOSIT
-        and amt > ZERO
+        amt > ZERO
+        and transaction_type not in _NO_RECOVERY_TYPES
         and to_decimal(w.settlement_outstanding) > ZERO
     ):
         outstanding = to_decimal(w.settlement_outstanding)
@@ -324,15 +333,49 @@ async def block_margin(user_id: str | PydanticObjectId, amount: Decimal | float)
 
 
 async def release_margin(user_id: str | PydanticObjectId, amount: Decimal | float) -> None:
+    """Return blocked margin to the wallet. If the user has accrued
+    settlement_outstanding, the released amount clears that debt FIRST
+    before any remainder lands on available_balance — same rule as the
+    DEPOSIT path in `adjust()`. Writes a SETTLEMENT_OUTSTANDING_RECOVERY
+    transaction when recovery happens, so the ledger reflects where the
+    margin went.
+    """
     amt = quantize_money(to_decimal(amount))
     if amt <= ZERO:
         return
     w = await get_or_create(user_id)
     actual = min(amt, to_decimal(w.used_margin))
+
+    # Recover outstanding from the released margin first.
+    outstanding = to_decimal(w.settlement_outstanding)
+    recovery_amount = min(outstanding, actual) if outstanding > ZERO else Decimal("0")
+    credit_to_balance = actual - recovery_amount
+
+    if recovery_amount > ZERO:
+        w.settlement_outstanding = to_decimal128(outstanding - recovery_amount)
     w.used_margin = to_decimal128(sub(w.used_margin, actual))
-    w.available_balance = to_decimal128(add(w.available_balance, actual))
+    w.available_balance = to_decimal128(
+        add(w.available_balance, credit_to_balance)
+    )
     w.version += 1
     await w.save()
+
+    if recovery_amount > ZERO:
+        bal_after_for_txn = to_decimal(w.available_balance)
+        recovery_txn = WalletTransaction(
+            user_id=PydanticObjectId(user_id),
+            transaction_type=TransactionType.SETTLEMENT_OUTSTANDING_RECOVERY,
+            amount=Decimal128(str(-recovery_amount)),
+            balance_before=Decimal128(str(bal_after_for_txn)),
+            balance_after=Decimal128(str(bal_after_for_txn)),
+            narration=(
+                f"Settlement outstanding recovered from margin release "
+                f"(₹{recovery_amount})"
+            ),
+            status=TransactionStatus.COMPLETED,
+        )
+        await recovery_txn.insert()
+
     asyncio.create_task(
         _publish_wallet_event(
             user_id,
