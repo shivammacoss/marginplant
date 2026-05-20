@@ -158,6 +158,41 @@ async def init_database() -> None:
     await init_beanie(database=_db, document_models=_document_models())
     logger.info("mongodb_connected", extra={"db": settings.MONGODB_DB_NAME})
 
+    # ── Migration: drop legacy global-unique account_number index ───
+    # Was a single-field unique on `company_bank_accounts.account_number`
+    # which prevented two admins / brokers from registering the same
+    # bank account in their own pools (a Beanie-managed model change
+    # alone wouldn't drop the old index — Mongo keeps both the new
+    # compound and the old single-field index, and the old one keeps
+    # rejecting writes). One-shot drop here so the new compound key
+    # (account_number, owner_admin_id, owner_broker_id) is the only
+    # uniqueness constraint going forward. Idempotent: if the index
+    # is already gone, the drop call is a no-op via the exception
+    # swallow.
+    try:
+        coll = _db["company_bank_accounts"]
+        existing = await coll.index_information()
+        for name, spec in existing.items():
+            keys = spec.get("key") or []
+            if (
+                len(keys) == 1
+                and keys[0][0] == "account_number"
+                and spec.get("unique")
+            ):
+                await coll.drop_index(name)
+                logger.info(
+                    "dropped_legacy_index",
+                    extra={
+                        "collection": "company_bank_accounts",
+                        "index": name,
+                    },
+                )
+    except Exception:
+        logger.warning(
+            "drop_legacy_account_number_index_failed",
+            exc_info=True,
+        )
+
 
 async def close_database() -> None:
     global _client, _db

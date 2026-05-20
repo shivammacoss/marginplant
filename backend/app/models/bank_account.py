@@ -44,7 +44,26 @@ class CompanyBankAccount(TimestampMixin):
         name = "company_bank_accounts"
         indexes = [
             IndexModel([("is_active", ASCENDING), ("is_default", ASCENDING)]),
-            IndexModel([("account_number", ASCENDING)], unique=True),
+            # account_number is scoped by owner (admin / broker pool) so the
+            # SAME account number can legitimately exist in two different
+            # admins' pools (each broker / admin manages their own list).
+            # Earlier we had a GLOBAL unique on account_number which caused
+            # admin B's POST to crash with DuplicateKeyError when admin A
+            # had already used the same number — symptom user flagged: "ek
+            # admin me add ho gaya, doosre me nahi". The duplicate error
+            # surfaced as a 500 without CORS headers, so the browser
+            # showed it as a CORS error in the console (red herring).
+            # Compound key includes both owner fields so a single account
+            # number can exist once per (admin_pool, broker_pool) tuple —
+            # which is what the cascade resolver already expects.
+            IndexModel(
+                [
+                    ("account_number", ASCENDING),
+                    ("owner_admin_id", ASCENDING),
+                    ("owner_broker_id", ASCENDING),
+                ],
+                unique=True,
+            ),
             IndexModel([("owner_admin_id", ASCENDING), ("is_active", ASCENDING)]),
             IndexModel([("owner_broker_id", ASCENDING), ("is_active", ASCENDING)]),
         ]

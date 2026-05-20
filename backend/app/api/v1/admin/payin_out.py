@@ -420,7 +420,30 @@ async def create_bank(
         owner_admin_id=owner_admin_id,
         owner_broker_id=owner_broker_id,
     )
-    await row.insert()
+    # Catch the duplicate-key explicitly so the response is a clean
+    # 400 WITH cors headers attached (FastAPI's HTTPException flows
+    # through the exception handler chain). Without this catch the
+    # raw pymongo DuplicateKeyError bubbled out as a 500 without
+    # CORS headers, which the browser then rendered as a misleading
+    # "CORS policy" error in the console. The new compound index
+    # makes this scenario rare (different owners can reuse the same
+    # account_number now), but it can still fire within ONE owner
+    # accidentally registering the same number twice — and the user
+    # deserves a clear message in that case too.
+    try:
+        await row.insert()
+    except Exception as e:
+        from pymongo.errors import DuplicateKeyError
+
+        if isinstance(e, DuplicateKeyError) or "duplicate key" in str(e).lower():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Account {row.account_number} is already in your bank list. "
+                    "Edit the existing entry instead of adding a duplicate."
+                ),
+            )
+        raise
     await _invalidate_company_banks_cache(owner_admin_id, owner_broker_id)
     return APIResponse(data={"id": str(row.id)})
 
