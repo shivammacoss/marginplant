@@ -202,6 +202,13 @@ export const NettingAPI = {
     unwrap<any>(
       api.delete(`/admin/netting/user/${userId}/${segmentName}`, { params: symbol ? { symbol } : {} })
     ),
+  /** Wipe ALL UserSegmentOverride rows for this user so they snap back
+   *  to the inherited cascade (broker / admin / super-admin / platform
+   *  defaults). Returns the count removed. */
+  clearAllUserOverrides: (userId: string) =>
+    unwrap<{ ok: boolean; deleted: number }>(
+      api.delete(`/admin/netting/user/${userId}`),
+    ),
   copy: (body: { source_user_id: string; target_user_ids: string[]; overwrite?: boolean }) =>
     unwrap<any>(api.post("/admin/netting/copy", body)),
   usersWithOverrides: () => unwrap<any[]>(api.get("/admin/netting/users-with-overrides")),

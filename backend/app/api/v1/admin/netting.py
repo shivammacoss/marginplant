@@ -610,6 +610,26 @@ async def delete_user_override(
     return APIResponse(data={"ok": True})
 
 
+@router.delete("/user/{user_id}", response_model=APIResponse[dict])
+async def clear_all_user_overrides(
+    user_id: str,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("segment_settings", "write")),
+):
+    """Remove EVERY per-user segment / script override for `user_id`,
+    snapping them back to the inherited cascade (their broker / admin /
+    super-admin pool + platform defaults). Admin-flagged: "user me ek
+    baar setting karne ke baad usko delete karne ka option nahi hai
+    taki user wapas global settings me a jaye".
+
+    Audit-friendly: returns the count removed so the operator can
+    confirm the change in the toast.
+    """
+    await assert_user_in_scope(admin, user_id)
+    deleted = await svc.clear_all_user_overrides(user_id)
+    return APIResponse(data={"ok": True, "deleted": deleted})
+
+
 @router.get("/users-with-overrides", response_model=APIResponse[list])
 async def list_users_with_overrides(
     admin: CurrentAdmin,

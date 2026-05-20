@@ -4,9 +4,16 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ClipboardCopy, Plus, RotateCcw, Save, Search, Trash2, X } from "lucide-react";
+import { ClipboardCopy, EraserIcon, Plus, RotateCcw, Save, Search, Trash2, X } from "lucide-react";
 import { NettingAPI, UsersAPI } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CATEGORY_FIELDS, isFieldNA, type SegmentRow } from "@/lib/nettingMatrixConfig";
@@ -19,6 +26,11 @@ export function UserOverrides() {
   const deepLinkUser = sp.get("user");
   const [userQuery, setUserQuery] = useState("");
   const [user, setUser] = useState<any | null>(null);
+  // Clear-all-overrides confirm dialog target. Stores the pill the
+  // admin clicked the X on so the modal can show their user_code +
+  // override_count for confirmation.
+  const [clearTarget, setClearTarget] = useState<any | null>(null);
+  const [clearing, setClearing] = useState(false);
 
   useEffect(() => {
     if (deepLinkUser && !user) {
@@ -144,31 +156,120 @@ export function UserOverrides() {
             {usersWithOverrides?.map((u: any) => {
               const active = user?.id === u.id;
               return (
-                <button
+                <span
                   key={u.id}
-                  type="button"
-                  onClick={() => {
-                    setUser(u);
-                    setUserQuery("");
-                  }}
                   className={
-                    "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] transition-colors " +
+                    "inline-flex items-center gap-1 rounded-full border px-1 py-0.5 text-[11px] transition-colors " +
                     (active
                       ? "border-primary bg-primary text-primary-foreground"
                       : "border-amber-500/40 bg-background text-foreground hover:bg-amber-500/10")
                   }
-                  title={`${u.full_name} — ${u.override_count} segment override doc${u.override_count === 1 ? "" : "s"}`}
                 >
-                  <span className="font-mono">{u.user_code}</span>
-                  <span className={active ? "text-primary-foreground/80" : "text-muted-foreground"}>
-                    ({u.override_count})
-                  </span>
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUser(u);
+                      setUserQuery("");
+                    }}
+                    className="flex items-center gap-1 rounded-full px-1.5 py-0 outline-none"
+                    title={`${u.full_name} — ${u.override_count} segment override doc${u.override_count === 1 ? "" : "s"}`}
+                  >
+                    <span className="font-mono">{u.user_code}</span>
+                    <span className={active ? "text-primary-foreground/80" : "text-muted-foreground"}>
+                      ({u.override_count})
+                    </span>
+                  </button>
+                  {/* Clear-all button: removes every per-user override
+                      so the user falls back onto the inherited
+                      cascade. Admin-flagged: "user me ek baar setting
+                      karne ke baad delete karne ka option nahi hai
+                      taki user wapas global me a jaye". */}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setClearTarget(u);
+                    }}
+                    title={`Reset ${u.user_code} to inherited settings`}
+                    className={
+                      "grid size-4 place-items-center rounded-full transition-colors " +
+                      (active
+                        ? "hover:bg-primary-foreground/20 text-primary-foreground/70"
+                        : "hover:bg-amber-500/20 text-muted-foreground hover:text-amber-700")
+                    }
+                  >
+                    <X className="size-3" />
+                  </button>
+                </span>
               );
             })}
           </div>
         </div>
       )}
+
+      {/* Confirm dialog for the clear-all action. Renders the user's
+          code + override count so the admin doesn't fat-finger the
+          wrong row. */}
+      <Dialog open={!!clearTarget} onOpenChange={(o) => { if (!o) setClearTarget(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Reset overrides?</DialogTitle>
+          </DialogHeader>
+          {clearTarget && (
+            <p className="text-xs text-muted-foreground">
+              Remove all {clearTarget.override_count} segment / script
+              override{clearTarget.override_count === 1 ? "" : "s"} for{" "}
+              <span className="font-mono text-foreground">{clearTarget.user_code}</span>
+              {clearTarget.full_name ? (
+                <> ({clearTarget.full_name})</>
+              ) : null}
+              ? The user will fall back to your tier&apos;s default
+              settings (and below: super-admin / platform defaults).
+              Their open positions are NOT affected; only future order
+              validation reads from the cleaned cascade.
+            </p>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setClearTarget(null)}
+              disabled={clearing}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              loading={clearing}
+              disabled={clearing}
+              onClick={async () => {
+                if (!clearTarget) return;
+                setClearing(true);
+                try {
+                  const r = await NettingAPI.clearAllUserOverrides(clearTarget.id);
+                  toast.success(
+                    `Reset ${clearTarget.user_code} — removed ${r?.deleted ?? 0} override(s)`,
+                  );
+                  setClearTarget(null);
+                  // If the clear target is the currently-selected
+                  // user the table refetch needs to clear ALL the
+                  // staged drafts too; reset the local edit map.
+                  if (user?.id === clearTarget.id) {
+                    setEdits({});
+                  }
+                  qc.invalidateQueries({ queryKey: ["admin", "netting", "user", clearTarget.id] });
+                  qc.invalidateQueries({ queryKey: ["admin", "netting", "users-with-overrides"] });
+                } catch (e: any) {
+                  toast.error(e?.message ?? "Reset failed");
+                } finally {
+                  setClearing(false);
+                }
+              }}
+            >
+              <EraserIcon className="size-4" /> Reset overrides
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <div className="rounded-md border border-border bg-muted/10 p-3">
         <Label>Search user</Label>

@@ -1610,6 +1610,39 @@ async def delete_user_override(
     await cache_delete_pattern(f"blocked_syms:{uid}")
 
 
+async def clear_all_user_overrides(
+    user_id: str | PydanticObjectId,
+) -> int:
+    """Wipe every UserSegmentOverride doc for `user_id` so the user
+    snaps cleanly back to the inherited cascade (broker / admin /
+    super-admin / platform defaults). Returns the count removed for
+    the operator's toast.
+
+    Admin-flagged: "user me ek baar setting karne ke baad delete
+    karne ka option nahi hai taki user wapas global settings me a
+    jaye". Existing `delete_user_override` only takes ONE segment +
+    symbol — to fully reset a user the admin had to click reset on
+    every row, one by one. This is the one-shot version.
+
+    Also busts every per-user cache key (netting_eff, inactive
+    admin rows, blocked_syms) so the next order resolves cleanly
+    instead of waiting on the 30 s / 5 min TTLs.
+    """
+    uid = PydanticObjectId(str(user_id))
+    rows = await UserSegmentOverride.find(
+        UserSegmentOverride.user_id == uid
+    ).to_list()
+    deleted = len(rows)
+    if deleted:
+        await UserSegmentOverride.find(
+            UserSegmentOverride.user_id == uid
+        ).delete()
+    await cache_delete_pattern(f"netting_eff:{uid}:*")
+    await cache_delete_pattern(f"inactive_admin_rows:{uid}")
+    await cache_delete_pattern(f"blocked_syms:{uid}")
+    return deleted
+
+
 # ── Effective resolver (legacy field-name shim for order_validator) ─
 # Map legacy SegmentType strings (NSE_EQUITY, NSE_FUTURE, …) to NettingSegment
 # names (NSE_EQ, NSE_FUT, …). Multiple legacy types fold into one netting row.

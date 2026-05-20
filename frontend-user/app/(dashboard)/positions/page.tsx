@@ -10,6 +10,7 @@ import { usePriceFlash } from "@/lib/usePriceFlash";
 import { isInstrumentMarketOpen } from "@/lib/marketHours";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
@@ -29,6 +30,7 @@ import { cn, formatINR, formatIST, formatPrice, pnlColor } from "@/lib/utils";
 type TabKey =
   | "position"
   | "active"
+  | "pending"
   | "closed"
   | "cancelled"
   | "rejected";
@@ -177,6 +179,9 @@ export default function PositionsPage() {
   // potion ko click karne par bhi same buy/sell ke liye card open
   // ho jaisa option chain me kiya hai".
   const [sheetToken, setSheetToken] = useState<string | null>(null);
+  // Pending-order edit dialog state. Set when the user taps the pencil
+  // on a pending order card; cleared on cancel / successful save.
+  const [editingPending, setEditingPending] = useState<any | null>(null);
 
   // ── Data ────────────────────────────────────────────────────────────
   // Open positions are always fetched so the tab badge stays current and
@@ -217,6 +222,27 @@ export default function PositionsPage() {
     refetchInterval: 10000,
     enabled: tab === "cancelled",
   });
+  // Pending = OPEN / PENDING / TRIGGERED orders (limit / SL-M waiting
+  // for the matching engine to fire). Filtered client-side from the
+  // unfiltered /orders list because the backend's status filter
+  // accepts only one status at a time while pending here spans 3
+  // states. Fast poll (3 s) so newly-placed pending orders appear
+  // promptly + cancels reflect immediately.
+  const { data: pendingRaw, isFetching: pendingLoading } = useQuery<any[]>({
+    queryKey: ["orders", "PENDING-LIKE"],
+    queryFn: () => OrderAPI.list() as Promise<any[]>,
+    refetchInterval: 3000,
+    enabled: tab === "pending",
+  });
+  const pending = useMemo(
+    () =>
+      (pendingRaw ?? []).filter((o: any) =>
+        ["PENDING", "OPEN", "TRIGGERED"].includes(
+          String(o?.status ?? "").toUpperCase(),
+        ),
+      ),
+    [pendingRaw],
+  );
   const { data: rejected, isFetching: rejectedLoading } = useQuery<any[]>({
     queryKey: ["orders", "REJECTED"],
     queryFn: () => OrderAPI.list("REJECTED") as Promise<any[]>,
@@ -237,6 +263,7 @@ export default function PositionsPage() {
     closed: closed?.length ?? 0,
     position: open?.length ?? 0,
     active: activeTrades?.length ?? 0,
+    pending: pending?.length ?? 0,
     cancelled: cancelled?.length ?? 0,
     rejected: rejected?.length ?? 0,
   };
@@ -476,6 +503,28 @@ export default function PositionsPage() {
     } catch (e: any) {
       toast.dismiss(pendingToastId);
       toast.error(e?.message || "Failed");
+    }
+  }
+
+  async function cancelPendingOrder(id: string) {
+    // Optimistic-remove the row from the pending list so the user
+    // sees the card disappear in the same frame as the tap. Falls
+    // back to the snapshot if the backend rejects (rare — usually
+    // means the order already filled while the request was in
+    // flight).
+    qc.cancelQueries({ queryKey: ["orders", "PENDING-LIKE"] });
+    const snapshot = qc.getQueryData<any[]>(["orders", "PENDING-LIKE"]);
+    qc.setQueryData<any[]>(["orders", "PENDING-LIKE"], (old) =>
+      Array.isArray(old) ? old.filter((o) => o.id !== id) : [],
+    );
+    const tid = toast.success("Order cancelled", { duration: 1500 });
+    try {
+      await OrderAPI.cancel(id);
+      qc.invalidateQueries({ queryKey: ["orders"] });
+    } catch (e: any) {
+      if (snapshot) qc.setQueryData(["orders", "PENDING-LIKE"], snapshot);
+      toast.dismiss(tid);
+      toast.error(e?.message || "Cancel failed");
     }
   }
 
@@ -913,7 +962,13 @@ export default function PositionsPage() {
                 rows: rejected,
                 loading: rejectedLoading && !rejected,
               }
-            : { columns: positionCols, rows: open, loading: openLoading && !open };
+            : tab === "pending"
+              ? {
+                  columns: orderCols,
+                  rows: pending,
+                  loading: pendingLoading && !pendingRaw,
+                }
+              : { columns: positionCols, rows: open, loading: openLoading && !open };
 
   return (
     <div className="space-y-4">
@@ -960,6 +1015,9 @@ export default function PositionsPage() {
         </TabBtn>
         <TabBtn active={tab === "active"} count={counts.active} onClick={() => setTab("active")}>
           Active
+        </TabBtn>
+        <TabBtn active={tab === "pending"} count={counts.pending} onClick={() => setTab("pending")}>
+          Pending
         </TabBtn>
         <TabBtn active={tab === "closed"} count={counts.closed} onClick={() => setTab("closed")}>
           Closed
@@ -1040,6 +1098,31 @@ export default function PositionsPage() {
             />
           </div>
         </>
+      ) : tab === "pending" ? (
+        <>
+          {/* Mobile cards for pending orders — same visual treatment as
+              the active-trade cards (BUY/SELL pill + symbol + qty +
+              entry → ltp + bottom action row) so the user sees one
+              consistent shape across both tabs. Edit pencil opens the
+              modify dialog; X cancels via OrderAPI.cancel with the
+              optimistic-remove pattern. */}
+          <div className="md:hidden">
+            <PendingMobileList
+              rows={pending}
+              loading={pendingLoading && !pendingRaw}
+              onEdit={(o) => setEditingPending(o)}
+              onCancel={cancelPendingOrder}
+            />
+          </div>
+          <div className="hidden md:block">
+            <DataTable
+              columns={tableProps.columns}
+              rows={tableProps.rows}
+              keyExtractor={(r) => r.id}
+              loading={tableProps.loading}
+            />
+          </div>
+        </>
       ) : (
         <DataTable
           columns={tableProps.columns}
@@ -1072,6 +1155,18 @@ export default function PositionsPage() {
         open={!!sheetToken}
         onClose={() => setSheetToken(null)}
         onSwap={(tok) => setSheetToken(tok)}
+      />
+
+      {/* Pending-order modify dialog. Lets the user tweak lots, price
+          (for LIMIT) or trigger_price (for SL-M) on a still-pending
+          order without cancelling + re-placing. */}
+      <EditPendingOrderDialog
+        order={editingPending}
+        onClose={() => setEditingPending(null)}
+        onSaved={() => {
+          qc.invalidateQueries({ queryKey: ["orders"] });
+          setEditingPending(null);
+        }}
       />
     </div>
   );
@@ -1789,5 +1884,290 @@ function ActiveMobileCard({
         </div>
       </div>
     </li>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Pending-order mobile list + card + edit dialog
+// ─────────────────────────────────────────────────────────────────
+function PendingMobileList({
+  rows,
+  loading,
+  onEdit,
+  onCancel,
+}: {
+  rows: any[];
+  loading: boolean;
+  onEdit: (order: any) => void;
+  onCancel: (id: string) => void;
+}) {
+  if (loading) {
+    return (
+      <div className="grid place-items-center py-10 text-sm text-muted-foreground">
+        Loading…
+      </div>
+    );
+  }
+  if (!rows || rows.length === 0) {
+    return (
+      <div className="grid place-items-center py-10 text-sm text-muted-foreground">
+        No pending orders.
+      </div>
+    );
+  }
+  return (
+    <ul className="space-y-3">
+      {rows.map((o) => (
+        <PendingOrderCard
+          key={o.id}
+          o={o}
+          onEdit={() => onEdit(o)}
+          onCancel={() => onCancel(o.id)}
+        />
+      ))}
+    </ul>
+  );
+}
+
+function PendingOrderCard({
+  o,
+  onEdit,
+  onCancel,
+}: {
+  o: any;
+  onEdit: () => void;
+  onCancel: () => void;
+}) {
+  const side: "BUY" | "SELL" =
+    String(o?.action ?? "").toUpperCase() === "SELL" ? "SELL" : "BUY";
+  const lots = Number(o?.lots ?? 0);
+  const qty = Number(o?.quantity ?? lots * Number(o?.lot_size ?? 1));
+  const orderType = String(o?.order_type ?? "").toUpperCase();
+  const price = Number(o?.price ?? 0);
+  const trigger = Number(o?.trigger_price ?? 0);
+  const ts = o?.created_at ?? o?.placed_at ?? null;
+  const status = String(o?.status ?? "").toUpperCase();
+  return (
+    <li className="rounded-xl border border-border bg-card p-3 shadow-sm">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span
+            className={cn(
+              "rounded px-2 py-0.5 text-[10px] font-bold uppercase ring-1 ring-inset",
+              side === "BUY"
+                ? "bg-buy/10 text-buy ring-buy/30"
+                : "bg-sell/10 text-sell ring-sell/30",
+            )}
+          >
+            {side}
+          </span>
+          <span className="font-tabular text-xs text-muted-foreground">
+            🛒 {qty || lots}
+          </span>
+          <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase">
+            {orderType || "—"}
+          </span>
+        </div>
+        <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase text-amber-600">
+          {status || "PENDING"}
+        </span>
+      </div>
+
+      <div className="mt-2 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-base font-bold leading-tight">
+            {o?.symbol ?? o?.instrument?.symbol ?? "—"}
+          </div>
+          <div className="mt-0.5 text-[11px] uppercase tracking-wide text-muted-foreground">
+            {o?.exchange ?? o?.segment ?? "—"}
+            {ts && (
+              <span className="ml-2 font-tabular normal-case text-muted-foreground/80">
+                {formatIST(ts, { withSeconds: false })}
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="shrink-0 text-right">
+          {orderType === "LIMIT" && (
+            <div className="font-tabular text-sm font-semibold tabular-nums">
+              ₹{price.toFixed(2)}
+              <span className="ml-1 text-[10px] font-normal uppercase text-muted-foreground">
+                limit
+              </span>
+            </div>
+          )}
+          {(orderType === "SL_M" || orderType === "SL") && (
+            <div className="font-tabular text-sm font-semibold tabular-nums">
+              ₹{trigger.toFixed(2)}
+              <span className="ml-1 text-[10px] font-normal uppercase text-muted-foreground">
+                trigger
+              </span>
+            </div>
+          )}
+          {orderType === "MARKET" && (
+            <div className="text-xs text-muted-foreground">market</div>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onEdit}
+          className="h-9 gap-1 rounded-md text-xs font-semibold"
+        >
+          <Pencil className="size-3.5" /> Edit
+        </Button>
+        <Button
+          size="sm"
+          onClick={onCancel}
+          className="h-9 gap-1 rounded-md bg-destructive/15 text-xs font-semibold text-destructive ring-1 ring-inset ring-destructive/30 hover:bg-destructive hover:text-destructive-foreground hover:ring-destructive"
+        >
+          <X className="size-3.5" /> Cancel
+        </Button>
+      </div>
+    </li>
+  );
+}
+
+function EditPendingOrderDialog({
+  order,
+  onClose,
+  onSaved,
+}: {
+  order: any | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [lots, setLots] = useState<string>("");
+  const [price, setPrice] = useState<string>("");
+  const [trigger, setTrigger] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+
+  // Re-seed the form whenever a new order opens the dialog.
+  useMemo(() => {
+    if (!order) return;
+    setLots(String(order.lots ?? ""));
+    setPrice(String(order.price ?? ""));
+    setTrigger(String(order.trigger_price ?? ""));
+  }, [order?.id]);
+
+  if (!order) return null;
+  const orderType = String(order.order_type ?? "").toUpperCase();
+  const showPrice = orderType === "LIMIT";
+  const showTrigger = orderType === "SL_M" || orderType === "SL";
+
+  async function submit() {
+    const lotsN = Number(lots);
+    if (!Number.isFinite(lotsN) || lotsN <= 0) {
+      toast.error("Lots must be > 0");
+      return;
+    }
+    const body: any = { lots: lotsN };
+    if (showPrice) {
+      const pN = Number(price);
+      if (!Number.isFinite(pN) || pN <= 0) {
+        toast.error("Limit price must be > 0");
+        return;
+      }
+      body.price = pN;
+    }
+    if (showTrigger) {
+      const tN = Number(trigger);
+      if (!Number.isFinite(tN) || tN <= 0) {
+        toast.error("Trigger price must be > 0");
+        return;
+      }
+      body.trigger_price = tN;
+    }
+    setBusy(true);
+    try {
+      await OrderAPI.modify(order.id, body);
+      toast.success("Order updated");
+      onSaved();
+    } catch (e: any) {
+      toast.error(e?.message || "Modify failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={!!order} onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent className="max-w-sm gap-3 p-5">
+        <DialogTitle className="text-base font-semibold">
+          Edit {order.symbol ?? "order"}
+        </DialogTitle>
+
+        <div className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-muted-foreground">Side</span>
+            <span
+              className={cn(
+                "font-semibold",
+                String(order.action).toUpperCase() === "BUY" ? "text-buy" : "text-sell",
+              )}
+            >
+              {String(order.action).toUpperCase()}
+            </span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-muted-foreground">Type</span>
+            <span className="font-semibold">{orderType || "—"}</span>
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <Label className="text-xs">Lots</Label>
+            <Input
+              inputMode="decimal"
+              value={lots}
+              onChange={(e) =>
+                setLots(e.target.value.replace(/[^0-9.]/g, "").replace(/(\..*)\./g, "$1"))
+              }
+              className="h-10"
+              autoFocus
+            />
+          </div>
+          {showPrice && (
+            <div className="space-y-1">
+              <Label className="text-xs">Limit price</Label>
+              <Input
+                inputMode="decimal"
+                value={price}
+                onChange={(e) =>
+                  setPrice(e.target.value.replace(/[^0-9.]/g, "").replace(/(\..*)\./g, "$1"))
+                }
+                className="h-10"
+              />
+            </div>
+          )}
+          {showTrigger && (
+            <div className="space-y-1">
+              <Label className="text-xs">Trigger price</Label>
+              <Input
+                inputMode="decimal"
+                value={trigger}
+                onChange={(e) =>
+                  setTrigger(e.target.value.replace(/[^0-9.]/g, "").replace(/(\..*)\./g, "$1"))
+                }
+                className="h-10"
+              />
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 pt-1">
+          <Button variant="ghost" size="sm" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button size="sm" onClick={submit} loading={busy} disabled={busy}>
+            Save changes
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
