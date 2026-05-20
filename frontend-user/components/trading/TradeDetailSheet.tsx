@@ -1120,14 +1120,19 @@ function TradeDetailSheetInner({ token, open, onClose, onSwap }: Props) {
             // "card hi nahi khula".
             if (!tok) return;
             setOptionChainOpen(false);
-            // Mobile + parent gave us `onSwap` → just swap the active
-            // token, keep the bottom-sheet open at the new strike. No
-            // full-route navigation, no closing the sheet only to
-            // re-open it via the chart page (the user's pain point).
-            const isMobileUi =
-              typeof window !== "undefined" &&
-              window.matchMedia("(max-width: 767px)").matches;
-            if (isMobileUi && onSwap) {
+            // Parent-provided `onSwap` is now the SOLE signal that the
+            // sheet should stay open and swap to the new strike. Earlier
+            // we additionally gated on `matchMedia("(max-width: 767px)")`,
+            // but several Android browsers report a CSS viewport ≥ 768 px
+            // on phones (Xiaomi / Realme zoom defaults) — the gate fell
+            // through, the sheet closed, and the user got dumped on
+            // /terminal even though they were on a phone. Symptom user
+            // hit four times: "option chain me price click karne par
+            // card open nahi hota, chart khulta". Dropping the viewport
+            // check is safe because both consumers (marketwatch +
+            // option-chain) only pass `onSwap` when the slide-up sheet
+            // is the intended destination.
+            if (onSwap) {
               onSwap(String(tok));
               return;
             }
