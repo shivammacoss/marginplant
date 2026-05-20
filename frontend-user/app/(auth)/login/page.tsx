@@ -10,6 +10,7 @@ import { toast } from "sonner";
 import { Eye, EyeOff, Loader2 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { ApiError, ProfileAPI, setTokens } from "@/lib/api";
+import { STORAGE_KEYS } from "@/lib/constants";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -58,18 +59,34 @@ function LoginPageInner() {
   const [showPwd, setShowPwd] = useState(false);
   const [needs2fa, setNeeds2fa] = useState(false);
 
-  // If the auth store rehydrated with a live `user`, the visitor is
-  // already signed in — bounce them to /dashboard instead of showing
-  // the login form. Critical for the installed PWA: cold launches land
-  // here from the manifest's start_url, and without this guard a
-  // previously-authed user would see the login form even though their
-  // 30-day refresh token is still valid (user complaint: "ek baar
-  // login ho gaya use to login hi rahe, logout mat ho").
+  // If the auth store rehydrated with a live `user` AND we still have
+  // a refresh token on disk, the visitor is already signed in — bounce
+  // them to /dashboard instead of showing the login form. The
+  // refresh-token check is critical: without it, a "user but no token"
+  // state (set by api.ts's failed-refresh path) would bounce the
+  // visitor back to /dashboard, the dashboard would fire an API call,
+  // get 401, redirect to /login, and we'd be back here — exactly the
+  // band-chalu ping-pong some users hit on flaky networks. With the
+  // refresh-token check, that broken state correctly stays on /login
+  // and shows the form below so the user can re-enter credentials.
   useEffect(() => {
-    if (hydrated && currentUser) {
+    if (!hydrated || !currentUser) return;
+    const hasRefresh =
+      typeof window !== "undefined" &&
+      !!window.localStorage.getItem(STORAGE_KEYS.refreshToken);
+    if (hasRefresh) {
       router.replace("/dashboard");
+    } else {
+      // Stale `user` blob but no token — clear it so the form below
+      // renders and subsequent refreshes don't try to redirect again.
+      try {
+        window.localStorage.removeItem("nb.auth");
+      } catch {
+        /* ignore */
+      }
+      setUser(null);
     }
-  }, [hydrated, currentUser, router]);
+  }, [hydrated, currentUser, router, setUser]);
 
   // Detect admin "Login as user" on the FIRST render — the access + refresh
   // tokens come in as query params when the admin panel pops a new tab via

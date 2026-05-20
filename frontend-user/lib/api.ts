@@ -29,6 +29,19 @@ export function clearTokens() {
   window.localStorage.removeItem(STORAGE_KEYS.accessToken);
   window.localStorage.removeItem(STORAGE_KEYS.refreshToken);
   window.localStorage.removeItem(STORAGE_KEYS.user);
+  // ALSO drop the zustand-persist auth blob (nb.auth). Without this
+  // the store still rehydrates `user` from localStorage on the next
+  // navigation, the dashboard guard sees a "logged in" state, fires
+  // an API call, gets 401 (tokens are gone), refresh fails, we land
+  // back here, redirect to /login — and /login's "if user, go to
+  // /dashboard" effect bounces us back. The screen alternates
+  // dashboard ↔ login forever on phones with flaky networks where a
+  // single refresh failure trips the chain. User report: "kisi phone
+  // me sahi chal raha, kisi me band-chalu jaisa feel a raha".
+  // Wiping nb.auth here makes the store's `user` null on next read,
+  // so the guards correctly send the user to the login form one
+  // time, not in a loop.
+  window.localStorage.removeItem("nb.auth");
 }
 
 api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
