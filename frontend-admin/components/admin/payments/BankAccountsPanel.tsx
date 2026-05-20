@@ -75,17 +75,43 @@ export function BankAccountsPanel() {
     }
     setSaving(true);
     try {
+      // Send ONLY the fields the backend's create/update schema
+      // accepts. `editable` and `id` are response-only / not part of
+      // the payload — leaving them in the body could trip strict
+      // validation and surface as a generic "Network Error" toast on
+      // some setups (the user-flagged symptom from the broker side).
+      const payload = {
+        bank_name: editing.bank_name.trim(),
+        account_holder: editing.account_holder.trim(),
+        account_number: editing.account_number.trim(),
+        ifsc_code: editing.ifsc_code.trim(),
+        upi_id: editing.upi_id?.trim() || undefined,
+        qr_code_url: editing.qr_code_url || undefined,
+        is_active: editing.is_active,
+        is_default: editing.is_default,
+      };
       if (editing.id) {
-        await PayinOutAPI.updateBank(editing.id, editing);
+        await PayinOutAPI.updateBank(editing.id, payload);
         toast.success("Bank updated");
       } else {
-        await PayinOutAPI.createBank(editing);
+        await PayinOutAPI.createBank(payload);
         toast.success("Bank added");
       }
       setEditing(null);
       qc.invalidateQueries({ queryKey: ["admin", "bank-accounts"] });
     } catch (e: any) {
-      toast.error(e.message || "Save failed");
+      // Surface the REAL backend error so the user can see permission
+      // / validation problems instead of a vague "Save failed". Axios
+      // sometimes flattens 4xx into `e.message = "Network Error"` if
+      // the response is small / lacks Content-Type — checking
+      // `response.data.detail` first catches FastAPI HTTPException
+      // payloads cleanly.
+      const detail =
+        e?.response?.data?.error?.message ??
+        e?.response?.data?.detail ??
+        e?.message ??
+        "Save failed";
+      toast.error(String(detail));
     } finally {
       setSaving(false);
     }

@@ -94,19 +94,41 @@ _COMPANY_BANKS_CACHE_TTL = 3600  # 1 h — admin edits invalidate; otherwise rar
 
 @router.get("/company-banks", response_model=APIResponse[list])
 async def company_banks(user: CurrentUser):
-    # Cascade owner resolution: broker > admin > platform default.
-    # Try the most-specific pool the user belongs to first; if that pool
-    # has no active banks, fall back to the next-up pool so the user
-    # always sees something to pay into. Cache key reflects which pool
-    # the answer actually came from, so admin/broker edits invalidate
-    # only the relevant key.
+    # Cascade owner resolution: deepest broker → walk up broker_ancestry
+    # → admin → platform default. Earlier the cascade only checked the
+    # IMMEDIATE broker before falling all the way back to admin, which
+    # skipped any parent broker in a multi-level chain (sub-broker
+    # without own banks went straight to admin, ignoring its parent
+    # broker's banks). User-flagged: "admin ne jo details laga rakhi
+    # hai broker / sub-broker ke user ko bhi wahi show kare, jab tak
+    # broker / sub-broker change na kare". Walking the full ancestry
+    # makes the cascade match that intent — each level shows the
+    # closest ancestor's banks until someone in the chain authors
+    # their own.
     from app.core.redis_client import cache_get, cache_set
 
     cascade: list[tuple[str, dict]] = []
+    # Immediate broker first.
     if user.assigned_broker_id is not None:
         cascade.append(
             (f"broker:{user.assigned_broker_id}", {"owner_broker_id": user.assigned_broker_id})
         )
+    # Walk broker_ancestry root-to-tip in REVERSE — closest-to-user
+    # parent first, root last. Skip the immediate broker (already
+    # added above). Skip empty ancestry safely.
+    ancestry = list(user.broker_ancestry or [])
+    if ancestry:
+        # broker_ancestry stores root-first (root, ..., parent-of-immediate).
+        # The immediate broker is `assigned_broker_id`, NOT in the array.
+        for parent_broker_id in reversed(ancestry):
+            if parent_broker_id == user.assigned_broker_id:
+                continue
+            cascade.append(
+                (
+                    f"broker:{parent_broker_id}",
+                    {"owner_broker_id": parent_broker_id},
+                )
+            )
     if user.assigned_admin_id is not None:
         cascade.append(
             (
