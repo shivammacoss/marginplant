@@ -140,6 +140,24 @@ function LoginPageInner() {
     return <LoginSplash subtitle="Redirecting to your dashboard" />;
   }
 
+  // Pre-hydration: zustand `persist` reads localStorage on mount. Until
+  // `hydrated` flips true we don't yet know if there's a saved session.
+  // Rendering the login form during this 200-500 ms window is what made
+  // returning PWA users see a flash of "Sign in" before they're bounced
+  // to /dashboard (user complaint: "jab bhi login karta hu, 500 ms ke
+  // liye har baar login screen dikhti hai"). Showing the same splash
+  // covers the gap — once hydration completes EITHER the redirect
+  // effect above fires (authed) OR the form renders (truly logged out).
+  if (!hydrated) {
+    return <LoginSplash subtitle="Restoring your session…" />;
+  }
+  // Hydrated AND we found a user → redirect effect above is already
+  // firing; render the splash (NOT the form) during that one extra
+  // frame so the login UI never paints for an authed user.
+  if (currentUser) {
+    return <LoginSplash subtitle="Redirecting to your dashboard" />;
+  }
+
   return (
     <div className="space-y-6">
       <div className="space-y-1">
