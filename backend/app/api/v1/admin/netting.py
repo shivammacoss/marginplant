@@ -11,7 +11,9 @@ from app.core.dependencies import (
     require_perm,
     scoped_user_ids,
 )
-from app.models.user import UserRole
+from beanie import PydanticObjectId
+from typing import Any
+from app.models.user import User, UserRole
 from app.schemas.common import APIResponse
 from app.services import netting_service as svc
 
@@ -23,9 +25,25 @@ def _ser_segment(s) -> dict:
 
 
 def _ser_script(s) -> dict:
-    return s.model_dump(exclude={"id", "revision_id", "segment_id"}) | {
+    return s.model_dump(
+        exclude={
+            "id",
+            "revision_id",
+            "segment_id",
+            "scope_admin_id",
+            "scope_broker_id",
+        }
+    ) | {
         "id": str(s.id),
         "segment_id": str(s.segment_id),
+        # Cast scope ObjectIds to strings so the frontend gets stable
+        # primitives. Null stays null → represents platform-wide rows.
+        "scope_admin_id": (
+            str(s.scope_admin_id) if getattr(s, "scope_admin_id", None) else None
+        ),
+        "scope_broker_id": (
+            str(s.scope_broker_id) if getattr(s, "scope_broker_id", None) else None
+        ),
     }
 
 
@@ -436,24 +454,95 @@ async def repair_margin_mode(admin: SuperAdmin):
 
 
 # ── Script overrides ──────────────────────────────────────────────
+def _scope_for(
+    admin: User,
+) -> tuple[PydanticObjectId | None, PydanticObjectId | None]:
+    """Compute (scope_admin_id, scope_broker_id) for an actor.
+
+    super-admin → (None, None) — platform-wide script override
+    admin       → (admin.id, None) — applies to admin's pool
+    broker      → (None, broker.id) — applies to broker's subtree
+
+    Used by POST / PUT / DELETE to stamp + scope-check tier-specific
+    overrides without giving any actor write access to other tiers'
+    rows.
+    """
+    if admin.role == UserRole.SUPER_ADMIN:
+        return None, None
+    if admin.role == UserRole.BROKER:
+        return None, admin.id
+    return admin.id, None
+
+
+def _can_edit_script(actor: User, script: Any) -> bool:
+    """Return True iff `actor` may mutate this script override."""
+    sad = getattr(script, "scope_admin_id", None)
+    sbr = getattr(script, "scope_broker_id", None)
+    if actor.role == UserRole.SUPER_ADMIN:
+        return True  # super-admin can touch any row, including tier rows
+    if actor.role == UserRole.BROKER:
+        return sbr is not None and sbr == actor.id
+    # ADMIN
+    return sad is not None and sad == actor.id
+
+
 @router.get("/scripts", response_model=APIResponse[list])
 async def list_scripts(
     admin: CurrentAdmin,
     segment: str | None = Query(default=None),
     _: None = Depends(require_perm("segment_settings", "read")),
 ):
-    rows = await svc.list_scripts(segment)
+    # Super-admin sees every row (platform + every tier) so they can
+    # audit / clean up. Admin / broker see their tier rows + the
+    # platform fallback they inherit from (read-only on the platform
+    # rows is enforced by `_can_edit_script` on PUT / DELETE).
+    if admin.role == UserRole.SUPER_ADMIN:
+        rows = await svc.list_scripts(segment)
+    elif admin.role == UserRole.BROKER:
+        rows = await svc.list_scripts(
+            segment, scope_broker_id=admin.id, include_platform=True
+        )
+    else:
+        rows = await svc.list_scripts(
+            segment, scope_admin_id=admin.id, include_platform=True
+        )
     return APIResponse(data=[_ser_script(r) for r in rows])
 
 
 @router.post("/scripts", response_model=APIResponse[dict])
-async def create_script(payload: dict, admin: SuperAdmin):
-    doc = await svc.create_script(payload)
+async def create_script(
+    payload: dict,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("segment_settings", "write")),
+):
+    # Tier scope is derived from the caller's role — admin / broker
+    # cannot create platform-wide rows (those stay super-admin only)
+    # and cannot create rows in another tier's name. Resolver picks
+    # the most-specific override for each user at order time.
+    scope_admin_id, scope_broker_id = _scope_for(admin)
+    doc = await svc.create_script(
+        payload,
+        scope_admin_id=scope_admin_id,
+        scope_broker_id=scope_broker_id,
+    )
     return APIResponse(data=_ser_script(doc))
 
 
 @router.put("/scripts/{script_id}", response_model=APIResponse[dict])
-async def update_script(script_id: str, payload: dict, admin: SuperAdmin):
+async def update_script(
+    script_id: str,
+    payload: dict,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("segment_settings", "write")),
+):
+    existing = await svc.get_script(script_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Script override not found")
+    if not _can_edit_script(admin, existing):
+        raise HTTPException(
+            status_code=403,
+            detail="You can only edit script overrides scoped to your tier.",
+        )
     patch = payload.get("patch") or {k: v for k, v in payload.items() if k != "patch"}
     if not isinstance(patch, dict):
         raise HTTPException(status_code=400, detail="patch must be an object")
@@ -461,7 +550,19 @@ async def update_script(script_id: str, payload: dict, admin: SuperAdmin):
 
 
 @router.delete("/scripts/{script_id}", response_model=APIResponse[dict])
-async def delete_script(script_id: str, admin: SuperAdmin):
+async def delete_script(
+    script_id: str,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("segment_settings", "write")),
+):
+    existing = await svc.get_script(script_id)
+    if existing is None:
+        return APIResponse(data={"ok": True})
+    if not _can_edit_script(admin, existing):
+        raise HTTPException(
+            status_code=403,
+            detail="You can only delete script overrides scoped to your tier.",
+        )
     await svc.delete_script(script_id)
     return APIResponse(data={"ok": True})
 

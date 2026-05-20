@@ -632,19 +632,31 @@ def _instrument_matches_pattern(instrument_sym: str, base: str, suffix: str) -> 
 
 
 async def _match_pattern_script(
-    seg_name: str, instrument_sym: str
+    seg_name: str,
+    instrument_sym: str,
+    *,
+    scope_admin_id: PydanticObjectId | None = None,
+    scope_broker_id: PydanticObjectId | None = None,
 ) -> "NettingScriptOverride | None":
     """Scan every script override in the segment for one whose symbol is
     a pattern that matches `instrument_sym`. Falls through to None when
     no pattern matches — caller keeps the segment defaults.
 
-    O(N) over the segment's script count; in practice N is small (a few
-    dozen) so this is fine even on the resolver hot path. The 5-min
-    `netting_eff:*` cache absorbs the lookup cost for repeat orders on
-    the same instrument.
+    Scope-aware: only considers rows where (scope_admin_id, scope_broker_id)
+    match the args. Caller cascades through tiers (broker → admin →
+    platform) by calling this with the appropriate scope each pass.
+    Default args (both None) preserve the historical platform-only
+    behaviour so older callers don't change semantics.
+
+    O(N) over the segment's script count in that tier; in practice N is
+    small (a few dozen) so this is fine even on the resolver hot path.
+    The 5-min `netting_eff:*` cache absorbs the lookup cost for repeat
+    orders on the same instrument.
     """
     rows = await NettingScriptOverride.find(
-        NettingScriptOverride.segment_name == seg_name
+        NettingScriptOverride.segment_name == seg_name,
+        NettingScriptOverride.scope_admin_id == scope_admin_id,
+        NettingScriptOverride.scope_broker_id == scope_broker_id,
     ).to_list()
     for row in rows:
         split = _split_pattern(row.symbol)
@@ -963,15 +975,57 @@ async def update_segment(segment_id: str | PydanticObjectId, patch: dict[str, An
 
 
 # ── Script overrides ──────────────────────────────────────────────
-async def list_scripts(segment: str | None = None) -> list[NettingScriptOverride]:
+async def list_scripts(
+    segment: str | None = None,
+    *,
+    scope_admin_id: PydanticObjectId | None = None,
+    scope_broker_id: PydanticObjectId | None = None,
+    include_platform: bool = True,
+) -> list[NettingScriptOverride]:
+    """List script overrides, filtered by tier scope.
+
+    Behaviour by caller role:
+      • super-admin → scope_admin_id=None + scope_broker_id=None +
+        include_platform=True → returns ALL overrides (platform + every
+        admin / broker tier row), so super-admin can audit / clean up
+        any row.
+      • admin → scope_admin_id=admin.id + include_platform=True →
+        returns the admin's own per-symbol overrides plus the
+        platform-wide ones (so admin can SEE what's inherited without
+        being allowed to edit those platform rows).
+      • broker → same shape with scope_broker_id=broker.id.
+    """
+    base_filters: list[Any] = []
     if segment:
-        return await NettingScriptOverride.find(
-            NettingScriptOverride.segment_name == segment
-        ).to_list()
-    return await NettingScriptOverride.find_all().to_list()
+        base_filters.append(NettingScriptOverride.segment_name == segment)
+    if scope_admin_id is None and scope_broker_id is None:
+        if include_platform:
+            return await NettingScriptOverride.find(*base_filters).to_list()
+        return []
+    # Tier caller — fetch their tier rows, optionally include platform.
+    or_clauses: list[Any] = []
+    if scope_broker_id is not None:
+        or_clauses.append({"scope_broker_id": scope_broker_id})
+    if scope_admin_id is not None:
+        or_clauses.append({"scope_admin_id": scope_admin_id})
+    if include_platform:
+        or_clauses.append({"scope_admin_id": None, "scope_broker_id": None})
+    if not or_clauses:
+        return []
+    coll = NettingScriptOverride.get_motor_collection()
+    query: dict[str, Any] = {"$or": or_clauses}
+    if segment:
+        query["segment_name"] = segment
+    rows = await coll.find(query).to_list(length=None)
+    return [NettingScriptOverride.model_validate(r) for r in rows]
 
 
-async def create_script(payload: dict[str, Any]) -> NettingScriptOverride:
+async def create_script(
+    payload: dict[str, Any],
+    *,
+    scope_admin_id: PydanticObjectId | None = None,
+    scope_broker_id: PydanticObjectId | None = None,
+) -> NettingScriptOverride:
     seg_name = payload.get("segment_name")
     seg_id = payload.get("segment_id")
     if not seg_name or not seg_id:
@@ -979,9 +1033,12 @@ async def create_script(payload: dict[str, Any]) -> NettingScriptOverride:
     symbol = (payload.get("symbol") or "").strip().upper()
     if not symbol:
         raise ValidationFailedError("symbol required")
+    # Uniqueness now scoped by (segment, symbol, admin scope, broker scope).
     existing = await NettingScriptOverride.find_one(
         NettingScriptOverride.segment_name == seg_name,
         NettingScriptOverride.symbol == symbol,
+        NettingScriptOverride.scope_admin_id == scope_admin_id,
+        NettingScriptOverride.scope_broker_id == scope_broker_id,
     )
     if existing is not None:
         raise ValidationFailedError(f"Script {symbol} already exists in {seg_name}")
@@ -992,12 +1049,15 @@ async def create_script(payload: dict[str, Any]) -> NettingScriptOverride:
         "tradingSymbol": payload.get("tradingSymbol") or symbol,
         "instrumentToken": payload.get("instrumentToken"),
         "lotSize": payload.get("lotSize") or 1.0,
+        "scope_admin_id": scope_admin_id,
+        "scope_broker_id": scope_broker_id,
     }
     for k in NETTING_FIELDS:
         if k in payload and payload[k] is not None:
             clean[k] = payload[k]
     doc = NettingScriptOverride(**clean)
     await doc.insert()
+    await _wipe_eff_cache_debounced()
     return doc
 
 
@@ -1020,6 +1080,14 @@ async def delete_script(script_id: str | PydanticObjectId) -> None:
     if doc is not None:
         await doc.delete()
         await _wipe_eff_cache_debounced()
+
+
+async def get_script(
+    script_id: str | PydanticObjectId,
+) -> NettingScriptOverride | None:
+    """Fetch a script override by id — exposed so the API layer can do
+    a scope check before allowing PUT/DELETE."""
+    return await NettingScriptOverride.get(PydanticObjectId(script_id))
 
 
 # ── Sub-admin segment defaults ────────────────────────────────────────
@@ -1699,26 +1767,66 @@ async def get_effective_settings(
             name=seg_name, displayName=seg_name, **NettingFieldsRequired().model_dump()
         )
 
-    # Resolve per-symbol script override.
+    # Resolve per-symbol script override (tier-aware).
     #
-    # Two match modes — both supported, exact wins:
-    #   1. Exact: script.symbol equals the instrument's symbol verbatim
-    #      (e.g. `SBIN` overrides the SBIN equity row).
-    #   2. Pattern: script.symbol is a derivative shorthand like `NIFTYFUT`,
-    #      `BANKNIFTYCE`, `SBINPE` — i.e. ends in FUT/CE/PE and has no digit
-    #      character. Matches every instrument whose symbol starts with the
-    #      pattern's base (the bit before FUT/CE/PE) AND ends with the same
-    #      contract type. Lets admin write ONE override that covers every
-    #      expiry of an underlying's futures or options.
+    # Match modes — exact wins over pattern; within each match mode the
+    # most-specific tier wins (broker > admin > platform). Tier scope was
+    # added 2026-05-20 so admin/broker could create their own per-symbol
+    # overrides without touching the platform-wide row. User-flagged:
+    # "sub-admin jab script block kar raha hai to super-admin required
+    # aa raha hai".
+    #
+    # Resolution order, fall through to next on no match:
+    #   1. (broker scope, exact symbol)
+    #   2. (admin scope, exact symbol)
+    #   3. (platform, exact symbol)
+    #   4. (broker scope, pattern symbol)   — NIFTYFUT / BANKNIFTYCE etc.
+    #   5. (admin scope, pattern symbol)
+    #   6. (platform, pattern symbol)
+    # First hit wins. user_doc has to be fetched first now so we know
+    # which tier scopes are applicable; the user_doc / pool_override
+    # block below was inlined here to avoid two User.get calls.
+    user_doc = await User.get(PydanticObjectId(user_id))
+    _user_broker_id: PydanticObjectId | None = None
+    _user_admin_id: PydanticObjectId | None = None
+    if user_doc is not None:
+        broker_anc = user_doc.broker_ancestry or []
+        if broker_anc:
+            _user_broker_id = broker_anc[-1]
+        if user_doc.assigned_admin_id is not None:
+            _user_admin_id = user_doc.assigned_admin_id
+
     script_override = None
     if symbol:
         sym_normalised = symbol.strip().upper()
-        # Exact match first — cheapest path, satisfies the SBIN-style stock
-        # override case.
-        script_override = await NettingScriptOverride.find_one(
-            NettingScriptOverride.segment_name == seg_name,
-            NettingScriptOverride.symbol == sym_normalised,
-        )
+
+        async def _find_exact(
+            ad: PydanticObjectId | None, br: PydanticObjectId | None
+        ) -> "NettingScriptOverride | None":
+            return await NettingScriptOverride.find_one(
+                NettingScriptOverride.segment_name == seg_name,
+                NettingScriptOverride.symbol == sym_normalised,
+                NettingScriptOverride.scope_admin_id == ad,
+                NettingScriptOverride.scope_broker_id == br,
+            )
+
+        # Exact-match cascade
+        if _user_broker_id is not None:
+            script_override = await _find_exact(None, _user_broker_id)
+        if script_override is None and _user_admin_id is not None:
+            script_override = await _find_exact(_user_admin_id, None)
+        if script_override is None:
+            script_override = await _find_exact(None, None)
+
+        # Pattern-match cascade — same tier order
+        if script_override is None and _user_broker_id is not None:
+            script_override = await _match_pattern_script(
+                seg_name, sym_normalised, scope_broker_id=_user_broker_id
+            )
+        if script_override is None and _user_admin_id is not None:
+            script_override = await _match_pattern_script(
+                seg_name, sym_normalised, scope_admin_id=_user_admin_id
+            )
         if script_override is None:
             script_override = await _match_pattern_script(seg_name, sym_normalised)
 
@@ -1740,7 +1848,9 @@ async def get_effective_settings(
     # caller's `assigned_admin_id` + `broker_ancestry` decide which pool
     # row applies.
     pool_override = None
-    user_doc = await User.get(PydanticObjectId(user_id))
+    # `user_doc` was already fetched above for the tier-aware script
+    # override lookup — reuse it here so we don't make two User.get
+    # round-trips on the resolver hot path.
     if user_doc is not None:
         # Broker pool (most specific) — immediate broker from ancestry.
         broker_anc = user_doc.broker_ancestry or []

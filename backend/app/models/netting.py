@@ -304,7 +304,20 @@ class NettingSegment(TimestampMixin, NettingFieldsRequired):
 
 
 class NettingScriptOverride(TimestampMixin, NettingFieldsBase):
-    """Per-symbol override within a segment — null fields inherit from segment."""
+    """Per-symbol override within a segment — null fields inherit from segment.
+
+    Tier scope (added 2026-05-20): a script override now optionally belongs
+    to ONE tier. Both fields null → platform-wide (the historical default,
+    set by super-admin and applies to everyone). `scope_admin_id` set →
+    applies only to users whose `assigned_admin_id` matches that admin.
+    `scope_broker_id` set → applies only to users whose `broker_ancestry`
+    contains that broker. The unique index covers (segment, symbol, scope)
+    so the same (segment, symbol) can have different overrides per tier
+    without collision.
+
+    Resolver picks the most-specific match (broker > admin > platform)
+    when computing effective settings for a given user.
+    """
 
     segment_id: PydanticObjectId
     segment_name: str  # denormalised for filter queries
@@ -312,12 +325,25 @@ class NettingScriptOverride(TimestampMixin, NettingFieldsBase):
     tradingSymbol: str | None = None
     instrumentToken: int | None = None
     lotSize: float = 1.0
+    # Tier scope — both null = platform-wide (super-admin authored).
+    scope_admin_id: PydanticObjectId | None = None
+    scope_broker_id: PydanticObjectId | None = None
 
     class Settings:
         name = "netting_script_overrides"
         indexes = [
+            # Unique per (segment, symbol, scope) — null values are
+            # treated as distinct keys by MongoDB, so platform +
+            # per-admin + per-broker rows can coexist for the same
+            # (segment, symbol).
             IndexModel(
-                [("segment_name", ASCENDING), ("symbol", ASCENDING)], unique=True
+                [
+                    ("segment_name", ASCENDING),
+                    ("symbol", ASCENDING),
+                    ("scope_admin_id", ASCENDING),
+                    ("scope_broker_id", ASCENDING),
+                ],
+                unique=True,
             ),
         ]
 
