@@ -49,18 +49,33 @@ export function LedgerSheet({ open, onClose, user }: Props) {
     enabled: !!user && open,
   });
 
-  // Ledger sheet shows only deposit / withdrawal cash flows + settlement-
-  // outstanding events. Trade-related rows (PNL / CHARGES / BROKERAGE)
-  // live on the /ledger drill-down and the user's tradebook — keeping
-  // them out of this side panel makes the "what cash moved in/out" view
-  // readable for the admin.
+  // Fetch fresh user detail so the balance tile reflects post-adjust state
+  // without needing a parent reload. The parent passes a snapshot of the row
+  // at click-time, which goes stale the moment we mutate the wallet.
+  const { data: liveUser } = useQuery({
+    queryKey: ["admin", "user", user?.id],
+    queryFn: () => UsersAPI.detail(user!.id),
+    enabled: !!user && open,
+  });
+
+  const liveBalance =
+    liveUser?.wallet?.available_balance ?? user?.wallet?.available_balance;
+
+  // Ledger sheet shows cash-flow rows: deposits, withdrawals, settlement-
+  // outstanding events, and admin manual adjustments (Add/Deduct Fund,
+  // bonus, penalty, promo). Trade-related rows (PNL / CHARGES / BROKERAGE)
+  // live on the /ledger drill-down and the user's tradebook.
   const txns: any[] = (data?.items ?? []).filter((t: any) => {
     const tt = String(t?.transaction_type ?? "").toUpperCase();
     return (
       tt === "DEPOSIT" ||
       tt === "WITHDRAWAL" ||
       tt === "SETTLEMENT_OUTSTANDING_BOOKED" ||
-      tt === "SETTLEMENT_OUTSTANDING_RECOVERY"
+      tt === "SETTLEMENT_OUTSTANDING_RECOVERY" ||
+      tt === "ADJUSTMENT" ||
+      tt === "BONUS" ||
+      tt === "PENALTY" ||
+      tt === "PROMO"
     );
   });
 
@@ -83,6 +98,7 @@ export function LedgerSheet({ open, onClose, user }: Props) {
       setNarration("");
       qc.invalidateQueries({ queryKey: ["admin", "users"] });
       qc.invalidateQueries({ queryKey: ["admin", "ledger", "user", user!.id] });
+      qc.invalidateQueries({ queryKey: ["admin", "user", user!.id] });
     },
     onError: (e: unknown) => {
       const msg =
@@ -128,7 +144,7 @@ export function LedgerSheet({ open, onClose, user }: Props) {
               Available balance
             </div>
             <div className="font-mono text-2xl font-bold mt-1">
-              {formatINR(user?.wallet?.available_balance)}
+              {formatINR(liveBalance)}
             </div>
           </div>
           <div className="grid grid-cols-1 gap-2">
@@ -183,8 +199,20 @@ export function LedgerSheet({ open, onClose, user }: Props) {
           for (const t of txns) {
             const tt = String(t?.transaction_type ?? "").toUpperCase();
             const amt = Number(t?.amount ?? 0);
-            if (tt === "DEPOSIT") totalDeposits += Math.abs(amt);
-            else if (tt === "WITHDRAWAL") totalWithdrawals += Math.abs(amt);
+            if (tt === "DEPOSIT") {
+              totalDeposits += Math.abs(amt);
+            } else if (tt === "WITHDRAWAL") {
+              totalWithdrawals += Math.abs(amt);
+            } else if (
+              tt === "ADJUSTMENT" ||
+              tt === "BONUS" ||
+              tt === "PROMO" ||
+              tt === "PENALTY"
+            ) {
+              // Manual admin adjustments: positive → cash in, negative → cash out
+              if (amt >= 0) totalDeposits += amt;
+              else totalWithdrawals += Math.abs(amt);
+            }
           }
           const net = totalDeposits - totalWithdrawals;
           return (
