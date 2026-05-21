@@ -792,13 +792,73 @@ async def admin_reopen_position(
     p.realized_pnl = Decimal128("0")
     if p.close_usd_inr_rate is not None:
         p.close_usd_inr_rate = None
-    # Margin re-block: |qty| × avg_price gives a conservative figure
-    # consistent with how delete_position / admin_edit_position recompute.
+
+    # ── Margin re-block — read the ORIGINAL opening order's
+    # `margin_blocked` instead of recomputing.
+    #
+    # Previously this branch set `margin_used = opening_qty × avg_price`
+    # which is the NOTIONAL value of the position — for futures /
+    # options that's 5-20× more than the actual margin admin's
+    # netting settings would lock. Production hit on 21-May:
+    # reopening a CGPOWER26MAYFUT 340-lot @ 865.90 set margin_used
+    # to ₹2,94,406 (340 × 865.90), drained the user's available_balance
+    # to −₹2,79,422.
+    #
+    # The fix: query the most-recent EXECUTED opening order for this
+    # (user, token, product_type) and reuse its `margin_blocked` —
+    # that's what `order_validator.validate` computed at the original
+    # open time using the correct percent / times / fixed margin
+    # formula via netting_service. If multiple orders contributed to
+    # the position (pyramid), sum their margin_blocked values up to
+    # the opening_quantity. Falls back to 0 if no opening orders
+    # exist (very rare; position created directly without going
+    # through place_order) — operator can use the existing
+    # `recompute-wallet-margin` endpoint to repair.
     try:
-        avg_p = float(str(p.avg_price))
-        p.margin_used = Decimal128(str(round(opening_qty * avg_p, 2)))
-    except Exception:
-        pass
+        from app.models.order import OrderStatus
+
+        opening_orders = (
+            await Order.find(
+                Order.user_id == p.user_id,
+                Order.instrument.token == p.instrument.token,  # type: ignore[union-attr]
+                Order.product_type == p.product_type,
+                Order.action == p.opened_side,
+                Order.status == OrderStatus.EXECUTED,
+            )
+            .sort("-executed_at")
+            .limit(10)
+            .to_list()
+        )
+        total_margin = _Decimal("0")
+        qty_covered = _Decimal("0")
+        target_qty = _Decimal(str(opening_qty))
+        for o in opening_orders:
+            if qty_covered >= target_qty:
+                break
+            order_qty = _Decimal(str(getattr(o, "quantity", 0) or 0))
+            order_margin = _td(o.margin_blocked or 0)
+            if order_qty <= 0 or order_margin <= 0:
+                continue
+            need = target_qty - qty_covered
+            if order_qty <= need:
+                total_margin += order_margin
+                qty_covered += order_qty
+            else:
+                # Partial slice of this order's margin.
+                total_margin += order_margin * need / order_qty
+                qty_covered = target_qty
+        if total_margin > 0:
+            p.margin_used = Decimal128(str(total_margin))
+        else:
+            # No opening orders found — set to 0 and let the
+            # downstream `recompute_used_margin` reconcile from the
+            # canonical Position docs. Better to under-block than to
+            # accidentally double-lock notional.
+            p.margin_used = Decimal128("0")
+    except Exception:  # pragma: no cover
+        # Defensive — never let a margin recompute failure block the
+        # reopen itself. The next reconcile pass cleans up.
+        p.margin_used = Decimal128("0")
 
     await p.save()
 
