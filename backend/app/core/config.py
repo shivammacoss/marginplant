@@ -47,6 +47,13 @@ class Settings(BaseSettings):
     # for spikes during option-chain expansion.
     REDIS_MAX_CONNECTIONS: int = 300
 
+    # ── WebSocket limits ─────────────────────────────────────────────
+    # Hard cap on simultaneous WebSocket connections per client IP,
+    # enforced via Redis (see app/core/ws_limiter.py). Generous default
+    # so users on shared NAT exits / corporate proxies aren't penalised;
+    # set to 0 to disable the limiter entirely.
+    WS_MAX_CONNECTIONS_PER_IP: int = 100
+
     # ── JWT ──────────────────────────────────────────────────────────
     # Refresh-token TTL widened from 7 → 30 days so the mobile app keeps
     # users logged in for a month (matches Zerodha / Groww / Upstox UX).

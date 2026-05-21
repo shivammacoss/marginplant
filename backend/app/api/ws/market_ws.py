@@ -22,7 +22,11 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.api.ws._helpers import is_connected, safe_send_text
-from app.core.redis_client import pubsub
+from app.core.config import settings
+from app.core.ws_hub import market_tick_hub
+from app.core.ws_limiter import acquire as ws_limit_acquire
+from app.core.ws_limiter import client_ip as ws_client_ip
+from app.core.ws_limiter import release as ws_limit_release
 from app.services import market_data_service
 
 logger = logging.getLogger(__name__)
@@ -31,78 +35,37 @@ router = APIRouter()
 
 @router.websocket("/ws/marketdata")
 async def market_ws(ws: WebSocket) -> None:
+    """Per-client market-data socket.
+
+    Internal change: realtime ticks now arrive via the process-wide
+    ``MarketTickHub`` (one shared Redis pub/sub for the whole worker)
+    instead of opening a dedicated pub/sub connection per client. The
+    hub maintains an in-memory ``token -> set[WebSocket]`` map and
+    fans each tick out to every subscribed socket.
+
+    The wire-level WebSocket protocol the client speaks (subscribe /
+    unsubscribe / ping / snapshot / tick frames, message shapes,
+    ordering) is completely unchanged — only the routing inside the
+    server is consolidated. Both the initial subscribe-time snapshot
+    and the 5 s heartbeat-snapshot pump are preserved exactly.
+    """
+    # Per-IP rate limit — reject before accept() so a flooding client
+    # doesn't even get a connection slot. Code 4429 mirrors HTTP 429.
+    ip = ws_client_ip(ws)
+    if not await ws_limit_acquire(ip, max_per_ip=settings.WS_MAX_CONNECTIONS_PER_IP):
+        await ws.close(code=4429)
+        return
+
     await ws.accept()
     subscribed: set[str] = set()
     pump_task: asyncio.Task | None = None
-    listener_task: asyncio.Task | None = None
-
-    # ── Realtime forward via Redis pub/sub ─────────────────────────────
-    # Previous design (per-token subscribe + listen race): calling
-    # `ps.subscribe()` from the receive coroutine while another coroutine
-    # was blocked inside `ps.listen()` deadlocked on redis-py asyncio's
-    # internal connection lock, dropping forward throughput to ~0.1 tick/sec
-    # while the feed itself was publishing 100+/sec (verified end-to-end
-    # 19-May with BTCUSDT psubscribe rate at 70/sec, the WS test client
-    # received 1 tick in 8s on the same token).
-    #
-    # New design: psubscribe to the TWO wildcard patterns once, before
-    # the listener starts (so the listen-loop has live subscriptions on
-    # the very first iteration), then filter incoming messages against
-    # the per-client `subscribed` set. No subscribe/unsubscribe call
-    # ever happens after the listener begins, so the race is gone. Cost:
-    # the listener parses every published tick across the platform, but
-    # the filter is an O(1) set lookup on a parsed JSON dict so even
-    # with 100+ ticks/sec it's negligible per-connection.
-    ps = pubsub()
-    await ps.psubscribe("market:tick:*", "infoway:tick:*")
-
-    async def listener():
-        """Forwards every pub/sub tick to the client WS in real time."""
-        try:
-            async for msg in ps.listen():
-                if not is_connected(ws):
-                    return
-                if msg.get("type") not in ("pmessage", "message"):
-                    continue
-                raw = msg.get("data")
-                if isinstance(raw, bytes):
-                    try:
-                        raw = raw.decode("utf-8")
-                    except UnicodeDecodeError:
-                        continue
-                try:
-                    parsed = json.loads(raw) if raw else None
-                except (ValueError, TypeError):
-                    continue
-                if not isinstance(parsed, dict):
-                    continue
-                # Normalise — APK expects `token` as a string. Infoway
-                # publishes with `symbol`; copy it across so the client's
-                # `toTick` mapper finds the field it expects.
-                tok_raw = parsed.get("token") or parsed.get("symbol")
-                if tok_raw is None:
-                    continue
-                tok = str(tok_raw)
-                # Filter — only forward if this client cares about it.
-                if tok not in subscribed:
-                    continue
-                parsed["token"] = tok
-                if not await safe_send_text(
-                    ws,
-                    json.dumps({"type": "tick", "payload": [parsed]}, default=str),
-                ):
-                    return
-        except (WebSocketDisconnect, asyncio.CancelledError):
-            return
-        except Exception:  # pragma: no cover
-            logger.exception("market_ws_listener_failed")
 
     async def pump():
-        # 5 s heartbeat snapshot. The pub/sub listener above carries the
-        # realtime path; this just guarantees eventual consistency if a
-        # publish ever gets dropped (Redis reconnect, pool exhaustion,
-        # etc.) — the client's stored LTP never drifts more than 5 s
-        # from reality even in worst case.
+        # 5 s heartbeat snapshot. The hub carries the realtime path;
+        # this just guarantees eventual consistency if a publish ever
+        # gets dropped (Redis reconnect, pool exhaustion, etc.) — the
+        # client's stored LTP never drifts more than 5 s from reality
+        # even in worst case.
         try:
             while True:
                 await asyncio.sleep(5)
@@ -128,10 +91,13 @@ async def market_ws(ws: WebSocket) -> None:
             logger.exception("market_ws_pump_failed", extra={"error": str(e)})
 
     try:
+        # Hub is started eagerly in the FastAPI lifespan. ``start()``
+        # is idempotent so a stray race here is still safe.
+        await market_tick_hub.start()
+
         await safe_send_text(
             ws, json.dumps({"type": "hello", "message": "market_ws_connected"})
         )
-        listener_task = asyncio.create_task(listener())
         pump_task = asyncio.create_task(pump())
 
         while True:
@@ -147,14 +113,23 @@ async def market_ws(ws: WebSocket) -> None:
             t = msg.get("type")
             if t == "subscribe":
                 tokens = [str(x) for x in (msg.get("tokens") or []) if x]
+                # Newly-requested tokens go into both the hub (so ticks
+                # start flowing immediately) and the upstream feed
+                # ref-count (so the underlying provider keeps pulling
+                # them). Already-subscribed tokens are skipped to keep
+                # the hub map free of duplicate add() noise.
+                new_tokens = [tok for tok in tokens if tok not in subscribed]
                 subscribed.update(tokens)
-                market_data_service.subscribe(tokens)
+                for tok in new_tokens:
+                    market_tick_hub.add(tok, ws)
+                if new_tokens:
+                    market_data_service.subscribe(new_tokens)
                 # Initial snapshots — parallel fetch so a freshly-typed
                 # search ("G" → 80 results) doesn't block the client for
                 # the sum of every quote's overlay latency. Failed quotes
-                # are silently dropped so one slow Zerodha REST call can't
-                # delay the whole batch. After this, the psubscribe
-                # listener above streams every subsequent tick in realtime.
+                # are silently dropped so one slow Zerodha REST call
+                # can't delay the whole batch. After this, the hub
+                # streams every subsequent tick in realtime.
                 if tokens:
                     results = await asyncio.gather(
                         *(market_data_service.get_quote(tok) for tok in tokens),
@@ -169,10 +144,12 @@ async def market_ws(ws: WebSocket) -> None:
                 )
             elif t == "unsubscribe":
                 tokens = [str(x) for x in (msg.get("tokens") or []) if x]
+                gone = [tok for tok in tokens if tok in subscribed]
                 subscribed.difference_update(tokens)
-                market_data_service.unsubscribe(tokens)
-                # No pubsub unsubscribe needed — the filter in the
-                # listener simply stops matching dropped tokens.
+                for tok in gone:
+                    market_tick_hub.remove(tok, ws)
+                if gone:
+                    market_data_service.unsubscribe(gone)
             elif t == "ping":
                 await safe_send_text(ws, json.dumps({"type": "pong"}))
             else:
@@ -185,21 +162,30 @@ async def market_ws(ws: WebSocket) -> None:
     except Exception:  # pragma: no cover
         logger.exception("market_ws_main_failed")
     finally:
-        if listener_task is not None:
-            listener_task.cancel()
-            try:
-                await listener_task
-            except (asyncio.CancelledError, Exception):  # pragma: no cover
-                pass
         if pump_task is not None:
             pump_task.cancel()
             try:
                 await pump_task
             except (asyncio.CancelledError, Exception):  # pragma: no cover
                 pass
+        # Detach from every token we registered so the hub's subscriber
+        # map doesn't leak. Targeted ``remove()`` per token keeps this
+        # O(K_per_client) instead of scanning every token the hub knows
+        # about — important under disconnect storms with thousands of
+        # tokens platform-wide.
+        for tok in list(subscribed):
+            try:
+                market_tick_hub.remove(tok, ws)
+            except Exception:  # pragma: no cover
+                pass
+        # Tell the upstream feed we no longer need these tokens.
+        if subscribed:
+            try:
+                market_data_service.unsubscribe(list(subscribed))
+            except Exception:  # pragma: no cover
+                pass
+        # Release per-IP connection slot.
         try:
-            await ps.punsubscribe("market:tick:*", "infoway:tick:*")
-            await ps.close()
+            await ws_limit_release(ip)
         except Exception:  # pragma: no cover
             pass
-        market_data_service.unsubscribe(list(subscribed))

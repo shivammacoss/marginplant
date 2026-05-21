@@ -565,22 +565,65 @@ async def _enforce_for_user(user: User) -> None:
         _warning_armed[user_id_str] = True
 
 
+# How many users to enforce concurrently in one batch. Sized so the
+# concurrent Mongo fan-out fits comfortably inside `MONGODB_MAX_POOL_SIZE`
+# (default 100) — `_enforce_for_user` issues ~3-5 reads per user, so 25
+# wide ≈ 75-125 simultaneous ops which the pool can absorb without
+# starving HTTP requests sharing the same client. Tune via env later if
+# the production pool is bumped — value is module-level for visibility.
+_RISK_ENFORCE_BATCH_SIZE = 25
+
+
+async def _enforce_one_user_safe(uid: Any) -> bool:
+    """Run one user's risk sweep with full per-user error isolation.
+
+    Returns ``True`` iff the user was found and ``_enforce_for_user``
+    completed without raising. Identical contract to the body of the
+    original serial loop's iteration — same `User.get` lookup, same
+    None-skip, same exception swallow + ``risk_enforcer_user_failed``
+    log line — just packaged so we can run many at once.
+    """
+    try:
+        user = await User.get(uid)
+        if user is None:
+            return False
+        await _enforce_for_user(user)
+        return True
+    except Exception:
+        logger.exception("risk_enforcer_user_failed", extra={"user_id": str(uid)})
+        return False
+
+
 async def enforce_once() -> int:
     """One full sweep across every user with open positions. Returns the
-    count of users processed (useful for liveness telemetry)."""
+    count of users processed (useful for liveness telemetry).
+
+    Users are processed in concurrent batches of
+    ``_RISK_ENFORCE_BATCH_SIZE`` so a single tick's wall-clock cost
+    scales with ``ceil(N / batch_size)`` rather than ``N`` itself. The
+    per-user enforcement (``_enforce_for_user``) is unchanged — only the
+    outer scheduling moved from serial to batched-concurrent. Mongo
+    pool capacity is the natural ceiling on batch width; see the
+    constant above for the sizing rationale.
+    """
     user_ids = await Position.distinct("user_id", {"status": PositionStatus.OPEN.value})
     if not user_ids:
         return 0
     count = 0
-    for uid in user_ids:
-        try:
-            user = await User.get(uid)
-            if user is None:
-                continue
-            await _enforce_for_user(user)
-            count += 1
-        except Exception:
-            logger.exception("risk_enforcer_user_failed", extra={"user_id": str(uid)})
+    batch_size = max(1, _RISK_ENFORCE_BATCH_SIZE)
+    for i in range(0, len(user_ids), batch_size):
+        chunk = user_ids[i : i + batch_size]
+        # ``_enforce_one_user_safe`` never raises, so plain gather is
+        # safe — but keep ``return_exceptions=True`` as a defensive
+        # belt-and-braces against a future refactor letting an
+        # exception slip through.
+        results = await asyncio.gather(
+            *(_enforce_one_user_safe(uid) for uid in chunk),
+            return_exceptions=True,
+        )
+        for r in results:
+            if r is True:
+                count += 1
     return count
 
 

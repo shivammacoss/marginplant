@@ -20,9 +20,13 @@ import logging
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
-from app.api.ws._helpers import is_connected, safe_send_text
-from app.core.redis_client import pubsub
+from app.api.ws._helpers import safe_send_text
+from app.core.config import settings
 from app.core.security import decode_token
+from app.core.ws_hub import user_channel_hub
+from app.core.ws_limiter import acquire as ws_limit_acquire
+from app.core.ws_limiter import client_ip as ws_client_ip
+from app.core.ws_limiter import release as ws_limit_release
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -30,6 +34,20 @@ router = APIRouter()
 
 @router.websocket("/ws/user")
 async def user_ws(ws: WebSocket, token: str = Query(...)):
+    """Per-user event WebSocket.
+
+    Internal change: events arrive via the process-wide
+    ``UserChannelHub`` (one shared Redis pub/sub psubscribed to
+    ``user:*`` for the whole worker) instead of opening a dedicated
+    pub/sub connection for every connected user. The hub routes each
+    inbound message by the ``{id}`` segment of its channel name, so
+    every existing publisher (positions, orders, wallet, kyc, risk,
+    pnl_sharing, deposit_update, withdrawal_update, etc.) keeps
+    working with no code changes on the emitter side.
+
+    The wire protocol the client speaks (hello frame, JSON
+    pass-through, 25 s heartbeats) is unchanged.
+    """
     try:
         payload = decode_token(token, expected_type="access")
         user_id = payload.get("sub")
@@ -40,22 +58,26 @@ async def user_ws(ws: WebSocket, token: str = Query(...)):
         await ws.close(code=4401)
         return
 
+    # Per-IP rate limit — reject before accept() so a flooding client
+    # doesn't get a slot. Code 4429 mirrors HTTP 429.
+    ip = ws_client_ip(ws)
+    if not await ws_limit_acquire(ip, max_per_ip=settings.WS_MAX_CONNECTIONS_PER_IP):
+        await ws.close(code=4429)
+        return
+
     await ws.accept()
     await safe_send_text(ws, json.dumps({"type": "hello", "user_id": user_id}))
 
-    channels = [
-        f"user:{user_id}:positions",
-        f"user:{user_id}:orders",
-        f"user:{user_id}:wallet",
-        f"user:{user_id}:kyc",
-    ]
-    ps = pubsub()
+    # Hub is started eagerly in the FastAPI lifespan. ``start()`` is
+    # idempotent so a stray race here is still safe.
     try:
-        await ps.subscribe(*channels)
+        await user_channel_hub.start()
     except Exception as e:  # pragma: no cover
-        logger.warning("user_ws_subscribe_failed", extra={"error": str(e)})
+        logger.warning("user_ws_hub_start_failed", extra={"error": str(e)})
         await ws.close(code=4500)
         return
+
+    user_channel_hub.add(str(user_id), ws)
 
     async def heartbeat():
         try:
@@ -71,30 +93,12 @@ async def user_ws(ws: WebSocket, token: str = Query(...)):
     hb_task = asyncio.create_task(heartbeat())
 
     try:
-        async for msg in ps.listen():
-            # Stop forwarding if the client has gone away — avoids the
-            # post-close `RuntimeError` race that used to crash the
-            # handler when a pubsub message landed mid-disconnect.
-            if not is_connected(ws):
-                break
-            # Ignore subscribe/unsubscribe acks; only forward real messages.
-            if msg.get("type") != "message":
-                continue
-            raw = msg.get("data")
-            if isinstance(raw, bytes):
-                try:
-                    raw = raw.decode("utf-8")
-                except UnicodeDecodeError:
-                    continue
-            # Best-effort JSON forward — pass through as a `data` string if not JSON.
-            try:
-                parsed = json.loads(raw) if raw else None
-            except (ValueError, TypeError):
-                parsed = {"data": raw}
-            if not await safe_send_text(
-                ws, json.dumps(parsed if parsed is not None else {"data": raw})
-            ):
-                break
+        # The hub is now responsible for forwarding messages to this
+        # socket. We only need to keep the connection alive and drain
+        # anything the client sends (so receive_text raises
+        # WebSocketDisconnect on close instead of buffering forever).
+        while True:
+            await ws.receive_text()
     except WebSocketDisconnect:
         return
     except Exception as e:  # pragma: no cover
@@ -106,7 +110,10 @@ async def user_ws(ws: WebSocket, token: str = Query(...)):
         except (asyncio.CancelledError, Exception):  # pragma: no cover
             pass
         try:
-            await ps.unsubscribe(*channels)
-            await ps.close()
+            user_channel_hub.remove(str(user_id), ws)
+        except Exception:  # pragma: no cover
+            pass
+        try:
+            await ws_limit_release(ip)
         except Exception:  # pragma: no cover
             pass
