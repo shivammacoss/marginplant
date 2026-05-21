@@ -124,7 +124,19 @@ async def list_users(
             ]
         }
     if status:
+        # Explicit filter — honour it exactly. Lets the admin select
+        # "Closed" from the status dropdown to audit archived users.
         query["status"] = status
+    else:
+        # Default view hides CLOSED (archived / deleted) users so the
+        # list doesn't keep growing forever with soft-deleted rows.
+        # Operator-flagged 21-May: clicking Delete archived the user
+        # successfully (status = CLOSED) but the row stayed visible in
+        # the list, making it look like the action didn't fire. Now a
+        # default no-status query excludes CLOSED rows; an admin who
+        # wants to audit archived users picks "Closed" from the filter
+        # dropdown explicitly.
+        query["status"] = {"$ne": UserStatus.CLOSED.value}
     if parent_id:
         query["parent_id"] = PydanticObjectId(parent_id)
     if q:
