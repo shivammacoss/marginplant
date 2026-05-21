@@ -267,7 +267,21 @@ async def _enforce_for_user(user: User) -> None:
             continue
 
         ltp = ltp_map.get(p.instrument.token)
-        if ltp is not None:
+        # Reject zero / negative LTPs the same way we reject `None`. A
+        # 0 LTP fed to `refresh_unrealized_pnl` would compute floating
+        # loss = (0 − avg) × qty = −notional, which the aggregate then
+        # mis-reads as a colossal drawdown and force-closes the
+        # position even when it's in profit. 21-May 08:11 production
+        # incident: COPPER 2500-lot stop-out fired with loss_pct =
+        # 9124.17 % because the cached LTP was 0 at scan time.
+        ltp_valid = ltp is not None
+        if ltp_valid:
+            try:
+                if to_decimal(ltp) <= 0:
+                    ltp_valid = False
+            except Exception:
+                ltp_valid = False
+        if ltp_valid:
             try:
                 await position_service.refresh_unrealized_pnl(p, ltp)
             except Exception:
@@ -289,14 +303,24 @@ async def _enforce_for_user(user: User) -> None:
                     "token": p.instrument.token,
                     "has_sl": p.stop_loss is not None,
                     "has_tp": p.target is not None,
+                    "raw_ltp": str(ltp) if ltp is not None else None,
                 },
             )
+            # No usable LTP this tick — preserve the position's last
+            # known unrealised P/L on the aggregate but DO NOT add a
+            # bogus negative driven by a zero tick. Skip bracket SL/TP
+            # checks too; they need a current price to be meaningful.
+            try:
+                total_unrealised += to_decimal(p.unrealized_pnl)
+            except Exception:
+                pass
+            continue
         try:
             total_unrealised += to_decimal(p.unrealized_pnl)
         except Exception:
             pass
 
-        if ltp is None or p.quantity == 0:
+        if p.quantity == 0:
             continue
         try:
             ltp_dec = to_decimal(ltp)

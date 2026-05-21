@@ -581,6 +581,23 @@ async def refresh_unrealized_pnl(position: Position, ltp: Decimal) -> Position:
     # stop-out / warning never fired on crypto / forex positions.
     from app.services.market_data_service import get_usd_inr_rate, is_usd_quoted_segment
 
+    # ── Zero-LTP guard ──────────────────────────────────────────────
+    # A missing tick / stale cache / failed Zerodha fetch can hand us
+    # `ltp == 0`. The naive formula `(0 - avg) * qty` then produces a
+    # floating-loss equal to the WHOLE notional of the position, which
+    # the risk enforcer aggregates and reads as a colossal drawdown.
+    # Production proof (21-May 08:11 UTC, user CL57750173):
+    #     COPPER 2500-lot position triggered stop-out with
+    #     floating_loss = 3,348,250 (== 2500 × 1339.30, the notional)
+    #     loss_pct = 9124.17 %  against threshold 90 %.
+    # Multiple users were force-closed in the same scan window from
+    # the same root cause — every profitable position whose token
+    # had a momentarily 0 LTP got flattened.
+    # On a non-positive LTP we leave `ltp` and `unrealized_pnl` at
+    # the last good values; the next valid tick refreshes them.
+    if ltp is None or to_decimal(ltp) <= 0:
+        return position
+
     position.ltp = Decimal128(str(ltp))
     pnl = (ltp - to_decimal(position.avg_price)) * to_decimal(position.quantity)
     if is_usd_quoted_segment(position.segment_type) or is_usd_quoted_segment(
