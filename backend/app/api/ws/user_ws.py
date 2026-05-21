@@ -20,6 +20,7 @@ import logging
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
+from app.api.ws._helpers import is_connected, safe_send_text
 from app.core.redis_client import pubsub
 from app.core.security import decode_token
 
@@ -40,7 +41,7 @@ async def user_ws(ws: WebSocket, token: str = Query(...)):
         return
 
     await ws.accept()
-    await ws.send_text(json.dumps({"type": "hello", "user_id": user_id}))
+    await safe_send_text(ws, json.dumps({"type": "hello", "user_id": user_id}))
 
     channels = [
         f"user:{user_id}:positions",
@@ -60,7 +61,8 @@ async def user_ws(ws: WebSocket, token: str = Query(...)):
         try:
             while True:
                 await asyncio.sleep(25)
-                await ws.send_text(json.dumps({"type": "heartbeat"}))
+                if not await safe_send_text(ws, json.dumps({"type": "heartbeat"})):
+                    return
         except (WebSocketDisconnect, asyncio.CancelledError):
             return
         except Exception:  # pragma: no cover
@@ -70,6 +72,11 @@ async def user_ws(ws: WebSocket, token: str = Query(...)):
 
     try:
         async for msg in ps.listen():
+            # Stop forwarding if the client has gone away — avoids the
+            # post-close `RuntimeError` race that used to crash the
+            # handler when a pubsub message landed mid-disconnect.
+            if not is_connected(ws):
+                break
             # Ignore subscribe/unsubscribe acks; only forward real messages.
             if msg.get("type") != "message":
                 continue
@@ -84,13 +91,20 @@ async def user_ws(ws: WebSocket, token: str = Query(...)):
                 parsed = json.loads(raw) if raw else None
             except (ValueError, TypeError):
                 parsed = {"data": raw}
-            await ws.send_text(json.dumps(parsed if parsed is not None else {"data": raw}))
+            if not await safe_send_text(
+                ws, json.dumps(parsed if parsed is not None else {"data": raw})
+            ):
+                break
     except WebSocketDisconnect:
         return
     except Exception as e:  # pragma: no cover
         logger.warning("user_ws_failed", extra={"error": str(e)})
     finally:
         hb_task.cancel()
+        try:
+            await hb_task
+        except (asyncio.CancelledError, Exception):  # pragma: no cover
+            pass
         try:
             await ps.unsubscribe(*channels)
             await ps.close()

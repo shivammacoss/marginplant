@@ -21,6 +21,7 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.api.ws._helpers import is_connected, safe_send_text
 from app.core.redis_client import pubsub
 from app.services import market_data_service
 
@@ -59,6 +60,8 @@ async def market_ws(ws: WebSocket) -> None:
         """Forwards every pub/sub tick to the client WS in real time."""
         try:
             async for msg in ps.listen():
+                if not is_connected(ws):
+                    return
                 if msg.get("type") not in ("pmessage", "message"):
                     continue
                 raw = msg.get("data")
@@ -84,11 +87,10 @@ async def market_ws(ws: WebSocket) -> None:
                 if tok not in subscribed:
                     continue
                 parsed["token"] = tok
-                try:
-                    await ws.send_text(
-                        json.dumps({"type": "tick", "payload": [parsed]}, default=str)
-                    )
-                except (WebSocketDisconnect, RuntimeError):
+                if not await safe_send_text(
+                    ws,
+                    json.dumps({"type": "tick", "payload": [parsed]}, default=str),
+                ):
                     return
         except (WebSocketDisconnect, asyncio.CancelledError):
             return
@@ -104,6 +106,8 @@ async def market_ws(ws: WebSocket) -> None:
         try:
             while True:
                 await asyncio.sleep(5)
+                if not is_connected(ws):
+                    return
                 if not subscribed:
                     continue
                 tokens_now = list(subscribed)
@@ -113,16 +117,20 @@ async def market_ws(ws: WebSocket) -> None:
                 )
                 snapshots = [r for r in results if isinstance(r, dict)]
                 if snapshots:
-                    await ws.send_text(
-                        json.dumps({"type": "tick", "payload": snapshots}, default=str)
-                    )
+                    if not await safe_send_text(
+                        ws,
+                        json.dumps({"type": "tick", "payload": snapshots}, default=str),
+                    ):
+                        return
         except (WebSocketDisconnect, asyncio.CancelledError):
             return
         except Exception as e:  # pragma: no cover
             logger.exception("market_ws_pump_failed", extra={"error": str(e)})
 
     try:
-        await ws.send_text(json.dumps({"type": "hello", "message": "market_ws_connected"}))
+        await safe_send_text(
+            ws, json.dumps({"type": "hello", "message": "market_ws_connected"})
+        )
         listener_task = asyncio.create_task(listener())
         pump_task = asyncio.create_task(pump())
 
@@ -131,7 +139,9 @@ async def market_ws(ws: WebSocket) -> None:
             try:
                 msg: dict[str, Any] = json.loads(data)
             except json.JSONDecodeError:
-                await ws.send_text(json.dumps({"type": "error", "message": "invalid_json"}))
+                await safe_send_text(
+                    ws, json.dumps({"type": "error", "message": "invalid_json"})
+                )
                 continue
 
             t = msg.get("type")
@@ -153,7 +163,10 @@ async def market_ws(ws: WebSocket) -> None:
                     snaps = [r for r in results if isinstance(r, dict)]
                 else:
                     snaps = []
-                await ws.send_text(json.dumps({"type": "snapshot", "payload": snaps}, default=str))
+                await safe_send_text(
+                    ws,
+                    json.dumps({"type": "snapshot", "payload": snaps}, default=str),
+                )
             elif t == "unsubscribe":
                 tokens = [str(x) for x in (msg.get("tokens") or []) if x]
                 subscribed.difference_update(tokens)
@@ -161,17 +174,29 @@ async def market_ws(ws: WebSocket) -> None:
                 # No pubsub unsubscribe needed — the filter in the
                 # listener simply stops matching dropped tokens.
             elif t == "ping":
-                await ws.send_text(json.dumps({"type": "pong"}))
+                await safe_send_text(ws, json.dumps({"type": "pong"}))
             else:
-                await ws.send_text(json.dumps({"type": "error", "message": "unknown_type"}))
+                await safe_send_text(
+                    ws, json.dumps({"type": "error", "message": "unknown_type"})
+                )
 
     except WebSocketDisconnect:
         pass
+    except Exception:  # pragma: no cover
+        logger.exception("market_ws_main_failed")
     finally:
         if listener_task is not None:
             listener_task.cancel()
+            try:
+                await listener_task
+            except (asyncio.CancelledError, Exception):  # pragma: no cover
+                pass
         if pump_task is not None:
             pump_task.cancel()
+            try:
+                await pump_task
+            except (asyncio.CancelledError, Exception):  # pragma: no cover
+                pass
         try:
             await ps.punsubscribe("market:tick:*", "infoway:tick:*")
             await ps.close()

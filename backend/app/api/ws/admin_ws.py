@@ -27,6 +27,7 @@ import logging
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
+from app.api.ws._helpers import is_connected, safe_send_text
 from app.core.config import settings
 from app.core.redis_client import pubsub
 from app.core.security import decode_token
@@ -86,8 +87,9 @@ async def admin_ws(
         return
 
     await ws.accept()
-    await ws.send_text(
-        json.dumps({"type": "hello", "user_id": str(user.id), "role": user.role.value})
+    await safe_send_text(
+        ws,
+        json.dumps({"type": "hello", "user_id": str(user.id), "role": user.role.value}),
     )
 
     ps = pubsub()
@@ -102,7 +104,8 @@ async def admin_ws(
         try:
             while True:
                 await asyncio.sleep(25)
-                await ws.send_text(json.dumps({"type": "heartbeat"}))
+                if not await safe_send_text(ws, json.dumps({"type": "heartbeat"})):
+                    return
         except (WebSocketDisconnect, asyncio.CancelledError):
             return
         except Exception:  # pragma: no cover
@@ -112,6 +115,11 @@ async def admin_ws(
 
     try:
         async for msg in ps.listen():
+            # Stop forwarding if the client has gone away — avoids the
+            # post-close `RuntimeError` race that used to crash the
+            # admin WS handler on every flaky-network disconnect.
+            if not is_connected(ws):
+                break
             if msg.get("type") != "message":
                 continue
             raw = msg.get("data")
@@ -124,15 +132,20 @@ async def admin_ws(
                 parsed = json.loads(raw) if raw else None
             except (ValueError, TypeError):
                 parsed = {"data": raw}
-            await ws.send_text(
-                json.dumps(parsed if parsed is not None else {"data": raw})
-            )
+            if not await safe_send_text(
+                ws, json.dumps(parsed if parsed is not None else {"data": raw})
+            ):
+                break
     except WebSocketDisconnect:
         return
     except Exception as e:  # pragma: no cover
         logger.warning("admin_ws_failed", extra={"error": str(e)})
     finally:
         hb_task.cancel()
+        try:
+            await hb_task
+        except (asyncio.CancelledError, Exception):  # pragma: no cover
+            pass
         try:
             await ps.unsubscribe(ADMIN_CHANNEL)
             await ps.close()
