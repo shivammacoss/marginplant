@@ -95,12 +95,110 @@ async def list_orders(
                       bundles "Pending" = PENDING + OPEN + PARTIAL,
                       "Executed" = EXECUTED, "Rejected" = REJECTED,
                       so a single tab maps to multiple wire statuses.
-      • `sl_tp`     — when true, narrow to orders that have any SL/TP
-                      attached: SL/SL_M order types OR a bracket
-                      stop_loss/target stamped on the row. Powers the
-                      "SL / TP" tab.
+      • `sl_tp`     — when true, returns OPEN POSITIONS that carry a
+                      stop_loss or target the user has set (the operator
+                      reads this tab as "kis client ne SL/TP lagaya
+                      hai"). The shape is normalised to look like an
+                      order row so the same DataTable renders both.
       • `user_id`   — scope to one user (used by user-detail deep links).
     """
+    # SL/TP tab — sourced from POSITIONS (not orders). User-side SL/TP is
+    # set on the Position document via the per-position edit endpoint
+    # AFTER the entry fills, so it never lives on an Order row. Filtering
+    # orders for bracket_* fields only ever shows orders placed WITH
+    # bracket legs at order time, which is a tiny subset and was always
+    # empty for this operator's flow. Operator-flagged 21-May:
+    # "SL/TP ka data nahi aa raha".
+    if sl_tp:
+        pq: dict[str, Any] = {
+            "status": PositionStatus.OPEN.value,
+            "$or": [
+                {"stop_loss": {"$ne": None}},
+                {"target": {"$ne": None}},
+            ],
+        }
+        if user_id:
+            await assert_user_in_scope(admin, user_id)
+            pq["user_id"] = PydanticObjectId(user_id)
+        else:
+            scope = await scoped_user_ids(admin)
+            if scope is not None:
+                if not scope:
+                    return APIResponse(
+                        data={
+                            "items": [],
+                            "meta": {"page": page, "page_size": page_size, "total": 0, "total_pages": 0},
+                        }
+                    )
+                pq["user_id"] = {"$in": scope}
+        pos_total = await Position.find(pq).count()
+        pos_rows = (
+            await Position.find(pq)
+            .sort("-opened_at")
+            .skip((page - 1) * page_size)
+            .limit(page_size)
+            .to_list()
+        )
+        user_ids_p = list({p.user_id for p in pos_rows})
+        users_p = await User.find({"_id": {"$in": user_ids_p}}).to_list() if user_ids_p else []
+        user_map_p = {
+            str(u.id): {"user_code": u.user_code, "full_name": u.full_name} for u in users_p
+        }
+        return APIResponse(
+            data={
+                "items": [
+                    {
+                        "id": str(p.id),
+                        # Position rows don't have an order_number — the UI
+                        # tab doesn't render this column anymore, but other
+                        # consumers may peek at it, so synthesise from id.
+                        "order_number": f"POS-{str(p.id)[-8:].upper()}",
+                        "user_id": str(p.user_id),
+                        "user_code": user_map_p.get(str(p.user_id), {}).get("user_code"),
+                        "user_name": user_map_p.get(str(p.user_id), {}).get("full_name"),
+                        "symbol": p.instrument.symbol,
+                        "exchange": str(p.instrument.exchange),
+                        "segment": p.instrument.segment,
+                        "token": p.instrument.token,
+                        "instrument_token": p.instrument.token,
+                        "action": (
+                            p.opened_side.value
+                            if p.opened_side is not None
+                            else ("BUY" if p.quantity >= 0 else "SELL")
+                        ),
+                        # Map product_type into the order_type column so the
+                        # generic table still labels the row with something
+                        # meaningful (MIS / NRML / CNC).
+                        "order_type": p.product_type.value,
+                        "product_type": p.product_type.value,
+                        "lots": abs(p.quantity) / max(1, int(p.instrument.lot_size or 1)),
+                        "quantity": abs(p.quantity),
+                        "filled_quantity": abs(p.quantity),
+                        "price": str(p.avg_price),
+                        "average_price": str(p.avg_price),
+                        "trigger_price": None,
+                        # SL/TP from the Position document — the actual
+                        # values the user has set on the open trade.
+                        "bracket_stop_loss": str(p.stop_loss) if p.stop_loss is not None else None,
+                        "bracket_target": str(p.target) if p.target is not None else None,
+                        "rejection_reason": None,
+                        "status": p.status.value,
+                        "created_at": p.opened_at,
+                        "executed_at": p.opened_at,
+                        "cancelled_at": None,
+                        "realized_pnl_inr": None,
+                    }
+                    for p in pos_rows
+                ],
+                "meta": {
+                    "page": page,
+                    "page_size": page_size,
+                    "total": pos_total,
+                    "total_pages": (pos_total + page_size - 1) // page_size,
+                },
+            }
+        )
+
     q: dict[str, Any] = {}
     if status:
         q["status"] = status
@@ -108,24 +206,6 @@ async def list_orders(
         status_list = [s.strip() for s in statuses.split(",") if s.strip()]
         if status_list:
             q["status"] = {"$in": status_list}
-    if sl_tp:
-        # An order belongs in the SL/TP view if EITHER it's a
-        # stop-loss / stop-loss-market order, OR it carries a
-        # bracket SL / TP that fires once the entry leg fills. The
-        # `$or` is added to the same query — but we have to AND it
-        # with whatever the status / scope filter already accumulated
-        # so a "Pending + SL/TP" combination still narrows correctly.
-        sl_tp_branch = {
-            "$or": [
-                {"order_type": {"$in": ["SL", "SL_M"]}},
-                {"bracket_stop_loss": {"$ne": None}},
-                {"bracket_target": {"$ne": None}},
-            ]
-        }
-        if q:
-            q = {"$and": [q, sl_tp_branch]}
-        else:
-            q = sl_tp_branch
     if user_id:
         await assert_user_in_scope(admin, user_id)
         q["user_id"] = PydanticObjectId(user_id)

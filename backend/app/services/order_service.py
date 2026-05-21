@@ -11,7 +11,13 @@ from typing import Any
 from beanie import PydanticObjectId
 from bson import Decimal128
 
-from app.core.exceptions import NotFoundError, ValidationFailedError
+from app.core.exceptions import (
+    AppError,
+    InsufficientFundsError,
+    NotFoundError,
+    OrderRejectedError,
+    ValidationFailedError,
+)
 from app.models._base import (
     OrderAction,
     OrderType,
@@ -241,24 +247,79 @@ async def place_order(
         to_decimal(expected_raw) if expected_raw not in (None, "", 0, 0.0) else None
     )
 
-    # Validate
-    validated = await order_validator.validate(
-        user=user,
-        instrument=instrument,
-        segment_type=segment_type,
-        action=action,
-        order_type=order_type,
-        product_type=product_type,
-        lots=lots,
-        quantity=quantity,
-        price=price,
-        trigger_price=trigger,
-        is_amo=is_amo,
-        is_squareoff=is_squareoff,
-        expected_price=expected_price,
-        bracket_sl=bracket_sl,
-        bracket_tp=bracket_tp,
-    )
+    # Validate. When validation fails we still want a paper trail —
+    # the admin Orders monitor's "Rejected Orders" tab is empty by
+    # design without this, because the validator throws BEFORE any
+    # Order doc is created. Operator-flagged 21-May: "rejected ka
+    # reason ke sath aaye kyu nahi aa raha". Persist a stub Order
+    # with status=REJECTED + the exception's code/message so the tab
+    # has rows to show, then re-raise so the API surface still returns
+    # the same 400 + machine-readable code the client expects.
+    try:
+        validated = await order_validator.validate(
+            user=user,
+            instrument=instrument,
+            segment_type=segment_type,
+            action=action,
+            order_type=order_type,
+            product_type=product_type,
+            lots=lots,
+            quantity=quantity,
+            price=price,
+            trigger_price=trigger,
+            is_amo=is_amo,
+            is_squareoff=is_squareoff,
+            expected_price=expected_price,
+            bracket_sl=bracket_sl,
+            bracket_tp=bracket_tp,
+        )
+    except (OrderRejectedError, InsufficientFundsError, ValidationFailedError) as ve:
+        # Best-effort persistence — never let the audit row blow up the
+        # original 400 response the caller is waiting for.
+        try:
+            instr_ref = InstrumentRef(
+                token=instrument.token,
+                symbol=instrument.symbol,
+                trading_symbol=instrument.trading_symbol,
+                exchange=instrument.exchange,
+                segment=instrument.segment,
+                lot_size=lot_size,
+                tick_size=instrument.tick_size,
+            )
+            rejected = Order(
+                order_number=_order_number(),
+                user_id=user.id,  # type: ignore[arg-type]
+                instrument=instr_ref,
+                action=action,
+                order_type=order_type,
+                product_type=product_type,
+                validity=validity,
+                lots=lots,
+                quantity=quantity,
+                pending_quantity=0,
+                price=Decimal128(str(price)),
+                trigger_price=Decimal128(str(trigger)),
+                margin_blocked=Decimal128("0"),
+                status=OrderStatus.REJECTED,
+                rejection_reason=str(ve.message),
+                rejection_code=str(getattr(ve, "code", None) or "ORDER_REJECTED"),
+                is_amo=is_amo,
+                is_squareoff=is_squareoff,
+                placed_by=user.id,  # type: ignore[arg-type]
+                placed_from=str(payload.get("placed_from") or "WEB"),
+                bracket_stop_loss=Decimal128(str(bracket_sl)) if bracket_sl is not None else None,
+                bracket_target=Decimal128(str(bracket_tp)) if bracket_tp is not None else None,
+            )
+            await rejected.insert()
+            logger.info(
+                "order_rejected_persisted user=%s symbol=%s code=%s",
+                user.id,
+                instrument.symbol,
+                rejected.rejection_code,
+            )
+        except Exception:
+            logger.exception("order_rejected_persist_failed user=%s symbol=%s", user.id, instrument.symbol)
+        raise
     t = _mark("validate", t)
 
     # Block margin (only for BUY or short SELL — for selling existing position the wallet is untouched)
