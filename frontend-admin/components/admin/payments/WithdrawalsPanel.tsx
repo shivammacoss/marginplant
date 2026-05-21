@@ -84,7 +84,10 @@ export function WithdrawalsPanel() {
   // Backend rejects too via require_perm("withdrawals","write"); UI just
   // matches so the user understands why nothing happens.
   const canMutate = canEdit(me, "withdrawals");
-  const [status, setStatus] = useState("PENDING");
+  // Default to "All" (same rationale as DepositsPanel — operator
+  // flagged 21-May that landing on an empty PENDING list looked
+  // like the queue was broken).
+  const [status, setStatus] = useState("");
   const [approving, setApproving] = useState<{ id: string; utr: string } | null>(null);
   const [rejecting, setRejecting] = useState<{ id: string; reason: string } | null>(null);
 

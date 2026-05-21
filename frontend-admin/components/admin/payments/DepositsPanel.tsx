@@ -29,7 +29,11 @@ export function DepositsPanel() {
   // Backend rejects too (require_perm("deposits","write")) but the UI must
   // match so the user understands why nothing happens.
   const canMutate = canEdit(me, "deposits");
-  const [status, setStatus] = useState("PENDING");
+  // Default to "All" so admins land on a full view of recent deposits
+  // (not just PENDING). Operator-flagged 21-May: the empty-Pending
+  // state was confusing on quiet hours -- "No data" suggested the
+  // queue was broken when actually all rows had been processed.
+  const [status, setStatus] = useState("");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [rejecting, setRejecting] = useState<{ id: string; remark: string } | null>(null);
 
