@@ -39,6 +39,14 @@ class AuditAction(StrEnum):
     ORDER_REJECT = "ORDER_REJECT"
     SQUAREOFF = "SQUAREOFF"
     SQUAREOFF_FORCE = "SQUAREOFF_FORCE"
+    # Admin-side position lifecycle actions. Distinct enum members
+    # (rather than overloading SETTING_CHANGE / UPDATE) so the audit
+    # filter UI can surface each as its own chip and the log itself
+    # reads at a glance — operator opens /audit and sees "Edit Trade"
+    # vs "Reopen" vs "Close by Admin" as separate rows.
+    POSITION_EDIT = "POSITION_EDIT"
+    POSITION_REOPEN = "POSITION_REOPEN"
+    POSITION_DELETE = "POSITION_DELETE"
     EOD_RESET = "EOD_RESET"
     BACKUP = "BACKUP"
     RESTORE = "RESTORE"

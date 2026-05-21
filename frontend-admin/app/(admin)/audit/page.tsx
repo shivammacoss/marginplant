@@ -92,6 +92,93 @@ function UserCell({
 }
 
 
+/** Preset filter chips for the audit page. Each chip maps to a
+ *  semantic category that the admin actually thinks in (Edit trade,
+ *  Reopen, Deposit, etc.) — internally we hand a comma-separated list
+ *  of action codes + an optional entity_type whitelist to the backend.
+ *  Keeping the mapping table here (not on the backend) lets the
+ *  category set evolve without a deploy.
+ */
+const PRESETS: {
+  id: string;
+  label: string;
+  actions?: string[];        // matches AuditAction enum values
+  entity_types?: string[];   // matches the entity_type strings the
+                             // log_event helpers stamp (e.g. "Position",
+                             // "DepositRequest", "WithdrawalRequest")
+}[] = [
+  { id: "all", label: "All" },
+  {
+    id: "edit_trade",
+    label: "Edit trade",
+    actions: ["POSITION_EDIT"],
+    entity_types: ["Position"],
+  },
+  {
+    id: "close_admin",
+    label: "Close by admin",
+    actions: ["SQUAREOFF", "SQUAREOFF_FORCE"],
+    entity_types: ["Position"],
+  },
+  {
+    id: "reopen",
+    label: "Reopen",
+    actions: ["POSITION_REOPEN"],
+    entity_types: ["Position"],
+  },
+  {
+    id: "position_delete",
+    label: "Position delete",
+    actions: ["POSITION_DELETE"],
+    entity_types: ["Position"],
+  },
+  {
+    id: "deposit",
+    label: "Deposit",
+    actions: ["APPROVE", "REJECT"],
+    entity_types: ["DepositRequest"],
+  },
+  {
+    id: "withdrawal",
+    label: "Withdrawal",
+    actions: ["APPROVE", "REJECT"],
+    entity_types: ["WithdrawalRequest"],
+  },
+  {
+    id: "settlement",
+    label: "Settlement",
+    actions: ["APPROVE", "REJECT"],
+    entity_types: ["SettlementRequest"],
+  },
+  {
+    id: "kyc",
+    label: "KYC",
+    actions: ["APPROVE", "REJECT", "CREATE", "UPDATE"],
+    entity_types: ["KycSubmission"],
+  },
+  {
+    id: "wallet_adjust",
+    label: "Wallet adjust",
+    actions: ["WALLET_ADJUST"],
+  },
+  {
+    id: "block",
+    label: "Block / Unblock",
+    actions: ["BLOCK", "UNBLOCK"],
+  },
+  {
+    id: "login",
+    label: "Login",
+    actions: ["LOGIN", "LOGOUT", "LOGIN_FAILED"],
+  },
+  {
+    id: "settings",
+    label: "Settings change",
+    actions: ["SETTING_CHANGE"],
+  },
+];
+
+
 function AuditLogsInner() {
   const searchParams = useSearchParams();
   // `involving_user_id` is the new "events involving this user as actor
@@ -101,9 +188,35 @@ function AuditLogsInner() {
   const queryInvolvingUserId = searchParams?.get("involving_user_id") ?? null;
   const queryTargetUserId = searchParams?.get("target_user_id") ?? null;
   const scopedUserId = queryInvolvingUserId ?? queryTargetUserId;
+  const [preset, setPreset] = useState<string>("all");
+  // Free-text fields stay as the "advanced" tier of the filter — when
+  // a preset is active they're ignored on the server side (server
+  // honours `action` over `actions`), so the UI hides them behind a
+  // toggle to avoid the appearance of dead inputs.
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [action, setAction] = useState("");
   const [entityType, setEntityType] = useState("");
+  const [fromDate, setFromDate] = useState<string>("");
+  const [toDate, setToDate] = useState<string>("");
   const [page, setPage] = useState(1);
+
+  // Resolve the active preset → backend params. Empty preset = no
+  // category filter; advanced single-action `action` value (if any)
+  // takes precedence so the back-compat path still works.
+  const activePreset = PRESETS.find((p) => p.id === preset);
+  const presetActions =
+    !action && activePreset?.actions && activePreset.actions.length > 0
+      ? activePreset.actions.join(",")
+      : undefined;
+  const presetEntityTypes =
+    !entityType && activePreset?.entity_types && activePreset.entity_types.length > 0
+      ? activePreset.entity_types.join(",")
+      : undefined;
+
+  function selectPreset(id: string) {
+    setPreset(id);
+    setPage(1);
+  }
 
   const { data: scopedUser } = useQuery({
     queryKey: ["admin", "user", scopedUserId],
@@ -113,11 +226,30 @@ function AuditLogsInner() {
   });
 
   const { data, isFetching } = useQuery({
-    queryKey: ["admin", "audit", { action, entityType, page, queryInvolvingUserId, queryTargetUserId }],
+    queryKey: [
+      "admin",
+      "audit",
+      {
+        preset,
+        action,
+        entityType,
+        fromDate,
+        toDate,
+        page,
+        queryInvolvingUserId,
+        queryTargetUserId,
+      },
+    ],
     queryFn: () =>
       SettingsAPI.audit({
         action: action || undefined,
+        actions: presetActions,
         entity_type: entityType || undefined,
+        entity_types: presetEntityTypes,
+        from_date: fromDate ? new Date(fromDate).toISOString() : undefined,
+        to_date: toDate
+          ? new Date(`${toDate}T23:59:59.999`).toISOString()
+          : undefined,
         involving_user_id: queryInvolvingUserId || undefined,
         target_user_id: queryTargetUserId || undefined,
         page,
@@ -201,26 +333,113 @@ function AuditLogsInner() {
         </div>
       )}
 
-      <div className="flex flex-wrap gap-2">
-        <Input
-          value={action}
-          onChange={(e) => {
-            setPage(1);
-            setAction(e.target.value);
-          }}
-          placeholder="Filter action (e.g. APPROVE)"
-          className="h-10 max-w-xs"
-        />
-        <Input
-          value={entityType}
-          onChange={(e) => {
-            setPage(1);
-            setEntityType(e.target.value);
-          }}
-          placeholder="Filter entity type (e.g. User)"
-          className="h-10 max-w-xs"
-        />
+      {/* Preset filter chips — each chip maps to a backend
+          `actions=...` + `entity_types=...` combo so the operator
+          picks "Edit trade" / "Reopen" / "Deposit" / etc. without
+          having to remember enum names. The "All" chip clears
+          everything to the unfiltered view. */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        {PRESETS.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            onClick={() => selectPreset(p.id)}
+            className={
+              "rounded-full border px-3 py-1 text-xs font-medium transition-colors " +
+              (preset === p.id
+                ? "border-primary bg-primary text-primary-foreground"
+                : "border-border bg-background text-muted-foreground hover:bg-muted/40 hover:text-foreground")
+            }
+          >
+            {p.label}
+          </button>
+        ))}
+        <span className="mx-1 hidden h-6 w-px bg-border sm:inline-block" />
+        <button
+          type="button"
+          onClick={() => setShowAdvanced((v) => !v)}
+          className="rounded-full border border-dashed border-border bg-background px-3 py-1 text-[11px] text-muted-foreground hover:bg-muted/40"
+        >
+          {showAdvanced ? "Hide advanced" : "Advanced"}
+        </button>
       </div>
+
+      {/* Date range — always visible since it's a common filter for
+          "today's events" / "yesterday only" investigations. Inputs
+          are HTML5 date pickers so no extra dep is needed. Empty
+          either bound = open-ended. */}
+      <div className="flex flex-wrap items-end gap-2">
+        <div className="space-y-1">
+          <label className="block text-[10px] uppercase tracking-wider text-muted-foreground">
+            From
+          </label>
+          <Input
+            type="date"
+            value={fromDate}
+            onChange={(e) => {
+              setPage(1);
+              setFromDate(e.target.value);
+            }}
+            className="h-9 w-[150px]"
+          />
+        </div>
+        <div className="space-y-1">
+          <label className="block text-[10px] uppercase tracking-wider text-muted-foreground">
+            To
+          </label>
+          <Input
+            type="date"
+            value={toDate}
+            onChange={(e) => {
+              setPage(1);
+              setToDate(e.target.value);
+            }}
+            className="h-9 w-[150px]"
+          />
+        </div>
+        {(fromDate || toDate) && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setFromDate("");
+              setToDate("");
+              setPage(1);
+            }}
+            className="h-9"
+          >
+            <XIcon className="size-3" /> Clear dates
+          </Button>
+        )}
+      </div>
+
+      {/* Advanced free-text filters — hidden by default to keep the
+          chip row clean. When a preset is active these inputs take
+          precedence on the backend (single `action` beats `actions`
+          CSV) so the operator can drill into a specific action code
+          that the chip set doesn't cover. */}
+      {showAdvanced && (
+        <div className="flex flex-wrap gap-2">
+          <Input
+            value={action}
+            onChange={(e) => {
+              setPage(1);
+              setAction(e.target.value);
+            }}
+            placeholder="Action code (e.g. ORDER_PLACE)"
+            className="h-9 max-w-xs"
+          />
+          <Input
+            value={entityType}
+            onChange={(e) => {
+              setPage(1);
+              setEntityType(e.target.value);
+            }}
+            placeholder="Entity type (e.g. User)"
+            className="h-9 max-w-xs"
+          />
+        </div>
+      )}
 
       <DataTable columns={cols} rows={data?.items} keyExtractor={(r) => r.id} loading={isFetching && !data} />
 

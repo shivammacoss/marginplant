@@ -152,10 +152,38 @@ async def list_audit(
     target_user_id: str | None = None,
     involving_user_id: str | None = None,
     action: str | None = None,
+    actions: str | None = None,
     entity_type: str | None = None,
+    entity_types: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, le=200),
 ):
+    """Admin audit-log feed.
+
+    Filter params (all optional, combine via AND):
+      • user_id           — actor only
+      • target_user_id    — subject only
+      • involving_user_id — actor OR subject (used by per-user Activity)
+      • action            — single action (back-compat with old UI)
+      • actions           — CSV of actions; preset chips on the new
+                            audit page (Edit Trade / Reopen / Deposit /
+                            Withdrawal / etc.) pack 2-3 actions into
+                            one chip and submit them all at once.
+      • entity_type       — single entity_type
+      • entity_types      — CSV of entity_types (used together with
+                            `actions` by the preset chips so e.g.
+                            "Deposit" chip narrows to
+                            action in {APPROVE, REJECT} AND
+                            entity_type = DepositRequest)
+      • from_date / to_date — ISO timestamps; either bound is optional.
+                              Inclusive lower, exclusive upper so a
+                              day filter ("2026-05-21") naturally
+                              spans 00:00..23:59:59.999.
+    """
+    from datetime import datetime as _dt
+
     q: dict[str, Any] = {}
 
     # ── Scope gate ──────────────────────────────────────────────────
@@ -198,8 +226,39 @@ async def list_audit(
         q["$or"] = [{"user_id": oid}, {"target_user_id": oid}]
     if action:
         q["action"] = action
+    elif actions:
+        # CSV of allowed actions — used by the preset filter chips
+        # ("Edit Trade", "Close by Admin", "Reopen", "Deposit", etc.).
+        # Trim + drop empties so a trailing comma doesn't poison the
+        # $in list.
+        action_list = [a.strip() for a in actions.split(",") if a.strip()]
+        if action_list:
+            q["action"] = {"$in": action_list}
     if entity_type:
         q["entity_type"] = entity_type
+    elif entity_types:
+        et_list = [e.strip() for e in entity_types.split(",") if e.strip()]
+        if et_list:
+            q["entity_type"] = {"$in": et_list}
+
+    # Date range — `created_at` indexed already, so the bounded scan
+    # uses the existing -created_at sort index efficiently. Both bounds
+    # optional; accept ISO 8601 or `YYYY-MM-DD` (treated as IST 00:00
+    # for the day filter shortcut on the preset chips).
+    if from_date or to_date:
+        date_q: dict[str, Any] = {}
+        if from_date:
+            try:
+                date_q["$gte"] = _dt.fromisoformat(from_date.replace("Z", "+00:00"))
+            except Exception:
+                pass
+        if to_date:
+            try:
+                date_q["$lte"] = _dt.fromisoformat(to_date.replace("Z", "+00:00"))
+            except Exception:
+                pass
+        if date_q:
+            q["created_at"] = date_q
 
     # If both the scope filter and an `involving_user_id` $or are
     # present, Mongo only honours the LAST `$or` key — so combine the

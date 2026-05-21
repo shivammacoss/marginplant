@@ -660,9 +660,7 @@ async def admin_edit_position(
         "status": p.status.value,
     }
     await log_event(
-        action=AuditAction.POSITION_EDIT
-        if hasattr(AuditAction, "POSITION_EDIT")
-        else AuditAction.SETTING_CHANGE,
+        action=AuditAction.POSITION_EDIT,
         entity_type="Position",
         entity_id=p.id,
         actor_id=admin.id,
@@ -883,13 +881,12 @@ async def admin_reopen_position(
         pass
 
     await log_event(
-        action=AuditAction.SETTING_CHANGE,
+        action=AuditAction.POSITION_REOPEN,
         entity_type="Position",
         entity_id=p.id,
         actor_id=admin.id,
         target_user_id=p.user_id,
         metadata={
-            "action": "REOPEN",
             "reversed_realized_pnl": str(realized),
             "restored_quantity": opening_qty * sign,
         },
@@ -1446,7 +1443,7 @@ async def delete_position(
     # readability.
     try:
         await log_event(
-            action=AuditAction.DELETE,
+            action=AuditAction.POSITION_DELETE,
             entity_type="Position",
             entity_id=p.id,
             actor_id=admin.id,
