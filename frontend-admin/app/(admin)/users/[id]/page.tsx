@@ -225,7 +225,7 @@ export default function UserDetailPage() {
               <Stat label="Withdrawals" value={formatINR(u.wallet?.total_withdrawals)} />
               {Number(u.wallet?.settlement_outstanding ?? 0) > 0 && (
                 <Stat
-                  label="Outstanding"
+                  label="Settlement"
                   value={formatINR(u.wallet?.settlement_outstanding)}
                   highlighted
                 />

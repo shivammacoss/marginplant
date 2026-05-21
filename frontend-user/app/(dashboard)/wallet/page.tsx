@@ -315,19 +315,24 @@ export default function WalletPage() {
         </div>
       </section>
 
-      {/* ── Settlement outstanding banner (only when > 0) ─────────── */}
+      {/* ── Settlement banner (only when > 0) ─────────────────────
+         Informational only — the previous "auto-deducted from your
+         next deposit" copy is gone. Policy update 21-May: settlement
+         is a record of past shortfalls (e.g. a stop-out that exceeded
+         balance) and the user is NOT required to top it up. Their
+         next deposit credits available_balance in full. */}
       {Number(summary?.settlement_outstanding ?? 0) > 0 && (
-        <section className="flex items-start gap-3 rounded-xl border border-destructive/40 bg-destructive/10 p-4">
-          <AlertCircle className="size-5 shrink-0 text-destructive mt-0.5" />
+        <section className="flex items-start gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4">
+          <AlertCircle className="size-5 shrink-0 text-amber-600 dark:text-amber-400 mt-0.5" />
           <div className="flex-1">
-            <div className="text-xs font-semibold uppercase tracking-wider text-destructive">
-              Outstanding settlement
+            <div className="text-xs font-semibold uppercase tracking-wider text-amber-600 dark:text-amber-400">
+              Settlement
             </div>
-            <div className="font-tabular text-2xl font-bold text-destructive mt-0.5">
+            <div className="font-tabular text-2xl font-bold text-amber-600 dark:text-amber-400 mt-0.5">
               {formatINR(summary?.settlement_outstanding ?? 0)}
             </div>
             <div className="text-xs text-muted-foreground mt-1">
-              Auto-deducted from your next deposit before crediting available balance.
+              Recorded as a past shortfall. Your wallet balance has been settled at zero — no further action needed from you.
             </div>
           </div>
         </section>

@@ -102,18 +102,21 @@ export function DepositsPanel() {
       header: "Amount",
       align: "right",
       render: (r) => {
-        const outstanding = Number(r.user_settlement_outstanding ?? 0);
-        if (outstanding <= 0) return formatINR(r.amount);
-        const depositAmt = Number(r.amount);
-        const recovered = Math.min(outstanding, depositAmt);
+        // Settlement is informational only now — the user is NOT
+        // expected to top it up via future deposits (policy change
+        // 21-May). Surface the dues figure as a passive informational
+        // chip without the "will be recovered" tooltip that promised
+        // auto-deduction the backend no longer does.
+        const settlement = Number(r.user_settlement_outstanding ?? 0);
+        if (settlement <= 0) return formatINR(r.amount);
         return (
           <div className="flex flex-col items-end leading-tight">
             <span>{formatINR(r.amount)}</span>
             <span
-              className="text-[10px] text-destructive"
-              title={`User has ₹${outstanding.toFixed(2)} outstanding. ₹${recovered.toFixed(2)} will be recovered first; remainder credits balance.`}
+              className="text-[10px] text-amber-600 dark:text-amber-400"
+              title={`User has ₹${settlement.toFixed(2)} settlement on record (informational — not auto-recovered).`}
             >
-              ⚠ ₹{outstanding.toFixed(0)} dues
+              ⓘ ₹{settlement.toFixed(0)} settlement
             </span>
           </div>
         );

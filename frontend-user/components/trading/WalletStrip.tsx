@@ -105,10 +105,10 @@ export function WalletStrip({
       {Number(wallet?.settlement_outstanding ?? 0) > 0 && (
         <>
           <Sep />
-          <div className="flex items-center gap-2 text-red-500" role="alert">
+          <div className="flex items-center gap-2 text-amber-600 dark:text-amber-400" role="status">
             <AlertCircle className="w-4 h-4 shrink-0" />
             <div className="flex flex-col">
-              <span className="text-[10px] uppercase tracking-wider opacity-80">Outstanding</span>
+              <span className="text-[10px] uppercase tracking-wider opacity-80">Settlement</span>
               <span className="font-tabular text-xs font-semibold">
                 ₹{Number(wallet.settlement_outstanding).toLocaleString("en-IN", {
                   minimumFractionDigits: 2,

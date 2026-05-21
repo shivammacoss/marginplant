@@ -57,6 +57,18 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logger.warning("redis_unavailable_starting_without_cache")
 
+    # Start the process-wide WebSocket hubs. Each hub holds a single
+    # shared Redis pub/sub connection and fans messages out to all
+    # attached sockets in-process — replaces the previous design where
+    # every connected WS opened its own pub/sub. Idempotent and tolerant
+    # of Redis being unavailable (handlers will retry start() on connect).
+    try:
+        from app.core.ws_hub import start_all_hubs
+
+        await start_all_hubs()
+    except Exception:
+        logger.warning("ws_hubs_startup_failed_continuing")
+
     if settings.RUN_SEED_ON_STARTUP:
         from app.seed.instruments import seed_instruments
         from app.seed.seed_data import run_seed
@@ -112,10 +124,46 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logger.exception("heal_pnl_sharing_agreement_type_failed_continuing")
 
+    # Wallet floor migration: clamp any wallet still showing a negative
+    # available_balance up to 0 and book the shortfall as settlement.
+    # Catches users left in a bad state by the pre-fix code path where
+    # credit_limit was allowed to mask a negative balance. Idempotent —
+    # cheap no-op once all wallets are at or above 0.
+    try:
+        from app.services.wallet_service import (
+            clamp_negative_balances_to_settlement,
+        )
+
+        clamp_result = await clamp_negative_balances_to_settlement()
+        if clamp_result.get("fixed"):
+            logger.info(
+                "startup_clamped_negative_wallets fixed=%d",
+                clamp_result["fixed"],
+            )
+    except Exception:
+        logger.exception("clamp_negative_balances_failed_continuing")
+
     # Start mock market data tick loop
     import asyncio as _asyncio
+    from functools import partial as _partial
 
+    from app.core.leader_lock import leader_elected as _leader_elected
+    from app.core.loop_supervisor import supervise as _supervise
     from app.services import market_data_service
+
+    def _leader_only(loop_name: str, fn, /, **kwargs):
+        """Wrap a loop factory so it only runs on the cluster leader.
+
+        The leader lock is keyed by ``leader:{loop_name}`` in Redis and
+        held with a 30 s TTL renewed every ~10 s. If the leader dies,
+        a standby worker picks up within `poll_sec` (5 s default).
+        """
+        return _partial(
+            _leader_elected,
+            loop_name,
+            _partial(fn, **kwargs),
+            lock_key=f"leader:{loop_name}",
+        )
 
     # 250 ms tick fanout — matches what the web frontend's `useMarketStream`
     # comment refers to ("WS pump now runs at 250 ms"). The previous 1 s
@@ -125,14 +173,37 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # to. At 1 Hz, even when the upstream feed delivered ticks at 100 ms,
     # the user saw a refresh only every second. 4×-faster pump = sub-second
     # bid/ask movement on the APK and web, matching what the user expects.
-    market_tick_task: _asyncio.Task = _asyncio.create_task(market_data_service.tick_loop(interval_sec=0.25))
+    #
+    # Every background loop below is wrapped in `supervise()` so an
+    # uncaught exception escaping the loop's own try/except cannot
+    # silently kill it for the rest of the process lifetime — the
+    # supervisor logs the crash, backs off, and restarts the loop.
+    # Loop internals, intervals and shutdown semantics are unchanged.
+    market_tick_task: _asyncio.Task = _asyncio.create_task(
+        _supervise(
+            "market_tick",
+            _partial(market_data_service.tick_loop, interval_sec=0.25),
+        )
+    )
     # Keep reference on the app so it isn't GC'd and can be cancelled cleanly on shutdown
     setattr(app, "_market_tick_task", market_tick_task)
+
+    # The next six loops are wrapped in BOTH `_supervise` (auto-restart on
+    # crash) AND `_leader_only` (single-leader across the cluster). Without
+    # the leader gate, every uvicorn worker / instance would re-run the
+    # same scan every tick — the existing cross-worker dedup (Mongo claims,
+    # idempotency keys) keeps that *correct*, but the duplicated read load
+    # is pure waste at multi-worker / multi-instance scale.
 
     # Pending-order poller: walks LIMIT / SL-M orders every 1.5 s and fires
     # any whose trigger condition is met. Without this they'd park forever.
     from app.services.matching_engine import pending_order_poller
-    pending_task: _asyncio.Task = _asyncio.create_task(pending_order_poller(interval_sec=1.5))
+    pending_task: _asyncio.Task = _asyncio.create_task(
+        _supervise(
+            "pending_order_poller",
+            _leader_only("pending_order_poller", pending_order_poller, interval_sec=1.5),
+        )
+    )
     setattr(app, "_pending_order_task", pending_task)
 
     # Risk enforcer: every 5 s checks every user with open positions for
@@ -140,7 +211,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # (notify or auto-squareoff). Without this, the Risk Management
     # settings on the admin page do nothing automatically.
     from app.services.risk_enforcer import risk_enforcer_loop
-    risk_task: _asyncio.Task = _asyncio.create_task(risk_enforcer_loop(interval_sec=5.0))
+    risk_task: _asyncio.Task = _asyncio.create_task(
+        _supervise(
+            "risk_enforcer",
+            _leader_only("risk_enforcer", risk_enforcer_loop, interval_sec=5.0),
+        )
+    )
     setattr(app, "_risk_enforcer_task", risk_task)
 
     # Expiry cleanup: hourly sweep that removes day-after-expiry instruments
@@ -148,7 +224,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # and marks them inactive in the Instrument collection. The first sweep
     # runs immediately so anything that expired overnight is cleaned at boot.
     from app.services.expiry_cleanup import expiry_cleanup_loop
-    expiry_task: _asyncio.Task = _asyncio.create_task(expiry_cleanup_loop(interval_sec=3600.0))
+    expiry_task: _asyncio.Task = _asyncio.create_task(
+        _supervise(
+            "expiry_cleanup",
+            _leader_only("expiry_cleanup", expiry_cleanup_loop, interval_sec=3600.0),
+        )
+    )
 
     # Intraday→carryforward auto-rollover: at each segment's exchange-close
     # minute, flip all open MIS positions to NRML. Recomputes the overnight
@@ -156,7 +237,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # position whose user can't cover the new requirement. Forex (24/5)
     # and crypto (24/7) are exempt — no daily close means no rollover.
     from app.services.position_service import intraday_to_carry_loop
-    rollover_task: _asyncio.Task = _asyncio.create_task(intraday_to_carry_loop(interval_sec=60.0))
+    rollover_task: _asyncio.Task = _asyncio.create_task(
+        _supervise(
+            "intraday_to_carry",
+            _leader_only("intraday_to_carry", intraday_to_carry_loop, interval_sec=60.0),
+        )
+    )
     setattr(app, "_intraday_to_carry_task", rollover_task)
     setattr(app, "_expiry_cleanup_task", expiry_task)
 
@@ -168,7 +254,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # incident on 2026-05-19).
     from app.services.position_service import tracker_reconcile_loop
     tracker_heal_task: _asyncio.Task = _asyncio.create_task(
-        tracker_reconcile_loop(interval_sec=900.0)
+        _supervise(
+            "tracker_reconcile",
+            _leader_only("tracker_reconcile", tracker_reconcile_loop, interval_sec=900.0),
+        )
     )
     setattr(app, "_tracker_reconcile_task", tracker_heal_task)
 
@@ -177,7 +266,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # (agreement_id, period_start) index — duplicate fires are no-ops.
     from app.services.pnl_sharing_service import pnl_sharing_scheduler_loop
     pnl_sharing_task: _asyncio.Task = _asyncio.create_task(
-        pnl_sharing_scheduler_loop(interval_sec=300.0)
+        _supervise(
+            "pnl_sharing_scheduler",
+            _leader_only("pnl_sharing_scheduler", pnl_sharing_scheduler_loop, interval_sec=300.0),
+        )
     )
     setattr(app, "_pnl_sharing_scheduler_task", pnl_sharing_task)
 
@@ -237,7 +329,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     from app.services.zerodha_service import zerodha as _zerodha_heal
 
     zerodha_heal_task: _asyncio.Task = _asyncio.create_task(
-        _zerodha_heal.ws_self_heal_loop(interval_sec=30.0)
+        _supervise(
+            "zerodha_ws_self_heal",
+            _partial(_zerodha_heal.ws_self_heal_loop, interval_sec=30.0),
+        )
     )
     setattr(app, "_zerodha_self_heal_task", zerodha_heal_task)
 
@@ -356,6 +451,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     except Exception:
         pass
 
+    # Stop the WS hubs before closing Redis so the shared pub/sub
+    # connections get a chance to unsubscribe cleanly.
+    try:
+        from app.core.ws_hub import stop_all_hubs
+
+        await stop_all_hubs()
+    except Exception:  # pragma: no cover
+        pass
+
     await close_redis()
     await close_database()
     logger.info("app_stopped")
@@ -457,6 +561,59 @@ async def health():
 @app.get("/health/db", tags=["meta"])
 async def health_db():
     return APIResponse(data={"db": await db_health()})
+
+
+@app.get("/health/deep", tags=["meta"])
+async def health_deep():
+    """Liveness signal that surfaces the resilience plumbing's state.
+
+    Goes beyond the basic ``/health`` (which only pings DB+Redis) to
+    include the WS hub status and the Redis publish-queue depth so an
+    operator (or k8s readiness probe) can detect a worker whose
+    plumbing has degraded even though the underlying datastores are
+    still responding.
+    """
+    db_ok = await db_health()
+    redis_ok = await redis_health()
+
+    hub_status: dict = {}
+    try:
+        from app.core.ws_hub import (
+            admin_event_hub,
+            market_tick_hub,
+            user_channel_hub,
+        )
+
+        for hub in (market_tick_hub, user_channel_hub, admin_event_hub):
+            hub_status[hub.name] = {
+                "running": hub._started,  # noqa: SLF001 — read-only diagnostic
+                "subscriber_count": hub.subscriber_count(),
+            }
+    except Exception:  # pragma: no cover
+        pass
+
+    publish_queue: dict = {}
+    try:
+        from app.core import redis_client as _rc
+
+        publish_queue = {
+            "queue_size": _rc._publish_queue.qsize() if _rc._publish_queue is not None else None,  # noqa: SLF001
+            "max": _rc._PUBLISH_QUEUE_MAX,  # noqa: SLF001
+            "drainer_running": _rc._drain_task is not None and not _rc._drain_task.done(),  # noqa: SLF001
+        }
+    except Exception:  # pragma: no cover
+        pass
+
+    overall = "ok" if (db_ok and redis_ok) else "degraded"
+    return APIResponse(
+        data={
+            "status": overall,
+            "db": db_ok,
+            "redis": redis_ok,
+            "ws_hubs": hub_status,
+            "publish_queue": publish_queue,
+        }
+    )
 
 
 @app.get("/health/redis", tags=["meta"])

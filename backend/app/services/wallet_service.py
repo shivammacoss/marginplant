@@ -111,58 +111,63 @@ async def adjust(
     reference_id: str | None = None,
     actor_id: str | PydanticObjectId | None = None,
 ) -> WalletTransaction:
-    """Apply a signed delta (+ credit, - debit) to available_balance, write ledger."""
+    """Apply a signed delta (+ credit, - debit) to available_balance.
+
+    Settlement policy (per admin requirement — user-facing rule:
+    "balance kabhi negative na ho, user nahi bhare ga"):
+      • A debit that would drop available_balance below 0 is FLOORED at
+        0. The shortfall accrues to `settlement_outstanding` and is
+        recorded as a SETTLEMENT_OUTSTANDING_BOOKED ledger entry.
+      • credit_limit is NOT used to allow a negative balance any more.
+        The earlier "credit_limit covers shortfall → allow negative"
+        branch was the root cause of the production state where
+        `available_balance = −₹995.85` after a stop-out — admin
+        snapshot from 21-May confirmed.
+      • Inbound credits NO LONGER auto-clear settlement_outstanding.
+        The settlement field is informational only; the user is not
+        liable to top it up via future deposits. This removes the
+        previous DEPOSIT-recovery branch (and the matching
+        SETTLEMENT_OUTSTANDING_RECOVERY ledger writes from this path).
+
+    Behavior for opening-side margin checks is unchanged — that runs
+    through `order_validator.validate` and `block_margin`, neither of
+    which is touched here.
+    """
     amt = quantize_money(to_decimal(amount))
     w = await get_or_create(user_id)
     before = to_decimal(w.available_balance)
     after = add(before, amt)
 
-    # Cache the original requested amount BEFORE recovery mutation, so
-    # total_deposits reflects the user's actual deposit (not the post-
-    # recovery remainder).
-    original_amt = amt
-
-    # ── Settlement-outstanding recovery (ANY positive credit) ─────────
-    # When the user has accrued settlement_outstanding (from a previous
-    # stop-out shortfall), every inbound credit clears that debt FIRST
-    # before any of the new amount lands on available_balance. Applies
-    # to DEPOSIT, BONUS, ADJUSTMENT, PROMO, INTER_USER, PNL credits on
-    # winning trades — the user must clear their tab before earning new
-    # liquidity. Excluded: REVERSAL and the SETTLEMENT_OUTSTANDING_*
-    # accounting types themselves (would loop or double-book).
-    # A separate SETTLEMENT_OUTSTANDING_RECOVERY transaction is written
-    # below (after the primary txn) for auditability.
-    _NO_RECOVERY_TYPES = {
-        TransactionType.REVERSAL,
-        TransactionType.SETTLEMENT_OUTSTANDING_BOOKED,
-        TransactionType.SETTLEMENT_OUTSTANDING_RECOVERY,
-    }
-    recovery_amount = Decimal("0")
-    if (
-        amt > ZERO
-        and transaction_type not in _NO_RECOVERY_TYPES
-        and to_decimal(w.settlement_outstanding) > ZERO
-    ):
-        outstanding = to_decimal(w.settlement_outstanding)
-        recovery_amount = min(outstanding, amt)
-        w.settlement_outstanding = to_decimal128(outstanding - recovery_amount)
-        amt = amt - recovery_amount
-        after = add(before, amt)
-
+    # ── Floor-at-0 + settlement booking ────────────────────────────────
+    # When a debit would push the balance below 0 we clip it to 0 and
+    # send the overflow to settlement_outstanding. Two distinct cases:
+    #   1) before >= 0 and after < 0 — normal "loss > balance" close.
+    #      The debit amt is split: |before| hits balance, the rest
+    #      books to settlement.
+    #   2) before < 0 (legacy bad state inherited from before this fix)
+    #      — every cent of `amt` goes to settlement; balance stays at
+    #      whatever non-negative value it would normally land on. This
+    #      keeps the migration path graceful for any wallet that was
+    #      already negative before redeploy.
+    settlement_booked = ZERO
     if amt < ZERO and after < ZERO:
-        # Allow if credit_limit covers shortfall
-        if add(after, w.credit_limit) < ZERO:
-            raise InsufficientFundsError(
-                f"Insufficient funds: balance ₹{before}, requested ₹{abs(amt)}"
-            )
+        if before > ZERO:
+            settlement_booked = -after  # overflow past zero
+            after = ZERO
+        else:
+            # Already at or below zero — entire debit goes to settlement.
+            settlement_booked = -amt
+            after = max(before, ZERO)
 
     w.available_balance = to_decimal128(after)
+    if settlement_booked > ZERO:
+        w.settlement_outstanding = to_decimal128(
+            add(to_decimal(w.settlement_outstanding), settlement_booked)
+        )
     w.version += 1
 
     if transaction_type == TransactionType.DEPOSIT:
-        # Use original_amt — total_deposits reflects what the user paid in,
-        # independent of how much was routed to outstanding recovery.
-        w.total_deposits = to_decimal128(add(w.total_deposits, original_amt))
+        w.total_deposits = to_decimal128(add(w.total_deposits, amt))
     elif transaction_type == TransactionType.WITHDRAWAL:
         w.total_withdrawals = to_decimal128(add(w.total_withdrawals, abs(amt)))
     elif transaction_type == TransactionType.BROKERAGE:
@@ -172,10 +177,14 @@ async def adjust(
 
     await w.save()
 
+    # Primary ledger entry shows the portion that actually moved on
+    # available_balance — keeps balance_after − balance_before == amount
+    # as an invariant for downstream reconciliation tooling.
+    primary_delta = after - before
     txn = WalletTransaction(
         user_id=PydanticObjectId(user_id),
         transaction_type=transaction_type,
-        amount=Decimal128(str(amt)),
+        amount=Decimal128(str(primary_delta if amt != ZERO else ZERO)),
         balance_before=Decimal128(str(before)),
         balance_after=Decimal128(str(after)),
         reference_type=reference_type,
@@ -186,26 +195,28 @@ async def adjust(
     )
     await txn.insert()
 
-    # Audit trail for the settlement-outstanding portion of the deposit.
-    # Recorded as a separate ledger entry so the user/admin can see the
-    # full deposit amount AND the portion routed to outstanding recovery,
-    # without commingling the two on a single row. balance_before equals
-    # balance_after because outstanding recovery does NOT touch the
-    # available_balance — it only reduces the settlement_outstanding field.
-    if recovery_amount > ZERO:
-        recovery_txn = WalletTransaction(
+    # Settlement ledger entry — only the portion that booked against
+    # settlement_outstanding (NOT the balance). balance_before/after
+    # are the SETTLEMENT_OUTSTANDING field values so the reconciliation
+    # invariant holds for that field too.
+    if settlement_booked > ZERO:
+        outstanding_after = to_decimal(w.settlement_outstanding)
+        outstanding_before = outstanding_after - settlement_booked
+        settlement_txn = WalletTransaction(
             user_id=PydanticObjectId(user_id),
-            transaction_type=TransactionType.SETTLEMENT_OUTSTANDING_RECOVERY,
-            amount=Decimal128(str(-recovery_amount)),
-            balance_before=Decimal128(str(before)),
-            balance_after=Decimal128(str(before)),
+            transaction_type=TransactionType.SETTLEMENT_OUTSTANDING_BOOKED,
+            amount=Decimal128(str(-settlement_booked)),
+            balance_before=Decimal128(str(outstanding_before)),
+            balance_after=Decimal128(str(outstanding_after)),
             reference_type=reference_type,
             reference_id=reference_id,
-            narration=f"Settlement outstanding recovered from deposit (₹{recovery_amount})",
+            narration=(
+                f"{narration} — shortfall ₹{settlement_booked} booked to settlement"
+            ),
             status=TransactionStatus.COMPLETED,
             created_by=PydanticObjectId(actor_id) if actor_id else None,
         )
-        await recovery_txn.insert()
+        await settlement_txn.insert()
 
     # Fire-and-forget WS push so the user's APK/web wallet reflects the
     # credit/debit immediately. NOT awaited — admin's approve-deposit
@@ -333,12 +344,15 @@ async def block_margin(user_id: str | PydanticObjectId, amount: Decimal | float)
 
 
 async def release_margin(user_id: str | PydanticObjectId, amount: Decimal | float) -> None:
-    """Return blocked margin to the wallet. If the user has accrued
-    settlement_outstanding, the released amount clears that debt FIRST
-    before any remainder lands on available_balance — same rule as the
-    DEPOSIT path in `adjust()`. Writes a SETTLEMENT_OUTSTANDING_RECOVERY
-    transaction when recovery happens, so the ledger reflects where the
-    margin went.
+    """Return blocked margin to the wallet.
+
+    Per the settlement policy update (21-May): released margin is
+    credited STRAIGHT back to available_balance. The previous
+    "auto-recover settlement_outstanding from released margin first"
+    branch is gone — settlement is now informational only and is
+    never auto-recovered from any inbound credit (deposit, bonus,
+    released margin, winning-trade PnL). See `adjust()` docstring
+    for the full rule.
     """
     amt = quantize_money(to_decimal(amount))
     if amt <= ZERO:
@@ -346,35 +360,10 @@ async def release_margin(user_id: str | PydanticObjectId, amount: Decimal | floa
     w = await get_or_create(user_id)
     actual = min(amt, to_decimal(w.used_margin))
 
-    # Recover outstanding from the released margin first.
-    outstanding = to_decimal(w.settlement_outstanding)
-    recovery_amount = min(outstanding, actual) if outstanding > ZERO else Decimal("0")
-    credit_to_balance = actual - recovery_amount
-
-    if recovery_amount > ZERO:
-        w.settlement_outstanding = to_decimal128(outstanding - recovery_amount)
     w.used_margin = to_decimal128(sub(w.used_margin, actual))
-    w.available_balance = to_decimal128(
-        add(w.available_balance, credit_to_balance)
-    )
+    w.available_balance = to_decimal128(add(w.available_balance, actual))
     w.version += 1
     await w.save()
-
-    if recovery_amount > ZERO:
-        bal_after_for_txn = to_decimal(w.available_balance)
-        recovery_txn = WalletTransaction(
-            user_id=PydanticObjectId(user_id),
-            transaction_type=TransactionType.SETTLEMENT_OUTSTANDING_RECOVERY,
-            amount=Decimal128(str(-recovery_amount)),
-            balance_before=Decimal128(str(bal_after_for_txn)),
-            balance_after=Decimal128(str(bal_after_for_txn)),
-            narration=(
-                f"Settlement outstanding recovered from margin release "
-                f"(₹{recovery_amount})"
-            ),
-            status=TransactionStatus.COMPLETED,
-        )
-        await recovery_txn.insert()
 
     asyncio.create_task(
         _publish_wallet_event(
@@ -484,6 +473,83 @@ async def recompute_used_margin(
         "delta": str(delta),
         "open_positions": len(open_positions),
     }
+
+
+async def clamp_negative_balances_to_settlement() -> dict[str, int]:
+    """One-shot migration: every wallet with available_balance < 0 has its
+    balance clipped to 0 and the magnitude added to settlement_outstanding.
+    Writes one SETTLEMENT_OUTSTANDING_BOOKED ledger entry per fix so the
+    repair is auditable in the user's transaction list.
+
+    Called from the FastAPI lifespan on every boot — idempotent (a wallet
+    with balance >= 0 is a no-op). Cheap (one full-table scan that filters
+    in Mongo first, so only the negatives are read into memory).
+
+    Why this exists: before the floor-at-0 fix, `adjust()` allowed any
+    debit to push available_balance negative as long as credit_limit
+    covered the shortfall. Production state on 21-May had at least one
+    wallet at −₹995.85 / Outstanding ₹680.50 — admin screenshot
+    confirmed. Without this migration that user (and any other affected
+    accounts) would keep showing a negative number on the wallet page
+    even after the new code is deployed.
+    """
+    from datetime import datetime as _dt
+
+    log = logging.getLogger(__name__)
+
+    # Mongo can't directly compare a Decimal128 against numeric 0 in a
+    # find() filter without an explicit Decimal128 sentinel, so we cast
+    # on the server side via $expr. Fetches only the rows that need
+    # fixing — fast even with thousands of wallets.
+    wallets = await Wallet.find(
+        {"$expr": {"$lt": [{"$toDecimal": "$available_balance"}, 0]}}
+    ).to_list()
+
+    fixed = 0
+    for w in wallets:
+        before_balance = to_decimal(w.available_balance)
+        if before_balance >= ZERO:
+            continue  # defensive — the $expr filter should have excluded these
+        shortfall = -before_balance  # positive
+        outstanding_before = to_decimal(w.settlement_outstanding)
+        outstanding_after = add(outstanding_before, shortfall)
+        w.available_balance = to_decimal128(ZERO)
+        w.settlement_outstanding = to_decimal128(outstanding_after)
+        w.version += 1
+        await w.save()
+
+        try:
+            settlement_txn = WalletTransaction(
+                user_id=w.user_id,
+                transaction_type=TransactionType.SETTLEMENT_OUTSTANDING_BOOKED,
+                amount=Decimal128(str(-shortfall)),
+                balance_before=Decimal128(str(outstanding_before)),
+                balance_after=Decimal128(str(outstanding_after)),
+                narration=(
+                    f"Migration: clamped negative available_balance "
+                    f"(₹{before_balance}) to 0, shortfall booked to settlement"
+                ),
+                status=TransactionStatus.COMPLETED,
+            )
+            await settlement_txn.insert()
+        except Exception:  # pragma: no cover
+            log.warning(
+                "negative_balance_clamp_audit_failed user=%s",
+                w.user_id,
+                exc_info=True,
+            )
+
+        fixed += 1
+        log.info(
+            "negative_balance_clamped user=%s before=%s outstanding_before=%s outstanding_after=%s",
+            w.user_id,
+            before_balance,
+            outstanding_before,
+            outstanding_after,
+        )
+
+    _ = _dt  # silence linter if datetime helper unused
+    return {"scanned": len(wallets), "fixed": fixed}
 
 
 async def reconcile_all_used_margins() -> dict[str, int]:

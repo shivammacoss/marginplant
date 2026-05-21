@@ -114,8 +114,8 @@ export default function AdminUsersPage() {
       },
     },
     {
-      key: "outstanding",
-      header: "Outstanding",
+      key: "settlement",
+      header: "Settlement",
       align: "right",
       render: (r) => {
         const v = Number(r.wallet?.settlement_outstanding ?? 0);
