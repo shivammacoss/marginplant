@@ -174,6 +174,18 @@ async def adjust(
         w.total_brokerage = to_decimal128(add(w.total_brokerage, abs(amt)))
     elif transaction_type == TransactionType.CHARGES:
         w.total_charges = to_decimal128(add(w.total_charges, abs(amt)))
+    elif transaction_type == TransactionType.PNL:
+        # Cumulative realised P&L tracker on the wallet itself —
+        # signed so winning trades push it up and losers push it down.
+        # Without this branch the field stayed at 0 forever even when
+        # the ledger had thousands of PNL transactions, and the
+        # admin's "Realized P&L" tile + the user's wallet summary
+        # both rendered 0 regardless of actual trading activity.
+        # Operator-flagged 21-May: account CL62477932 had
+        # `realized_pnl = 0` despite 112 trades and -INR 11,675 in
+        # PNL transactions for the day. `amt` carries the natural
+        # sign (negative for losses, positive for wins).
+        w.realized_pnl = to_decimal128(add(w.realized_pnl, amt))
 
     await w.save()
 
@@ -473,6 +485,70 @@ async def recompute_used_margin(
         "delta": str(delta),
         "open_positions": len(open_positions),
     }
+
+
+async def recompute_realized_pnl_for_all() -> dict[str, int]:
+    """One-shot backfill for ``wallet.realized_pnl``.
+
+    Until 21-May `adjust()` only updated total_* fields for
+    deposit/withdrawal/brokerage/charges — PNL transactions skipped
+    the cumulative tracker entirely, so every wallet showed
+    realized_pnl = 0 regardless of actual trading. This helper sums
+    every PNL transaction (signed) per user and writes the result
+    onto the wallet.
+
+    Idempotent — re-runs converge on the same value because the
+    source-of-truth is the immutable wallet_transactions ledger.
+    Cheap: one $group aggregate followed by one $set per wallet
+    that needs repair.
+    """
+    log = logging.getLogger(__name__)
+    txn_coll = WalletTransaction.get_motor_collection()
+    wallet_coll = Wallet.get_motor_collection()
+
+    cursor = txn_coll.aggregate(
+        [
+            {"$match": {"transaction_type": "PNL"}},
+            {
+                "$group": {
+                    "_id": "$user_id",
+                    "total": {"$sum": {"$toDecimal": "$amount"}},
+                }
+            },
+        ]
+    )
+
+    scanned = 0
+    repaired = 0
+    async for row in cursor:
+        scanned += 1
+        try:
+            user_id = row["_id"]
+            total_dec = to_decimal(row["total"])
+            quantised = quantize_money(total_dec)
+            existing = await Wallet.find_one(Wallet.user_id == user_id)
+            if existing is None:
+                continue
+            current = to_decimal(existing.realized_pnl)
+            if current == quantised:
+                continue
+            await wallet_coll.update_one(
+                {"user_id": user_id},
+                {"$set": {"realized_pnl": Decimal128(str(quantised))}},
+            )
+            repaired += 1
+            log.info(
+                "realized_pnl_repaired user=%s before=%s after=%s",
+                user_id,
+                current,
+                quantised,
+            )
+        except Exception:
+            log.warning("recompute_realized_pnl_failed row=%s", row, exc_info=True)
+
+    if repaired:
+        log.info("realized_pnl_backfill scanned=%d repaired=%d", scanned, repaired)
+    return {"scanned": scanned, "repaired": repaired}
 
 
 async def clamp_negative_balances_to_settlement() -> dict[str, int]:

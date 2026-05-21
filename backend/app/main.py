@@ -143,6 +143,25 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logger.exception("clamp_negative_balances_failed_continuing")
 
+    # Realized P&L backfill: until 21-May `adjust()` never updated
+    # `wallet.realized_pnl` on PNL transactions, so every wallet showed
+    # ₹0 realized P&L regardless of actual trading. This walks the
+    # `wallet_transactions` ledger, sums PNL per user, and writes the
+    # correct cumulative figure onto each wallet. Idempotent — cheap
+    # no-op on every boot after the first one that repairs the drift.
+    try:
+        from app.services.wallet_service import recompute_realized_pnl_for_all
+
+        rp_result = await recompute_realized_pnl_for_all()
+        if rp_result.get("repaired"):
+            logger.info(
+                "startup_repaired_realized_pnl scanned=%d repaired=%d",
+                rp_result.get("scanned", 0),
+                rp_result.get("repaired", 0),
+            )
+    except Exception:
+        logger.exception("realized_pnl_backfill_failed_continuing")
+
     # Settings snapshot backfill: walks every existing ADMIN and BROKER
     # and ensures their tier-specific override table has one row per
     # segment, seeded from the creator's effective settings
