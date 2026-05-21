@@ -536,25 +536,25 @@ function AdminPositionsInner() {
       key: "realized_pnl",
       header: "Realized",
       align: "right" as const,
-      // NET realised — gross realized_pnl minus the brokerage / other
-      // charges stamped on this position's lifecycle trades. The
-      // backend ships both fields; we subtract here so the admin and
-      // the user's APK card show IDENTICAL ₹ amounts on the same
-      // trade (APK has been net-of-charges since the user-facing
-      // /positions/closed endpoint started subtracting them — see
-      // backend/app/api/v1/user/positions.py:closed_positions).
-      // Hover-title carries the gross + charges decomposition so
-      // admins can still see the underlying components when reconciling.
+      // GROSS realised P&L — straight from `position.realized_pnl`,
+      // before brokerage / other charges are subtracted. The "Net
+      // P&L" column further right does the subtraction explicitly
+      // so the admin can see the arithmetic happen on screen:
+      //
+      //     REALIZED (gross) − BROKERAGE = NET P&L
+      //
+      // Previously this column quietly displayed net by subtracting
+      // charges, which confused operators who reconciled the row
+      // (e.g. open 317.85 → close 324.15 × 60 lots = ₹378 gross, but
+      // the column showed ₹258 because we'd already netted out
+      // ₹120 of brokerage). Showing gross here keeps the column's
+      // name honest and lets the new Net P&L column carry the
+      // final figure.
       render: (r: any) => {
         const gross = Number(r.realized_pnl ?? 0);
-        const charges = Number(r.charges ?? 0);
-        const net = gross - charges;
         return (
-          <span
-            className={pnlColor(net)}
-            title={`Gross ${formatINR(gross)} − Charges ${formatINR(charges)}`}
-          >
-            {formatINR(net)}
+          <span className={pnlColor(gross)}>
+            {formatINR(gross)}
           </span>
         );
       },
@@ -600,6 +600,31 @@ function AdminPositionsInner() {
           {formatINR(Number(r.charges ?? 0))}
         </span>
       ),
+    },
+    {
+      // Net P&L — the bottom-line number the admin actually cares
+      // about: gross realised minus brokerage / other charges. Lives
+      // right after the Brokerage column so the math
+      //     REALIZED − BROKERAGE = NET P&L
+      // reads left-to-right on a single row. Same definition the
+      // PnlCard tiles above use, so per-row sums reconcile against
+      // the "This Week's Net P&L" total without an explanation.
+      key: "net_pnl",
+      header: "Net P&L",
+      align: "right" as const,
+      render: (r: any) => {
+        const gross = Number(r.realized_pnl ?? 0);
+        const charges = Number(r.charges ?? 0);
+        const net = gross - charges;
+        return (
+          <span
+            className={`${pnlColor(net)} font-semibold`}
+            title={`Realized ${formatINR(gross)} − Brokerage ${formatINR(charges)}`}
+          >
+            {formatINR(net)}
+          </span>
+        );
+      },
     },
     {
       key: "opened_at",
@@ -757,15 +782,15 @@ function AdminPositionsInner() {
           icon={totalPnl >= 0 ? TrendingUp : TrendingDown}
         />
         <PnlCard
-          label="This Week's Closed PNL"
+          label="This Week's Net P&L"
           value={pnl?.week_realised ?? 0}
-          hint="Sun → today (IST) — realised only"
+          hint="Sun → today (IST) — net of brokerage"
           icon={(pnl?.week_realised ?? 0) >= 0 ? TrendingUp : TrendingDown}
         />
         <PnlCard
-          label="Last Week's Closed PNL"
+          label="Last Week's Net P&L"
           value={pnl?.last_week_pnl ?? 0}
-          hint="Previous Sun → Sat — realised only"
+          hint="Previous Sun → Sat — net of brokerage"
           icon={CalendarDays}
         />
       </section>
