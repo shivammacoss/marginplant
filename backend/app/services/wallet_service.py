@@ -189,37 +189,53 @@ async def adjust(
 
     await w.save()
 
-    # Primary ledger entry shows the portion that actually moved on
-    # available_balance — keeps balance_after − balance_before == amount
-    # as an invariant for downstream reconciliation tooling.
+    # ── Ledger entries ───────────────────────────────────────────────
+    # Strict invariant for the user-facing ledger viewer:
+    #     EVERY row's balance_before / balance_after are values of the
+    #     available_balance field at that moment. Never mix in the
+    #     settlement_outstanding field — the column header reads
+    #     "Balance" and the user expects that column to be continuous
+    #     across rows. Mixing settlement values here was the root of
+    #     the 21-May display bug where the ledger jumped
+    #         1000 → 0 → 190.82 → 809.26 → 9.26
+    #     instead of the actual available_balance path
+    #         1000 → 0 → 0 → 809.26 → 9.26.
     primary_delta = after - before
-    txn = WalletTransaction(
-        user_id=PydanticObjectId(user_id),
-        transaction_type=transaction_type,
-        amount=Decimal128(str(primary_delta if amt != ZERO else ZERO)),
-        balance_before=Decimal128(str(before)),
-        balance_after=Decimal128(str(after)),
-        reference_type=reference_type,
-        reference_id=reference_id,
-        narration=narration,
-        status=TransactionStatus.COMPLETED,
-        created_by=PydanticObjectId(actor_id) if actor_id else None,
-    )
-    await txn.insert()
+    txn: WalletTransaction | None = None
+    # Skip the "primary" CHARGES / PNL / etc. row entirely when nothing
+    # actually moved on available_balance (full debit absorbed by the
+    # settlement booking that follows). Otherwise the ledger surfaces
+    # a confusing zero-amount row in the same second as the real
+    # settlement debit.
+    write_primary = (primary_delta != ZERO) or (amt == ZERO)
+    if write_primary:
+        txn = WalletTransaction(
+            user_id=PydanticObjectId(user_id),
+            transaction_type=transaction_type,
+            amount=Decimal128(str(primary_delta)),
+            balance_before=Decimal128(str(before)),
+            balance_after=Decimal128(str(after)),
+            reference_type=reference_type,
+            reference_id=reference_id,
+            narration=narration,
+            status=TransactionStatus.COMPLETED,
+            created_by=PydanticObjectId(actor_id) if actor_id else None,
+        )
+        await txn.insert()
 
-    # Settlement ledger entry — only the portion that booked against
-    # settlement_outstanding (NOT the balance). balance_before/after
-    # are the SETTLEMENT_OUTSTANDING field values so the reconciliation
-    # invariant holds for that field too.
+    # Settlement ledger entry — books against settlement_outstanding,
+    # not available_balance. balance_before / balance_after stay on
+    # `after` (the floored available_balance) so the Balance column
+    # in the ledger reads continuously across this row. The amount
+    # carries the full magnitude of the settlement booking so the
+    # Debit column shows the user where the missing money went.
     if settlement_booked > ZERO:
-        outstanding_after = to_decimal(w.settlement_outstanding)
-        outstanding_before = outstanding_after - settlement_booked
         settlement_txn = WalletTransaction(
             user_id=PydanticObjectId(user_id),
             transaction_type=TransactionType.SETTLEMENT_OUTSTANDING_BOOKED,
             amount=Decimal128(str(-settlement_booked)),
-            balance_before=Decimal128(str(outstanding_before)),
-            balance_after=Decimal128(str(outstanding_after)),
+            balance_before=Decimal128(str(after)),
+            balance_after=Decimal128(str(after)),
             reference_type=reference_type,
             reference_id=reference_id,
             narration=(
@@ -229,6 +245,11 @@ async def adjust(
             created_by=PydanticObjectId(actor_id) if actor_id else None,
         )
         await settlement_txn.insert()
+        # If the primary row was skipped, return the settlement row so
+        # callers that hand the txn back to the API layer still get a
+        # WalletTransaction document.
+        if txn is None:
+            txn = settlement_txn
 
     # Fire-and-forget WS push so the user's APK/web wallet reflects the
     # credit/debit immediately. NOT awaited — admin's approve-deposit
