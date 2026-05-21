@@ -312,6 +312,20 @@ export const KycAPI = {
     unwrap<any>(api.post(`/admin/kyc/${id}/reject`, { rejection_reason, admin_remark })),
 };
 
+// Admin notification bell — backed by /admin/notifications endpoints.
+// Each row is per-(recipient_admin, event); backend already filters by
+// the caller's admin id, so no scope param is needed here.
+export const NotificationsAPI = {
+  list: (params?: { only_unread?: boolean; limit?: number }) =>
+    unwrap<any[]>(api.get("/admin/notifications", { params })),
+  unreadCount: () =>
+    unwrap<{ count: number }>(api.get("/admin/notifications/unread-count")),
+  markRead: (id: string) =>
+    unwrap<any>(api.post(`/admin/notifications/${id}/read`)),
+  markAllRead: () =>
+    unwrap<{ marked: number }>(api.post("/admin/notifications/mark-all-read")),
+};
+
 export const LedgerAdminAPI = {
   list: (params?: any) => unwrap<{ items: any[]; meta: any }>(api.get("/admin/ledger", { params })),
   manualEntry: (body: any) => unwrap<any>(api.post("/admin/ledger/manual-entry", body)),

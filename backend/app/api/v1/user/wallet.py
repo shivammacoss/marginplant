@@ -199,6 +199,33 @@ async def create_deposit(payload: DepositCreate, user: CurrentUser):
         )
     except Exception:  # pragma: no cover
         pass
+    # Admin notification bell — fan out a per-recipient AdminNotification
+    # row up the tier chain (super-admin + assigned admin + every broker
+    # in the ancestry). Best-effort: a notification failure must NOT
+    # roll back the deposit insert above.
+    try:
+        from app.models.notification import (
+            AdminNotificationEventType,
+            NotificationLevel,
+        )
+        from app.services import notification_service
+
+        await notification_service.create_for_admins(
+            source_user_id=user.id,
+            event_type=AdminNotificationEventType.DEPOSIT_SUBMITTED,
+            level=NotificationLevel.INFO,
+            title=f"New deposit from {user.full_name}",
+            message=(
+                f"₹{payload.amount} via {payload.payment_mode.upper()}"
+                + (f" · UTR {payload.utr_number}" if payload.utr_number else "")
+            ),
+            link="/payments?tab=deposits",
+            reference_type="DepositRequest",
+            reference_id=str(req.id),
+            data={"amount": str(payload.amount), "payment_mode": payload.payment_mode},
+        )
+    except Exception:  # pragma: no cover
+        pass
     return APIResponse(data={"id": str(req.id), "status": req.status.value})
 
 
@@ -270,6 +297,35 @@ async def create_withdrawal(payload: WithdrawalCreate, user: CurrentUser):
         await publish_admin_event(
             "withdrawal_update",
             {"event": "submitted", "user_id": str(user.id), "withdrawal_id": str(req.id)},
+        )
+    except Exception:  # pragma: no cover
+        pass
+    # Admin notification bell — see deposit-submit hook for rationale.
+    try:
+        from app.models.notification import (
+            AdminNotificationEventType,
+            NotificationLevel,
+        )
+        from app.services import notification_service
+
+        dest_label = (
+            f"UPI {snap.upi_id}"
+            if snap.upi_id
+            else f"A/C {snap.account_number} ({snap.ifsc or '—'})"
+        )
+        await notification_service.create_for_admins(
+            source_user_id=user.id,
+            event_type=AdminNotificationEventType.WITHDRAWAL_SUBMITTED,
+            level=NotificationLevel.WARNING,
+            title=f"Withdrawal request from {user.full_name}",
+            message=f"₹{payload.amount} → {dest_label}",
+            link="/payments?tab=withdrawals",
+            reference_type="WithdrawalRequest",
+            reference_id=str(req.id),
+            data={
+                "amount": str(payload.amount),
+                "destination": dest_label,
+            },
         )
     except Exception:  # pragma: no cover
         pass

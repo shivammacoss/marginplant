@@ -4,6 +4,7 @@ import { LogOut, ShieldAlert } from "lucide-react";
 import { useAdminAuthStore } from "@/stores/authStore";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/common/ThemeToggle";
+import { NotificationBell } from "@/components/layout/NotificationBell";
 
 export function AdminTopBar() {
   const admin = useAdminAuthStore((s) => s.admin);
@@ -23,6 +24,11 @@ export function AdminTopBar() {
         <ShieldAlert className="size-3" />
         Live system — actions are audited
       </div>
+      {/* Notification bell — sits between the audit banner and the
+          theme toggle. Polls /admin/notifications/unread-count every
+          10 s for the badge; full list loads only when the dropdown
+          opens. */}
+      <NotificationBell />
       <ThemeToggle />
       <Button
         variant="ghost"

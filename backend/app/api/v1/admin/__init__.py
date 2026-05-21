@@ -13,6 +13,7 @@ from app.api.v1.admin import (
     ledger,
     management,
     netting,
+    notifications,
     payin_out,
     pnl_sharing,
     reports,
@@ -42,3 +43,4 @@ router.include_router(kyc.router)
 router.include_router(management.router)
 router.include_router(brokers.router)
 router.include_router(pnl_sharing.router)
+router.include_router(notifications.router)

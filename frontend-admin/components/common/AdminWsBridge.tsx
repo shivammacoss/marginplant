@@ -104,6 +104,23 @@ export function AdminWsBridge() {
             // per-agreement filtering by broker_id is a future optimisation.
             qc.invalidateQueries({ queryKey: ["pnl-sharing"] });
             break;
+          case "settlement_update":
+            // Settlement Requests tab on /payments — refresh the queue
+            // when an admin elsewhere approves / rejects, or when a new
+            // pending request lands.
+            qc.invalidateQueries({ queryKey: ["admin", "settlement-requests"] });
+            qc.invalidateQueries({ queryKey: ["admin", "user"] });
+            break;
+          case "notification_created":
+            // Admin notification bell — refresh badge count + open
+            // dropdown list. Backend's payload carries
+            // `recipient_admin_ids`, but we don't bother filtering
+            // here: every admin's notifications query is server-side
+            // scoped to their own id, so a refetch on a notification
+            // that wasn't theirs is just a cheap O(1) unread-count
+            // probe.
+            qc.invalidateQueries({ queryKey: ["admin", "notifications"] });
+            break;
           // hello / heartbeat — ignore
         }
       };

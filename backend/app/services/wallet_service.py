@@ -381,6 +381,30 @@ async def _ensure_pending_settlement_request(
         shortfall,
     )
 
+    # Admin notification bell — fan out one AdminNotification per
+    # recipient up the tier chain so the admin sees the pending
+    # request in their bell instantly.
+    try:
+        from app.models.notification import (
+            AdminNotificationEventType,
+            NotificationLevel,
+        )
+        from app.services import notification_service
+
+        await notification_service.create_for_admins(
+            source_user_id=uid,
+            event_type=AdminNotificationEventType.SETTLEMENT_REQUESTED,
+            level=NotificationLevel.WARNING,
+            title="Settlement approval needed",
+            message=f"₹{shortfall} shortfall · {narration}",
+            link="/payments?tab=settlements",
+            reference_type="SettlementRequest",
+            reference_id=str(req.id),
+            data={"shortfall": str(shortfall)},
+        )
+    except Exception:  # pragma: no cover
+        logger.exception("settlement_request_notification_failed user=%s", uid)
+
 
 async def approve_settlement_request(
     request_id: str | PydanticObjectId,

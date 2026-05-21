@@ -145,4 +145,25 @@ async def submit_kyc(payload: dict[str, Any], user: CurrentUser):
         )
     except Exception:  # pragma: no cover
         pass
+    # Admin notification bell — fan out a row per recipient up the
+    # tier chain (super-admin + assigned admin + every broker).
+    try:
+        from app.models.notification import (
+            AdminNotificationEventType,
+            NotificationLevel,
+        )
+        from app.services import notification_service
+
+        await notification_service.create_for_admins(
+            source_user_id=user.id,
+            event_type=AdminNotificationEventType.KYC_SUBMITTED,
+            level=NotificationLevel.INFO,
+            title=f"KYC submitted by {user.full_name}",
+            message=f"PAN {payload.get('pan') or user.kyc.pan or '—'} · review pending",
+            link="/kyc",
+            reference_type="KycSubmission",
+            reference_id=str(submission.id),
+        )
+    except Exception:  # pragma: no cover
+        pass
     return APIResponse(data=_serialise(submission))
