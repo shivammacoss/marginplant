@@ -266,11 +266,33 @@ function AdminPositionsInner() {
     }
   }
 
-  async function remove(id: string, sym: string) {
-    if (!confirm(`Permanently delete position ${sym}? This wipes the record without squaring off — use only for bad data.`)) return;
+  async function remove(id: string, sym: string, status?: string, qty?: number) {
+    // Delete on OPEN rows is a sharper edge than delete on closed rows:
+    // the backend will RELEASE the locked margin back to available_balance
+    // but will NOT book any PnL (the position never closed at a real
+    // market price). Closed rows still get their realised PnL reversed
+    // via the existing REVERSAL ledger entry. Show the right warning so
+    // the operator picks the right tool.
+    const isOpenForceDelete =
+      status === "OPEN" && qty != null && Math.abs(Number(qty)) > 1e-9;
+    const message = isOpenForceDelete
+      ? (
+        `Force-delete OPEN position ${sym}?\n\n` +
+        `This will:\n` +
+        `  • Release the locked margin back to the user's wallet\n` +
+        `  • NOT book any PnL (the position never closed at a market price)\n` +
+        `  • Delete the row permanently\n\n` +
+        `Use ONLY for stale / corrupt rows. For a normal exit, click Close instead.`
+      )
+      : `Permanently delete position ${sym}? This wipes the record without squaring off — use only for bad data.`;
+    if (!confirm(message)) return;
     try {
       await TradingAPI.deletePosition(id);
-      toast.success("Position deleted");
+      toast.success(
+        isOpenForceDelete
+          ? "Position deleted · margin released to wallet"
+          : "Position deleted",
+      );
       qc.invalidateQueries({ queryKey: ["admin", "positions"] });
     } catch (e: any) {
       toast.error(e.message);
@@ -810,7 +832,7 @@ function AdminPositionsInner() {
             size="sm"
             onClick={(e) => {
               e.stopPropagation();
-              remove(r.id, r.symbol);
+              remove(r.id, r.symbol, r.status, r.quantity);
             }}
             aria-label="Delete record"
             title="Delete record (no square-off)"

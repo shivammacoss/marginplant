@@ -1270,28 +1270,59 @@ async def delete_position(
     await assert_user_in_scope(admin, p.user_id)
     user_id = p.user_id
 
-    # Block deletion of still-open positions — squareoff first.
-    if p.status == PositionStatus.OPEN and abs(float(p.quantity or 0)) > 1e-9:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Position is still OPEN with non-zero quantity. "
-                "Square it off first, then delete the closed row."
-            ),
-        )
-
-    # Reverse realized PnL on the wallet, if any. Signed delta:
-    # profit (positive realized_pnl) → debit the same amount;
-    # loss (negative realized_pnl) → credit the absolute amount.
+    # ── OPEN-position delete (admin-only escape hatch) ────────────────
+    # Previously this endpoint refused to delete OPEN rows ("Square it
+    # off first…"). The intent was to protect the wallet from orphaned
+    # `used_margin` and a missing close-fill ledger trail. But the
+    # operator legitimately needs an escape hatch for stale / corrupt
+    # rows (positions left dangling by a crashed matching cycle, or
+    # rows the admin wants to nuke without booking PnL against an
+    # off-market last price). On 21-May the operator hit this when the
+    # zero-LTP false-stop-out incident also left a few rows showing
+    # phantom −LAKH M2M that they wanted gone WITHOUT booking that
+    # MTM as a real loss.
+    #
+    # Flow for OPEN rows:
+    #   1) Release the position's `margin_used` back to
+    #      available_balance via `wallet_service.release_margin` —
+    #      no ledger row for the margin lock itself (margin is an
+    #      internal slot, not a money movement), matching what a
+    #      normal close would have done.
+    #   2) Recompute the tracker so intraday / holding lots drop the
+    #      row.
+    #   3) Delete the Position document.
+    #   4) DO NOT book realized PnL — the position never closed at a
+    #      real market price; recording the M2M as realised would
+    #      poison the user's wallet. `unrealized_pnl` on the row is
+    #      simply forgotten with the row.
+    #
+    # Closed-row flow is unchanged (REVERSAL of the realised PnL).
     from decimal import Decimal as _Decimal
 
     from app.models.transaction import TransactionType
     from app.services import wallet_service
     from app.utils.decimal_utils import to_decimal
 
+    is_open = p.status == PositionStatus.OPEN and abs(float(p.quantity or 0)) > 1e-9
     realized = to_decimal(p.realized_pnl or 0)
     reversed_amount = _Decimal("0")
-    if realized != _Decimal("0"):
+
+    if is_open:
+        # Release the locked margin back to available_balance. Best-effort:
+        # release_margin is idempotent against drift (caps at used_margin),
+        # but if it raises we still let the delete proceed because the
+        # final `recompute_used_margin` below will reconcile from the
+        # live set of OPEN positions anyway.
+        try:
+            margin_locked = to_decimal(p.margin_used or 0)
+            if margin_locked > _Decimal("0"):
+                await wallet_service.release_margin(user_id, margin_locked)
+        except Exception:
+            pass
+    elif realized != _Decimal("0"):
+        # Closed-row PnL reversal — original behaviour preserved.
+        # Signed delta: profit deleted DEBITS the wallet; loss deleted
+        # CREDITS the wallet.
         try:
             await wallet_service.adjust(
                 user_id,
@@ -1349,7 +1380,10 @@ async def delete_position(
     except Exception:
         pass
 
-    # Audit trail.
+    # Audit trail. The OPEN-delete path is a sharper edge than a
+    # closed-row delete (it releases locked margin without a closing
+    # trade), so we flag it explicitly in metadata for forensic
+    # readability.
     try:
         await log_event(
             action=AuditAction.DELETE,
@@ -1361,6 +1395,10 @@ async def delete_position(
                 "realized_pnl_reversed_inr": str(reversed_amount),
                 "symbol": p.instrument.symbol,
                 "status_before_delete": p.status.value,
+                "open_force_delete": is_open,
+                "margin_released_inr": (
+                    str(to_decimal(p.margin_used or 0)) if is_open else "0"
+                ),
             },
         )
     except Exception:
