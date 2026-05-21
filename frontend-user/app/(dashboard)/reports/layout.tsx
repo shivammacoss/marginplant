@@ -7,22 +7,18 @@ import {
   Activity,
   BarChart3,
   FileSpreadsheet,
-  Landmark,
   Receipt,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-// Five report sub-pages used to be reachable only from the sidebar's
-// single "Reports" entry pointing at /reports/pnl. Users couldn't tell
-// the other reports (tradebook, brokerage, tax, margin) existed without
-// guessing URLs — operator's 21-May feedback. A horizontal pill nav
-// sits at the top of every /reports/* page so the five categories are
-// one tap apart on phone and one click apart on desktop.
+// Four report sub-pages. Tax used to be a fifth tab but the operator
+// dropped it on 21-May — the bucket split was indicative only (no real
+// FIFO / holding-period calc, no statutory pass-through), so showing
+// users a number they couldn't actually use for filing was a footgun.
 const TABS = [
   { href: "/reports/pnl", label: "P&L", icon: BarChart3 },
   { href: "/reports/tradebook", label: "Tradebook", icon: FileSpreadsheet },
   { href: "/reports/brokerage", label: "Brokerage", icon: Receipt },
-  { href: "/reports/tax", label: "Tax", icon: Landmark },
   { href: "/reports/margin", label: "Margin", icon: Activity },
 ];
 

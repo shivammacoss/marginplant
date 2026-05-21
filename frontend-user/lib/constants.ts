@@ -36,7 +36,6 @@ export const ROUTES = {
   reportsPnl: "/reports/pnl",
   reportsTradebook: "/reports/tradebook",
   reportsBrokerage: "/reports/brokerage",
-  reportsTax: "/reports/tax",
   reportsMargin: "/reports/margin",
   alerts: "/alerts",
   notifications: "/notifications",
