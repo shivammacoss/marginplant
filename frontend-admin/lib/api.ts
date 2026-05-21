@@ -235,8 +235,13 @@ export const TradingAPI = {
       opened_at: string;
       stop_loss: number | string | null;
       target: number | string | null;
+      // Closed-position only — admin corrections + relabel
+      realized_pnl: number | string;
+      close_reason: string;
     }>,
   ) => unwrap<any>(api.patch(`/admin/positions/${id}`, body)),
+  reopenPosition: (id: string) =>
+    unwrap<any>(api.post(`/admin/positions/${id}/reopen`)),
   trades: (params?: any) => unwrap<any[]>(api.get("/admin/trades", { params })),
   holdings: (params?: any) => unwrap<any[]>(api.get("/admin/holdings", { params })),
 };

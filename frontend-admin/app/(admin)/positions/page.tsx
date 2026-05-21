@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertOctagon, CalendarDays, Info, Pencil, Search, TrendingDown, TrendingUp, Trash2, X, X as XIcon } from "lucide-react";
+import { AlertOctagon, CalendarDays, Info, Pencil, RotateCcw, Search, TrendingDown, TrendingUp, Trash2, X, X as XIcon } from "lucide-react";
 import { TradingAPI, UsersAPI } from "@/lib/api";
 import { useMarketStream } from "@/lib/useMarketStream";
 import { Button } from "@/components/ui/button";
@@ -300,7 +300,20 @@ function AdminPositionsInner() {
     opened_at: string;
     stop_loss: string;
     target: string;
-  }>({ avg_price: "", quantity: "", opened_at: "", stop_loss: "", target: "" });
+    // Closed-only fields. Editing realized_pnl on a closed row writes
+    // a REVERSAL ledger entry on the backend so the wallet running
+    // balance stays consistent with the new figure on the trade card.
+    realized_pnl: string;
+    close_reason: string;
+  }>({
+    avg_price: "",
+    quantity: "",
+    opened_at: "",
+    stop_loss: "",
+    target: "",
+    realized_pnl: "",
+    close_reason: "",
+  });
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -313,26 +326,47 @@ function AdminPositionsInner() {
         : "",
       stop_loss: editing.stop_loss != null ? String(editing.stop_loss) : "",
       target: editing.target != null ? String(editing.target) : "",
+      realized_pnl: editing.realized_pnl != null ? String(editing.realized_pnl) : "",
+      close_reason: editing.close_reason ?? "",
     });
   }, [editing]);
 
   async function saveEdit() {
     if (!editing) return;
+    const isClosed = editing.status === "CLOSED";
     const patch: Record<string, any> = {};
-    if (form.avg_price !== "" && form.avg_price !== String(editing.avg_price))
-      patch.avg_price = form.avg_price;
-    if (form.quantity !== "" && Number(form.quantity) !== Number(editing.quantity))
-      patch.quantity = Number(form.quantity);
-    if (form.opened_at) {
-      const iso = new Date(form.opened_at).toISOString();
-      if (iso !== editing.opened_at) patch.opened_at = iso;
+    // Open-row edits are meaningless on closed rows (avg/qty/opened_at/SL/TP
+    // describe a live position). Only forward them when the row is still
+    // OPEN — otherwise the backend would reject `quantity` change on a
+    // CLOSED row anyway.
+    if (!isClosed) {
+      if (form.avg_price !== "" && form.avg_price !== String(editing.avg_price))
+        patch.avg_price = form.avg_price;
+      if (form.quantity !== "" && Number(form.quantity) !== Number(editing.quantity))
+        patch.quantity = Number(form.quantity);
+      if (form.opened_at) {
+        const iso = new Date(form.opened_at).toISOString();
+        if (iso !== editing.opened_at) patch.opened_at = iso;
+      }
+      if (form.stop_loss === "") patch.stop_loss = null;
+      else if (Number(form.stop_loss) !== Number(editing.stop_loss ?? 0))
+        patch.stop_loss = Number(form.stop_loss);
+      if (form.target === "") patch.target = null;
+      else if (Number(form.target) !== Number(editing.target ?? 0))
+        patch.target = Number(form.target);
+    } else {
+      // Closed-row corrections — admin can override realised P&L
+      // (wallet auto-adjusts via REVERSAL) and relabel close_reason.
+      if (
+        form.realized_pnl !== "" &&
+        Number(form.realized_pnl) !== Number(editing.realized_pnl ?? 0)
+      ) {
+        patch.realized_pnl = Number(form.realized_pnl);
+      }
+      if (form.close_reason !== (editing.close_reason ?? "")) {
+        patch.close_reason = form.close_reason || null;
+      }
     }
-    if (form.stop_loss === "") patch.stop_loss = null;
-    else if (Number(form.stop_loss) !== Number(editing.stop_loss ?? 0))
-      patch.stop_loss = Number(form.stop_loss);
-    if (form.target === "") patch.target = null;
-    else if (Number(form.target) !== Number(editing.target ?? 0))
-      patch.target = Number(form.target);
 
     if (Object.keys(patch).length === 0) {
       toast.info("Nothing changed");
@@ -342,13 +376,44 @@ function AdminPositionsInner() {
     setSaving(true);
     try {
       await TradingAPI.editPosition(editing.id, patch);
-      toast.success("Position updated — user terminal will refresh live");
+      toast.success(
+        isClosed
+          ? "Closed trade updated — wallet auto-adjusted via reversal"
+          : "Position updated — user terminal will refresh live",
+      );
       qc.invalidateQueries({ queryKey: ["admin", "positions"] });
       setEditing(null);
     } catch (e: any) {
       toast.error(e.message || "Edit failed");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function reopen(p: any) {
+    // Reopen confirmation — this writes a wallet REVERSAL of the
+    // realised P&L and restores the position to OPEN with re-blocked
+    // margin. Show the exact reversal amount in the confirm so the
+    // admin knows the wallet impact before clicking through.
+    const realized = Number(p.realized_pnl ?? 0);
+    const direction = realized > 0 ? "debit" : "credit";
+    const msg =
+      `Reopen ${p.symbol}?\n\n` +
+      `This will:\n` +
+      `  • Set the position back to OPEN with the original ${Math.abs(
+        Number(p.opening_quantity ?? p.quantity ?? 0),
+      )} qty\n` +
+      `  • ${direction.charAt(0).toUpperCase() + direction.slice(1)} ` +
+      `₹${Math.abs(realized).toFixed(2)} on the user's wallet (REVERSAL)\n` +
+      `  • Re-block the margin\n` +
+      `\nUse only to undo a wrong close (false stop-out, misclick).`;
+    if (!window.confirm(msg)) return;
+    try {
+      await TradingAPI.reopenPosition(p.id);
+      toast.success(`${p.symbol} reopened — wallet reversed`);
+      qc.invalidateQueries({ queryKey: ["admin", "positions"] });
+    } catch (e: any) {
+      toast.error(e.message || "Reopen failed");
     }
   }
 
@@ -706,6 +771,41 @@ function AdminPositionsInner() {
               </Button>
             </>
           )}
+          {r.status === "CLOSED" && (
+            <>
+              {/* Edit closed trade — admin can correct realised P&L
+                  and relabel close_reason. Wallet auto-adjusts via
+                  REVERSAL on the backend so the running balance
+                  stays consistent with the new figure. */}
+              <Button
+                size="sm"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setEditing(r);
+                }}
+                aria-label="Edit closed trade"
+                title="Edit realised P&L / close reason"
+                className="h-7 gap-1 rounded-md bg-blue-600 px-2.5 text-xs font-semibold text-white hover:bg-blue-700"
+              >
+                <Pencil className="size-3.5" /> Edit
+              </Button>
+              {/* Reopen — flip CLOSED → OPEN with the original qty,
+                  reverse the wallet P&L impact, re-block margin.
+                  Used to undo a false stop-out / misclick close. */}
+              <Button
+                size="sm"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  reopen(r);
+                }}
+                aria-label="Reopen position"
+                title="Reopen this position (reverses wallet P&L)"
+                className="h-7 gap-1 rounded-md bg-amber-600 px-2.5 text-xs font-semibold text-white hover:bg-amber-700"
+              >
+                <RotateCcw className="size-3.5" /> Reopen
+              </Button>
+            </>
+          )}
           <Button
             size="sm"
             onClick={(e) => {
@@ -875,62 +975,107 @@ function AdminPositionsInner() {
       <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Edit position</DialogTitle>
+            <DialogTitle>
+              {editing?.status === "CLOSED" ? "Edit closed trade" : "Edit position"}
+            </DialogTitle>
             <DialogDescription>
               {editing
                 ? `${editing.symbol} · ${editing.product_type} · qty ${editing.quantity}`
                 : ""}
               <br />
-              <span className="text-[11px]">User receives a live update — no refresh needed.</span>
+              <span className="text-[11px]">
+                {editing?.status === "CLOSED"
+                  ? "Wallet auto-adjusts via REVERSAL when realised P&L changes."
+                  : "User receives a live update — no refresh needed."}
+              </span>
             </DialogDescription>
           </DialogHeader>
 
-          <div className="grid gap-3 py-2 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <Label>Entry price</Label>
-              <Input
-                type="number"
-                step="0.05"
-                value={form.avg_price}
-                onChange={(e) => setForm((p) => ({ ...p, avg_price: e.target.value }))}
-              />
+          {editing?.status === "CLOSED" ? (
+            <div className="grid gap-3 py-2 sm:grid-cols-2">
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label>Realised P&L (signed)</Label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  value={form.realized_pnl}
+                  onChange={(e) =>
+                    setForm((p) => ({ ...p, realized_pnl: e.target.value }))
+                  }
+                  placeholder="e.g. 258.00 for a profit, -540.00 for a loss"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Difference vs current value is posted to the user's wallet
+                  as a REVERSAL transaction.
+                </p>
+              </div>
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label>Closed by (relabel)</Label>
+                <select
+                  value={form.close_reason}
+                  onChange={(e) =>
+                    setForm((p) => ({ ...p, close_reason: e.target.value }))
+                  }
+                  className="h-9 w-full rounded-md border border-border bg-background px-2 text-sm"
+                >
+                  <option value="">— unset —</option>
+                  <option value="USER">USER (user-initiated)</option>
+                  <option value="SL_HIT">SL_HIT (stop-loss hit)</option>
+                  <option value="TP_HIT">TP_HIT (target hit)</option>
+                  <option value="STOP_OUT">STOP_OUT (risk auto-flatten)</option>
+                  <option value="ADMIN">ADMIN (manual close)</option>
+                  <option value="EOD">EOD (auto-rollover)</option>
+                </select>
+              </div>
             </div>
-            <div className="space-y-1.5">
-              <Label>Quantity (signed)</Label>
-              <Input
-                type="number"
-                step="any"
-                value={form.quantity}
-                onChange={(e) => setForm((p) => ({ ...p, quantity: e.target.value }))}
-              />
+          ) : (
+            <div className="grid gap-3 py-2 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label>Entry price</Label>
+                <Input
+                  type="number"
+                  step="0.05"
+                  value={form.avg_price}
+                  onChange={(e) => setForm((p) => ({ ...p, avg_price: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Quantity (signed)</Label>
+                <Input
+                  type="number"
+                  step="any"
+                  value={form.quantity}
+                  onChange={(e) => setForm((p) => ({ ...p, quantity: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label>Opened at</Label>
+                <Input
+                  type="datetime-local"
+                  value={form.opened_at}
+                  onChange={(e) => setForm((p) => ({ ...p, opened_at: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Stop loss (blank = clear)</Label>
+                <Input
+                  type="number"
+                  step="0.05"
+                  value={form.stop_loss}
+                  onChange={(e) => setForm((p) => ({ ...p, stop_loss: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Target (blank = clear)</Label>
+                <Input
+                  type="number"
+                  step="0.05"
+                  value={form.target}
+                  onChange={(e) => setForm((p) => ({ ...p, target: e.target.value }))}
+                />
+              </div>
             </div>
-            <div className="space-y-1.5 sm:col-span-2">
-              <Label>Opened at</Label>
-              <Input
-                type="datetime-local"
-                value={form.opened_at}
-                onChange={(e) => setForm((p) => ({ ...p, opened_at: e.target.value }))}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label>Stop loss (blank = clear)</Label>
-              <Input
-                type="number"
-                step="0.05"
-                value={form.stop_loss}
-                onChange={(e) => setForm((p) => ({ ...p, stop_loss: e.target.value }))}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label>Target (blank = clear)</Label>
-              <Input
-                type="number"
-                step="0.05"
-                value={form.target}
-                onChange={(e) => setForm((p) => ({ ...p, target: e.target.value }))}
-              />
-            </div>
-          </div>
+          )}
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditing(null)} disabled={saving}>

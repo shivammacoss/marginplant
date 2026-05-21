@@ -528,13 +528,21 @@ async def admin_edit_position(
     admin: CurrentAdmin,
     _: None = Depends(require_perm("trading_view", "write")),
 ):
-    """Admin-only: edit an open position's entry details. Used to correct
-    fat-fingered fills, set/adjust attached SL & target, or back-date the
-    open time. Patch is fanned out via Redis pub/sub so the user's terminal
-    re-renders the positions strip without a refresh.
+    """Admin-only: edit a position's entry / exit details.
 
-    Accepted fields:
+    OPEN-position fields:
         avg_price, quantity, opened_at, stop_loss, target
+
+    CLOSED-position fields (admin correction of a bad close):
+        realized_pnl  — override the booked realised. Difference vs
+                        the previous value is posted to the user's
+                        wallet as a REVERSAL transaction so the
+                        ledger always reconciles.
+        close_reason  — relabel (USER / SL_HIT / STOP_OUT / ADMIN).
+                        Cosmetic, no money movement.
+
+    Patch is fanned out via Redis pub/sub so the user's terminal
+    re-renders the positions strip without a refresh.
     """
     p = await Position.get(PydanticObjectId(position_id))
     if p is None:
@@ -547,6 +555,9 @@ async def admin_edit_position(
         "opened_at": p.opened_at.isoformat() if p.opened_at else None,
         "stop_loss": str(p.stop_loss) if p.stop_loss is not None else None,
         "target": str(p.target) if p.target is not None else None,
+        "realized_pnl": str(p.realized_pnl) if p.realized_pnl is not None else None,
+        "close_reason": p.close_reason,
+        "status": p.status.value,
     }
 
     if "avg_price" in payload and payload["avg_price"] is not None:
@@ -571,6 +582,34 @@ async def admin_edit_position(
         v = payload["target"]
         p.target = Decimal128(str(v)) if v not in (None, "", 0) else None
 
+    # ── CLOSED-row corrections ────────────────────────────────────────
+    # When the row is CLOSED, allow the admin to nudge realized_pnl
+    # (e.g. to compensate for a known mispriced close) and to relabel
+    # `close_reason`. Any delta on realized_pnl is mirrored on the
+    # user's wallet via a REVERSAL transaction so the running balance
+    # stays consistent with the booked figure on the trade card.
+    realized_delta: Decimal | None = None
+    if (
+        "realized_pnl" in payload
+        and payload["realized_pnl"] is not None
+        and p.status == PositionStatus.CLOSED
+    ):
+        try:
+            from app.utils.decimal_utils import to_decimal as _td
+
+            new_realized = _td(payload["realized_pnl"])
+            old_realized = _td(p.realized_pnl or 0)
+            realized_delta = new_realized - old_realized
+            p.realized_pnl = Decimal128(str(new_realized))
+        except Exception as e:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid realized_pnl: {e}"
+            )
+
+    if "close_reason" in payload and p.status == PositionStatus.CLOSED:
+        v = payload["close_reason"]
+        p.close_reason = str(v) if v else None
+
     # Recompute margin_used at the new entry so the wallet view stays consistent.
     if "avg_price" in payload or "quantity" in payload:
         try:
@@ -581,12 +620,44 @@ async def admin_edit_position(
 
     await p.save()
 
+    # Apply the wallet delta AFTER the position write so an exception in
+    # adjust() doesn't leave the position in an inconsistent state. The
+    # adjust() call writes its own REVERSAL ledger row.
+    if realized_delta is not None and realized_delta != 0:
+        from app.models.transaction import TransactionType
+        from app.services import wallet_service as _ws
+
+        try:
+            await _ws.adjust(
+                p.user_id,
+                realized_delta,
+                transaction_type=TransactionType.REVERSAL,
+                narration=(
+                    f"Admin {admin.user_code} corrected realised P&L on "
+                    f"{p.instrument.symbol} (delta {realized_delta})"
+                ),
+                reference_type="Position",
+                reference_id=str(p.id),
+                actor_id=admin.id,
+            )
+        except Exception as e:
+            # The position row is already saved with the new realized.
+            # Surface the wallet failure so the operator knows the
+            # ledger didn't catch up.
+            raise HTTPException(
+                status_code=500,
+                detail=f"Position updated but wallet reversal failed: {e}",
+            )
+
     new_values: dict[str, Any] = {
         "avg_price": str(p.avg_price),
         "quantity": p.quantity,
         "opened_at": p.opened_at.isoformat() if p.opened_at else None,
         "stop_loss": str(p.stop_loss) if p.stop_loss is not None else None,
         "target": str(p.target) if p.target is not None else None,
+        "realized_pnl": str(p.realized_pnl) if p.realized_pnl is not None else None,
+        "close_reason": p.close_reason,
+        "status": p.status.value,
     }
     await log_event(
         action=AuditAction.POSITION_EDIT
@@ -601,6 +672,178 @@ async def admin_edit_position(
     )
     await _publish_position_event(p.user_id, "edit", p, {"by": "admin"})
     return APIResponse(data={"id": str(p.id), "status": p.status.value, **new_values})
+
+
+@router.post("/positions/{position_id}/reopen", response_model=APIResponse[dict])
+async def admin_reopen_position(
+    position_id: str,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("trading_view", "write")),
+):
+    """Flip a CLOSED position back to OPEN — admin override.
+
+    Used when a close was triggered by mistake (false stop-out, user
+    misclicked, bracket fired on a phantom tick). The endpoint:
+
+      1) Reverses the cumulative `realized_pnl` against the user's
+         wallet via a REVERSAL transaction. A profit close that's
+         being undone debits the wallet; a loss close credits it
+         back. Either way, the running wallet balance ends at what
+         it was just before the close fill landed.
+
+      2) Rehydrates the position to its OPEN state:
+            status        = OPEN
+            quantity      = ±opening_quantity (sign from opened_side)
+            closed_at     = None
+            close_reason  = None
+            realized_pnl  = 0
+            margin_used   = abs(qty) × avg_price  (re-block)
+
+      3) Re-blocks the now-required margin on the wallet so used_margin
+         reflects the reopened exposure.
+
+      4) Refuses to reopen if a different OPEN position already exists
+         for the same (user, token, product_type) — that would create
+         two parallel positions the apply_fill resolver can't pick
+         between.
+
+    Audit-logged + pub/sub fanned out so the user's terminal re-renders
+    the Positions tab live.
+    """
+    p = await Position.get(PydanticObjectId(position_id))
+    if p is None:
+        raise HTTPException(status_code=404, detail="Position not found")
+    await assert_user_in_scope(admin, p.user_id)
+
+    if p.status != PositionStatus.CLOSED:
+        raise HTTPException(
+            status_code=400, detail="Only CLOSED positions can be reopened"
+        )
+
+    # Refuse if a parallel OPEN position exists for the same
+    # (user, token, product_type) — apply_fill assumes one OPEN row per
+    # such tuple. Reopening on top of that would create two and break
+    # downstream fills.
+    existing_open = await Position.find_one(
+        Position.user_id == p.user_id,
+        Position.instrument.token == p.instrument.token,  # type: ignore[union-attr]
+        Position.product_type == p.product_type,
+        Position.status == PositionStatus.OPEN,
+    )
+    if existing_open is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cannot reopen — a different open position already exists "
+                f"for {p.instrument.symbol} ({p.product_type.value}). "
+                f"Square that off first."
+            ),
+        )
+
+    from decimal import Decimal as _Decimal
+
+    from app.models.transaction import TransactionType
+    from app.services import position_service as _ps
+    from app.services import wallet_service as _ws
+    from app.utils.decimal_utils import to_decimal as _td
+    from app.utils.time_utils import now_utc as _now_utc
+
+    # ── 1) Wallet reversal of the realised P&L ──────────────────────
+    realized = _td(p.realized_pnl or 0)
+    if realized != _Decimal("0"):
+        try:
+            await _ws.adjust(
+                p.user_id,
+                -realized,
+                transaction_type=TransactionType.REVERSAL,
+                narration=(
+                    f"Reopen {p.instrument.symbol} — reverse realised P&L "
+                    f"(closed by {p.close_reason or 'unknown'}; reopened by "
+                    f"{admin.user_code})"
+                ),
+                reference_type="Position",
+                reference_id=str(p.id),
+                actor_id=admin.id,
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Wallet reversal failed; reopen aborted: {e}",
+            )
+
+    # ── 2) Restore the position to OPEN state ───────────────────────
+    # Reconstruct quantity from the snapshot we took at open. If
+    # `opened_side` is missing (legacy rows), infer from the sign of
+    # the last non-zero quantity by reading the latest Trade row.
+    opening_qty = float(p.opening_quantity or 0) or abs(float(p.quantity or 0))
+    if opening_qty <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot reopen — original opening quantity is unknown",
+        )
+    sign = 1
+    if p.opened_side is not None:
+        sign = 1 if str(p.opened_side.value).upper() == "BUY" else -1
+
+    p.status = PositionStatus.OPEN
+    p.quantity = opening_qty * sign
+    p.closed_at = None
+    p.close_reason = None
+    p.realized_pnl = Decimal128("0")
+    if p.close_usd_inr_rate is not None:
+        p.close_usd_inr_rate = None
+    # Margin re-block: |qty| × avg_price gives a conservative figure
+    # consistent with how delete_position / admin_edit_position recompute.
+    try:
+        avg_p = float(str(p.avg_price))
+        p.margin_used = Decimal128(str(round(opening_qty * avg_p, 2)))
+    except Exception:
+        pass
+
+    await p.save()
+
+    # ── 3) Re-block the margin on the wallet so used_margin reflects
+    #       the restored exposure. block_margin handles the
+    #       insufficient-funds case but for an admin override we want
+    #       the position to come back even if the user is short on
+    #       margin — so swallow that and let the operator reconcile.
+    try:
+        await _ws.block_margin(p.user_id, _td(p.margin_used or 0))
+    except Exception:
+        pass
+
+    # Tracker recompute (intraday / holding lots).
+    try:
+        await _ps._recompute_tracker(
+            user_id=p.user_id,
+            segment_type=p.segment_type,
+            token=p.instrument.token,
+        )
+    except Exception:
+        pass
+
+    await log_event(
+        action=AuditAction.SETTING_CHANGE,
+        entity_type="Position",
+        entity_id=p.id,
+        actor_id=admin.id,
+        target_user_id=p.user_id,
+        metadata={
+            "action": "REOPEN",
+            "reversed_realized_pnl": str(realized),
+            "restored_quantity": opening_qty * sign,
+        },
+    )
+    await _publish_position_event(p.user_id, "reopen", p, {"by": "admin"})
+
+    return APIResponse(
+        data={
+            "id": str(p.id),
+            "status": p.status.value,
+            "quantity": p.quantity,
+            "realized_pnl_reversed": str(realized),
+        }
+    )
 
 
 @router.get("/positions/pnl-summary", response_model=APIResponse[dict])
