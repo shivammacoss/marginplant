@@ -599,10 +599,15 @@ async def list_active_trades(user: CurrentUser):
     if not open_positions:
         return APIResponse(data=[])
 
-    # Map (instrument_token, product_type) → Position for fast lookup.
+    # Primary lookup: (token, product_type). Secondary lookup: token-only,
+    # for trades whose product_type enum has drifted in casing from the
+    # position's. The secondary map only kicks in when the primary misses
+    # — symptom we previously saw: "trade position me dikh raha par
+    # active me nahi" which was actually a key-mismatch, not data loss.
     pos_by_key: dict[tuple[str, str], Position] = {
         (p.instrument.token, str(p.product_type.value)): p for p in open_positions
     }
+    pos_by_token: dict[str, Position] = {p.instrument.token: p for p in open_positions}
     tokens = [p.instrument.token for p in open_positions]
 
     # Pull every trade for these (user, instrument) pairs — no date
@@ -655,11 +660,22 @@ async def list_active_trades(user: CurrentUser):
     # first so FIFO consumes the earliest fill), opposite-side total.
     same_side_by_key: dict[tuple[str, str], list[Any]] = defaultdict(list)
     opposite_total_by_key: dict[tuple[str, str], float] = defaultdict(float)
+    # Track which (token, product_type) keys we mapped each trade to —
+    # used downstream so the row builder doesn't need to repeat the
+    # primary/secondary lookup dance.
+    trade_key_resolved: dict[str, tuple[str, str]] = {}
     for t in trades:
-        key = (t.instrument.token, str(t.product_type.value))
-        p = pos_by_key.get(key)
+        primary_key = (t.instrument.token, str(t.product_type.value))
+        p = pos_by_key.get(primary_key)
+        key = primary_key
         if p is None:
-            continue
+            # Fallback to token-only when product_type didn't match any
+            # OPEN position's key — see comment on pos_by_token above.
+            p = pos_by_token.get(t.instrument.token)
+            if p is None:
+                continue
+            key = (t.instrument.token, str(p.product_type.value))
+        trade_key_resolved[str(t.id)] = key
         is_long = p.quantity > 0
         is_buy = t.action == OrderAction.BUY
         if is_long == is_buy:
@@ -686,8 +702,13 @@ async def list_active_trades(user: CurrentUser):
 
     rows: list[dict[str, Any]] = []
     for t in trades:
-        key = (t.instrument.token, str(t.product_type.value))
-        p = pos_by_key.get(key)
+        # Use the same primary→fallback key resolution as the FIFO pass
+        # so a product_type drift can't make a trade vanish here while
+        # still being counted in opposite_total above.
+        key = trade_key_resolved.get(str(t.id))
+        if key is None:
+            continue
+        p = pos_by_key.get(key) or pos_by_token.get(t.instrument.token)
         if p is None:
             continue
         # Direction filter: only keep fills that ADD to the current direction.
@@ -773,9 +794,31 @@ async def list_active_trades(user: CurrentUser):
 
 @router.post("/active-trades/{trade_id}/close", response_model=APIResponse[dict])
 async def close_active_trade(trade_id: str, user: CurrentUser):
-    """Close exactly the slice represented by this trade — issues an opposite
-    market order for the trade's quantity. The P&L is realised against the
-    position's weighted-average price, not the trade's individual fill price."""
+    """Close ONLY the still-open slice of this trade — issues an opposite
+    market order for the trade's remaining (FIFO-leftover) quantity, NOT
+    the trade's original fill quantity.
+
+    Why this is critical (was a production bug):
+      The earlier implementation used `min(t.quantity, |p.quantity|)`,
+      which over-closed whenever the trade had been partially consumed
+      by a prior closing leg AND the user later pyramided more lots on
+      top. Example:
+          BUY 5 (T1) → LONG 5
+          SELL 2     → partial close, LONG 3 (T1 leftover = 3 via FIFO)
+          BUY 4 (T3) → LONG 7 (active rows: T1=3, T3=4)
+          User clicks "Close" on T1 (UI shows 3 lots)
+              old code: close_qty = min(5, 7) = 5 → over-closed by 2
+              new code: close_qty = min(leftover_for_T1=3, 7) = 3 ✓
+      The visible symptom was "ek active close kiya, T3 bhi shrink ho
+      gaya, position bhi 5 ki bajay 4 lots kam gayi" — exactly the
+      "close one → all close" report.
+
+    Also adds a Redis idempotency lock so a double-click (or a retry
+    after a network blip) can't fire two opposite-side orders against
+    the same trade in the same window — that would over-close the
+    parent position, leaving a phantom short / settlement_outstanding
+    shortfall that has to be cleaned up by hand.
+    """
     try:
         oid = PydanticObjectId(trade_id)
     except Exception:
@@ -783,19 +826,118 @@ async def close_active_trade(trade_id: str, user: CurrentUser):
     t = await Trade.get(oid)
     if t is None or t.user_id != user.id:
         raise HTTPException(status_code=404, detail="Trade not found")
-    # Find the matching open position
+
+    # ── Single-flight lock ────────────────────────────────────────────
+    # 10 s TTL covers a slow market round-trip; key includes user + trade
+    # so different users / different trades never collide. Released on
+    # exception by the TTL — no manual cleanup needed.
+    from app.core.redis_client import idempotency_check_and_set
+
+    lock_key = f"close_active_trade:{user.id}:{trade_id}"
+    if not await idempotency_check_and_set(lock_key, ttl_sec=10):
+        raise HTTPException(
+            status_code=409,
+            detail="A close for this trade is already in flight — try again in a moment.",
+        )
+
+    # Find the matching open position. Match by (user, token, product_type)
+    # first; if that misses (e.g. product_type enum vs string casing drift
+    # between when the trade vs the position was written), fall back to
+    # (user, token) alone among OPEN positions. Prevents the "trade in
+    # positions but not in active" symptom which was actually a lookup
+    # miss, not missing data.
     p = await Position.find_one(
         Position.user_id == user.id,
         Position.instrument.token == t.instrument.token,
         Position.product_type == t.product_type,
         Position.status == PositionStatus.OPEN,
     )
+    if p is None:
+        p = await Position.find_one(
+            Position.user_id == user.id,
+            Position.instrument.token == t.instrument.token,
+            Position.status == PositionStatus.OPEN,
+        )
     if p is None or p.quantity == 0:
-        raise HTTPException(status_code=400, detail="No open position to close this trade against")
+        raise HTTPException(
+            status_code=400,
+            detail="No open position to close this trade against",
+        )
 
-    close_qty = min(float(t.quantity), abs(float(p.quantity)))
+    # ── FIFO leftover for THIS trade ──────────────────────────────────
+    # Walk every trade for the (user, token) — oldest first — and consume
+    # opposite-side quantity from same-side trades. The leftover for our
+    # target trade is what's still open and therefore what we should
+    # close. Without this we'd over-close when the trade was partially
+    # consumed by an earlier closing leg.
+    from datetime import datetime as _dt
+
+    all_trades = await Trade.find(
+        Trade.user_id == user.id,
+        Trade.instrument.token == t.instrument.token,
+    ).to_list()
+    # Restrict to the trades that share the position's product_type — but
+    # only if at least one such trade exists for the target; otherwise
+    # fall back to all. Mirrors the position-lookup fallback above.
+    same_pt = [tr for tr in all_trades if tr.product_type == p.product_type]
+    pool = same_pt if same_pt else all_trades
+
+    is_long = p.quantity > 0
+    same_side: list[Trade] = []
+    opposite_total = 0.0
+    for tr in pool:
+        is_buy = tr.action == OrderAction.BUY
+        if is_long == is_buy:
+            same_side.append(tr)
+        else:
+            opposite_total += float(tr.quantity)
+    same_side.sort(key=lambda tr: tr.executed_at or _dt.min)
+
+    leftover_for_target = 0.0
+    to_consume = opposite_total
+    for tr in same_side:
+        tq = float(tr.quantity)
+        if to_consume <= 0:
+            if str(tr.id) == trade_id:
+                leftover_for_target = tq
+                break
+            continue
+        consume = min(tq, to_consume)
+        to_consume -= consume
+        leftover = tq - consume
+        if str(tr.id) == trade_id:
+            leftover_for_target = max(0.0, leftover)
+            break
+
+    # If the target trade isn't on the same side as the current position
+    # (e.g. it's a SELL on a now-LONG position because the position
+    # flipped after this trade), it's a closing leg — there's nothing
+    # left to close from it. Same for fully-consumed same-side trades.
+    if leftover_for_target <= 1e-9:
+        raise HTTPException(
+            status_code=400,
+            detail="This trade has already been closed — no remaining quantity.",
+        )
+
+    close_qty = min(leftover_for_target, abs(float(p.quantity)))
     close_lots = max(0.01, close_qty / max(1, p.instrument.lot_size or 1))
     action = OrderAction.SELL if p.quantity > 0 else OrderAction.BUY
+
+    import logging as _lg
+    _lg.getLogger(__name__).info(
+        "close_active_trade",
+        extra={
+            "user_id": str(user.id),
+            "trade_id": trade_id,
+            "position_id": str(p.id),
+            "trade_original_qty": float(t.quantity),
+            "leftover_for_target": leftover_for_target,
+            "position_qty": float(p.quantity),
+            "close_qty": close_qty,
+            "close_lots": close_lots,
+        },
+    )
+
     o = await order_service.place_order(
         user=user,
         payload={
@@ -824,7 +966,14 @@ async def close_active_trade(trade_id: str, user: CurrentUser):
     except Exception:
         pass
 
-    return APIResponse(data={"order_id": str(o.id), "status": o.status.value, "closed_lots": close_lots})
+    return APIResponse(
+        data={
+            "order_id": str(o.id),
+            "status": o.status.value,
+            "closed_lots": close_lots,
+            "closed_qty": close_qty,
+        }
+    )
 
 
 @router.put("/active-trades/{trade_id}/sl-tp", response_model=APIResponse[dict])
