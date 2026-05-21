@@ -108,7 +108,12 @@ const groups: { title: string; items: NavItem[] }[] = [
       { href: "/settings/platform", label: "Platform settings", icon: Cog, superOnly: true },
       { href: "/holidays", label: "Holiday calendar", icon: Calendar, superOnly: true },
       { href: "/backup", label: "Backup & EOD", icon: DatabaseBackup, superOnly: true },
-      { href: "/audit", label: "Audit logs", icon: History, superOnly: true },
+      // Audit log visible to every tier — backend scopes the result
+      // set to the caller's pool (super-admin sees all, admin sees
+      // their own + downstream brokers + clients, broker sees their
+      // subtree). Operator-flagged 21-May: "admin me audit log nahi
+      // aata" — was gated `superOnly: true` here.
+      { href: "/audit", label: "Audit logs", icon: History },
     ],
   },
 ];

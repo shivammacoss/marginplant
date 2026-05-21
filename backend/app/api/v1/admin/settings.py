@@ -104,6 +104,47 @@ async def delete_holiday(holiday_id: str, admin: CurrentAdmin):
 
 
 # ── Audit ───────────────────────────────────────────────────────────
+async def _audit_scope_user_ids(admin) -> list[PydanticObjectId] | None:
+    """Resolve which user_ids an admin can see audit events for.
+
+    Returns `None` to mean "no filter" (super-admin sees everything).
+    Otherwise returns the explicit list of in-scope user ids — events
+    are matched if their `user_id` (actor) or `target_user_id`
+    (subject) is in this list. Differs from `scoped_user_ids` in two
+    important ways:
+
+      • Includes broker-tier users in the admin's pool. The standard
+        helper filters out SUPER_ADMIN / ADMIN / BROKER roles (it's
+        designed for client-only scopes like deposits / withdrawals).
+        For audit we want admins to see their downstream brokers'
+        activity too.
+      • Includes the admin themselves. An admin browsing their own
+        audit page should see their own actions (logins, the very
+        block / kyc / approve calls they fire).
+
+    Admin / broker / sub-broker all go through the same logic — the
+    underlying mongo filters (`assigned_admin_id` for admin,
+    `broker_ancestry` for broker) walk the right subtree per role.
+    """
+    from app.models.user import User, UserRole
+
+    if admin.role == UserRole.SUPER_ADMIN:
+        return None
+    ids: set[PydanticObjectId] = {admin.id}
+    if admin.role == UserRole.ADMIN:
+        downstream = await User.find(User.assigned_admin_id == admin.id).to_list()
+    elif admin.role == UserRole.BROKER:
+        downstream = await User.find(
+            {"broker_ancestry": admin.id}
+        ).to_list()
+    else:
+        downstream = []
+    for u in downstream:
+        if u.id is not None:
+            ids.add(u.id)
+    return list(ids)
+
+
 @router.get("/audit/logs", response_model=APIResponse[dict])
 async def list_audit(
     admin: CurrentAdmin,
@@ -116,6 +157,34 @@ async def list_audit(
     page_size: int = Query(default=50, le=200),
 ):
     q: dict[str, Any] = {}
+
+    # ── Scope gate ──────────────────────────────────────────────────
+    # Super-admin sees everything; admin sees events involving their
+    # own pool (themselves + downstream brokers + clients); broker
+    # sees their own subtree. Without this every admin who could hit
+    # /admin/audit/logs would see the entire platform's audit trail.
+    scope = await _audit_scope_user_ids(admin)
+    scope_filter: dict[str, Any] | None = None
+    if scope is not None:
+        if not scope:
+            return APIResponse(
+                data={
+                    "items": [],
+                    "meta": {
+                        "page": page,
+                        "page_size": page_size,
+                        "total": 0,
+                        "total_pages": 0,
+                    },
+                }
+            )
+        scope_filter = {
+            "$or": [
+                {"user_id": {"$in": scope}},
+                {"target_user_id": {"$in": scope}},
+            ]
+        }
+
     if user_id:
         q["user_id"] = PydanticObjectId(user_id)
     if target_user_id:
@@ -131,10 +200,54 @@ async def list_audit(
         q["action"] = action
     if entity_type:
         q["entity_type"] = entity_type
+
+    # If both the scope filter and an `involving_user_id` $or are
+    # present, Mongo only honours the LAST `$or` key — so combine the
+    # two through an `$and` so both narrow the result set.
+    if scope_filter is not None:
+        if q:
+            q = {"$and": [scope_filter, q]}
+        else:
+            q = scope_filter
+
     total = await AuditLog.find(q).count()
     rows = (
         await AuditLog.find(q).sort("-created_at").skip((page - 1) * page_size).limit(page_size).to_list()
     )
+
+    # Enrich actor / target user with readable name + user_code so the
+    # admin's audit table doesn't show raw ObjectIds. Single batched
+    # lookup — small N (page_size=50 at most) so this is one query.
+    from app.models.user import User as _User
+
+    referenced_ids: set[PydanticObjectId] = set()
+    for r in rows:
+        if r.user_id is not None:
+            referenced_ids.add(r.user_id)
+        if r.target_user_id is not None:
+            referenced_ids.add(r.target_user_id)
+    user_map: dict[str, dict[str, str | None]] = {}
+    if referenced_ids:
+        users = await _User.find(
+            {"_id": {"$in": list(referenced_ids)}}
+        ).to_list()
+        user_map = {
+            str(u.id): {
+                "name": u.full_name,
+                "code": u.user_code,
+                "role": u.role.value if u.role else None,
+            }
+            for u in users
+        }
+
+    def _enrich(uid: PydanticObjectId | None) -> dict[str, Any] | None:
+        if uid is None:
+            return None
+        info = user_map.get(str(uid))
+        if info is None:
+            return {"id": str(uid)}
+        return {"id": str(uid), **info}
+
     return APIResponse(
         data={
             "items": [
@@ -142,6 +255,8 @@ async def list_audit(
                     "id": str(r.id),
                     "user_id": str(r.user_id) if r.user_id else None,
                     "target_user_id": str(r.target_user_id) if r.target_user_id else None,
+                    "actor": _enrich(r.user_id),
+                    "target": _enrich(r.target_user_id),
                     "action": r.action.value,
                     "entity_type": r.entity_type,
                     "entity_id": r.entity_id,

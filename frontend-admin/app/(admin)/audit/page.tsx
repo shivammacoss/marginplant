@@ -50,6 +50,48 @@ function shortDevice(ua: string | null | undefined): string {
   return os ? `${browser} on ${os}` : browser;
 }
 
+/** Two-line cell: full name on top, user_code in mono on the second
+ *  line. Falls back to "system" / "—" when the row has no actor /
+ *  target (e.g. boot-time migration audit rows have no actor). Click
+ *  the cell to re-scope the entire audit page to that user. */
+function UserCell({
+  info,
+  fallback,
+}: {
+  info?: { id?: string; name?: string | null; code?: string | null; role?: string | null } | null;
+  fallback: string;
+}) {
+  if (!info || !info.id) {
+    return <span className="text-xs text-muted-foreground">{fallback}</span>;
+  }
+  const name = info.name?.trim();
+  const code = info.code?.trim();
+  if (!name && !code) {
+    return (
+      <span className="font-mono text-[11px] text-muted-foreground">
+        {info.id.slice(-8)}
+      </span>
+    );
+  }
+  return (
+    <Link
+      href={`/audit?involving_user_id=${info.id}`}
+      className="group inline-flex flex-col leading-tight"
+      title={`${name ?? ""} ${code ? `(${code})` : ""}`.trim()}
+    >
+      <span className="text-xs font-medium text-foreground group-hover:underline">
+        {name || code || info.id.slice(-8)}
+      </span>
+      {code && (
+        <span className="font-mono text-[10px] text-muted-foreground">
+          {code}
+        </span>
+      )}
+    </Link>
+  );
+}
+
+
 function AuditLogsInner() {
   const searchParams = useSearchParams();
   // `involving_user_id` is the new "events involving this user as actor
@@ -88,8 +130,24 @@ function AuditLogsInner() {
     { key: "action", header: "Action", render: (r) => <StatusPill status={r.action} /> },
     { key: "entity_type", header: "Entity" },
     { key: "entity_id", header: "ID", render: (r) => <span className="font-mono text-[11px]">{r.entity_id?.slice(-12) || "—"}</span> },
-    { key: "user_id", header: "Actor", render: (r) => (r.user_id ? r.user_id.slice(-8) : "system") },
-    { key: "target_user_id", header: "Target", render: (r) => (r.target_user_id ? r.target_user_id.slice(-8) : "—") },
+    {
+      // Actor — the user who initiated the action. Backend now ships
+      // an `actor` object with `name` + `code` + `role`, so render the
+      // friendly name with the user_code on a muted second line
+      // instead of the last-8-of-ObjectId blob that used to be there.
+      key: "actor",
+      header: "Actor",
+      render: (r) => <UserCell info={r.actor} fallback="system" />,
+    },
+    {
+      // Target — who the action was performed on. Same enrichment as
+      // Actor. Many rows have actor == target (e.g. user logs in:
+      // actor=user, target=user) which is fine — both cells render
+      // the same name.
+      key: "target",
+      header: "Target",
+      render: (r) => <UserCell info={r.target} fallback="—" />,
+    },
     {
       key: "metadata",
       header: "Detail",
