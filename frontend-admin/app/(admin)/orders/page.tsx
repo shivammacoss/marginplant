@@ -12,7 +12,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { Pagination } from "@/components/common/Pagination";
 import { StatusPill } from "@/components/common/StatusPill";
-import { formatINR, cn } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 
 function fmtPrice(value: number | string | null | undefined): string {
   const n = typeof value === "string" ? Number(value) : (value ?? 0);
@@ -23,12 +23,12 @@ function fmtPrice(value: number | string | null | undefined): string {
   });
 }
 
-// Five tabs. The four order-bucket tabs map onto a single backend
-// /admin/orders call with different status filters; "executions" hits
-// /admin/trades. Operator wanted these split out (commit 21-May) so
-// each bucket is a single click instead of a dropdown — Pending /
-// Executed / Rejected / SL-TP / Executions.
-type Tab = "pending" | "executed" | "rejected" | "sltp" | "executions";
+// Four tabs — all driven by the same /admin/orders endpoint with
+// different status filters. Operator dropped the dedicated "Executions"
+// tab on 21-May because trade fills are already visible per-order via
+// status=EXECUTED, and the standalone trades table was duplicating
+// information without the operator-relevant per-user grouping.
+type Tab = "pending" | "executed" | "rejected" | "sltp";
 
 const TABS: { id: Tab; label: string; description: string }[] = [
   {
@@ -51,11 +51,6 @@ const TABS: { id: Tab; label: string; description: string }[] = [
     label: "SL / TP",
     description: "Orders carrying a stop-loss or target — SL/SL-M or bracket SL/TP.",
   },
-  {
-    id: "executions",
-    label: "Executions",
-    description: "Trade fills against orders, with brokerage charges.",
-  },
 ];
 
 export default function AdminOrdersPage() {
@@ -72,7 +67,7 @@ function AdminOrdersInner() {
   const queryTab = (searchParams?.get("tab") ?? "pending") as Tab;
 
   const isValidTab = (t: string): t is Tab =>
-    ["pending", "executed", "rejected", "sltp", "executions"].includes(t);
+    ["pending", "executed", "rejected", "sltp"].includes(t);
 
   const [tab, setTab] = useState<Tab>(isValidTab(queryTab) ? queryTab : "pending");
   useEffect(() => {
@@ -125,30 +120,20 @@ function AdminOrdersInner() {
         ))}
       </div>
 
-      {tab === "executions" ? (
-        <TradesTable userId={queryUserId} />
-      ) : (
-        <OrdersTable tab={tab} userId={queryUserId} />
-      )}
+      <OrdersTable tab={tab} userId={queryUserId} />
     </div>
   );
 }
 
-function OrdersTable({ tab, userId }: { tab: Exclude<Tab, "executions">; userId?: string | null }) {
+function OrdersTable({ tab, userId }: { tab: Tab; userId?: string | null }) {
   const qc = useQueryClient();
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
 
-  // Reset to page 1 when switching tab or user filter so pagination
-  // never lands on an empty page in a smaller result set.
   useEffect(() => {
     setPage(1);
   }, [tab, userId]);
 
-  // Map each tab onto the backend filter shape it expects. Pending bundles
-  // three wire statuses into one tab (PENDING + OPEN + PARTIAL) via the
-  // `statuses` CSV param; SL/TP uses the dedicated `sl_tp=true` flag that
-  // matches SL/SL_M order types OR bracket stop_loss/target.
   const apiParams = useMemo<Record<string, any>>(() => {
     const base: Record<string, any> = {
       page,
@@ -179,18 +164,24 @@ function OrdersTable({ tab, userId }: { tab: Exclude<Tab, "executions">; userId?
     }
   }
 
-  // Column set varies by tab. The common columns sit at the front;
-  // tab-specific extras are appended so the operator sees the field
-  // they care about (rejection reason, bracket SL/TP, trigger price)
-  // without needing to scroll a kitchen-sink table.
+  // Common columns sit at the front: user (name + code stacked so the
+  // operator sees who placed it without needing to memorise codes),
+  // then instrument + side + qty. Tab-specific extras get appended,
+  // and every tab ends with a Date / Time column per the 21-May
+  // request ("orde id remoev karek name likho user ka and then data
+  // and time rahe ga").
   const cols: Column<any>[] = useMemo(() => {
     const base: Column<any>[] = [
       {
-        key: "order_number",
-        header: "Order #",
-        render: (r) => <span className="font-mono text-[11px]">{r.order_number}</span>,
+        key: "user",
+        header: "User",
+        render: (r) => (
+          <div className="flex flex-col leading-tight">
+            <span className="font-medium">{r.user_name || "—"}</span>
+            <span className="text-[11px] text-muted-foreground">{r.user_code || r.user_id?.slice(-6)}</span>
+          </div>
+        ),
       },
-      { key: "user_code", header: "User", render: (r) => r.user_code || r.user_id.slice(-6) },
       { key: "symbol", header: "Symbol" },
       { key: "exchange", header: "Exch" },
       { key: "action", header: "Side", render: (r) => <StatusPill status={r.action} /> },
@@ -216,11 +207,6 @@ function OrdersTable({ tab, userId }: { tab: Exclude<Tab, "executions">; userId?
       base.push(
         { key: "average_price", header: "Fill", align: "right", render: (r) => fmtPrice(r.average_price) },
         { key: "filled_quantity", header: "Filled", align: "right" },
-        {
-          key: "executed_at",
-          header: "Executed",
-          render: (r) => (r.executed_at ? new Date(r.executed_at).toLocaleString() : "—"),
-        },
       );
     } else if (tab === "rejected") {
       base.push(
@@ -233,11 +219,6 @@ function OrdersTable({ tab, userId }: { tab: Exclude<Tab, "executions">; userId?
               {r.rejection_reason || "—"}
             </span>
           ),
-        },
-        {
-          key: "created_at",
-          header: "When",
-          render: (r) => (r.created_at ? new Date(r.created_at).toLocaleString() : "—"),
         },
       );
     } else if (tab === "sltp") {
@@ -276,6 +257,25 @@ function OrdersTable({ tab, userId }: { tab: Exclude<Tab, "executions">; userId?
       );
     }
 
+    // Date / time column — for Executed orders the fill time is more
+    // meaningful than placement time, so prefer executed_at and fall
+    // back to created_at. Other tabs use placement time.
+    base.push({
+      key: "when",
+      header: "Date / Time",
+      render: (r) => {
+        const ts = tab === "executed" ? r.executed_at || r.created_at : r.created_at;
+        if (!ts) return <span className="text-muted-foreground">—</span>;
+        const d = new Date(ts);
+        return (
+          <div className="flex flex-col leading-tight">
+            <span>{d.toLocaleDateString()}</span>
+            <span className="text-[11px] text-muted-foreground">{d.toLocaleTimeString()}</span>
+          </div>
+        );
+      },
+    });
+
     base.push({
       key: "actions",
       header: "",
@@ -299,77 +299,6 @@ function OrdersTable({ tab, userId }: { tab: Exclude<Tab, "executions">; userId?
         page={page}
         pageSize={pageSize}
         total={data?.meta?.total ?? 0}
-        onPageChange={setPage}
-        onPageSizeChange={setPageSize}
-        pageSizeOptions={[25, 50, 100, 200]}
-      />
-    </div>
-  );
-}
-
-function TradesTable({ userId }: { userId?: string | null }) {
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
-
-  const { data, isFetching } = useQuery({
-    queryKey: ["admin", "trades", { userId }],
-    queryFn: () => TradingAPI.trades({ limit: 1000, user_id: userId || undefined }),
-    refetchInterval: 5000,
-  });
-
-  useEffect(() => {
-    setPage(1);
-  }, [userId]);
-
-  const pagedRows = useMemo(() => {
-    const all = (data ?? []) as any[];
-    const start = (page - 1) * pageSize;
-    return all.slice(start, start + pageSize);
-  }, [data, page, pageSize]);
-
-  // Executions tab intentionally has NO P&L column. Operator's 21-May
-  // request: "eccuate page se pnl remoev kar dena pls ume pnl show
-  // nahi karna hai" — keep this page focused on the fill itself
-  // (price, qty, brokerage, time). Realised P&L lives on the Position
-  // & Holdings pages.
-  const cols: Column<any>[] = [
-    {
-      key: "trade_number",
-      header: "Trade #",
-      render: (r) => <span className="font-mono text-[11px]">{r.trade_number}</span>,
-    },
-    {
-      key: "order_number",
-      header: "Order #",
-      render: (r) => <span className="font-mono text-[11px] text-muted-foreground">{r.order_number || "—"}</span>,
-    },
-    { key: "user_code", header: "User" },
-    { key: "symbol", header: "Symbol" },
-    { key: "action", header: "Side", render: (r) => <StatusPill status={r.action} /> },
-    { key: "quantity", header: "Qty", align: "right" },
-    { key: "price", header: "Fill price", align: "right", render: (r) => fmtPrice(r.price) },
-    { key: "value", header: "Value", align: "right", render: (r) => formatINR(r.value) },
-    {
-      key: "total_charges",
-      header: "Brokerage",
-      align: "right",
-      render: (r) => (
-        <span title="Platform brokerage only. Configured under Admin → Brokerage and Segment Settings. No statutory charges are passed through.">
-          {formatINR(r.total_charges)}
-        </span>
-      ),
-    },
-    { key: "executed_at", header: "When", render: (r) => new Date(r.executed_at).toLocaleString() },
-  ];
-
-  return (
-    <div className="space-y-3">
-      <div className="text-xs text-muted-foreground">{data?.length ?? 0} executions</div>
-      <DataTable columns={cols} rows={pagedRows} keyExtractor={(r) => r.id} loading={isFetching && !data} />
-      <Pagination
-        page={page}
-        pageSize={pageSize}
-        total={data?.length ?? 0}
         onPageChange={setPage}
         onPageSizeChange={setPageSize}
         pageSizeOptions={[25, 50, 100, 200]}
