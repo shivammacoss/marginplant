@@ -66,28 +66,26 @@ class ZerodhaService:
       connection. If all connections are at capacity, a new one is spawned.
     """
 
-    # Zerodha WebSocket limits:
-    #   • Hard ceiling of 3000 tokens per WebSocket connection.
-    #   • Only ONE active WS per access_token. The earlier multi-connection
-    #     pool architecture spawned WS-2 / WS-3 with the same token and
-    #     Kite rejected every retry with `403 Forbidden` on the WS upgrade.
-    #     We now cap the pool at 1 connection to match the actual API
-    #     contract — anyone needing >3000 tokens has to provision more
-    #     accounts (each with its own access_token).
+    # Zerodha WebSocket limits — empirically validated, do not raise:
+    #   • 3000 tokens per WebSocket connection (hard ceiling).
+    #   • Only ONE active WS per access_token. Kite's docs say
+    #     "3 subscribers per API key" but the kiteconnect Python SDK
+    #     spawns each KiteTicker on the same Twisted reactor in-process
+    #     and Kite treats same-token sockets as duplicates — the second
+    #     and third opens fail with mixed symptoms:
+    #         1006 SSL error: passed invalid argument
+    #         1002 RSV3 set, bad opcode 12
+    #         403 Forbidden on the WS upgrade
+    #     Production proof (21-May): after MAX_WS_CONNECTIONS was
+    #     bumped 1→3 by a recent commit, market data stopped flowing
+    #     entirely within ~30s of every boot — every restart logged a
+    #     cascade of WS-1/WS-2/WS-3 close-with-1006 events as they
+    #     clashed. Rolled back to 1.
+    #   • To get >3000 live tokens you need to provision additional
+    #     Kite Connect API keys (each with its own access_token) and
+    #     shard subscriptions across them. That is the supported path.
     MAX_TOKENS_PER_WS = 3000
-    # Kite Connect allows 3 simultaneous WebSocket connections per API
-    # key. Each holds up to 3000 instruments → 9000 total live tokens.
-    # Was hardcoded to 1 (3000 cap) which on production hit `pool_size:
-    # 1, max: 1, total_active: 3000, tokens_dropped: 1` warnings as
-    # soon as user activity crossed 3000 unique tokens. Every new
-    # instrument beyond the cap then fell back to slow Zerodha REST
-    # for `get_ltp`, dragging `order validate` to 11 + seconds and
-    # tripping the risk_enforcer's auto-squareoff because by the time
-    # the order filled the market had moved several percent.
-    # 3 connections = 3× capacity AND ~3× lower per-WS pressure so
-    # KiteTicker's internal buffer doesn't backlog. Self-heal logic
-    # below grows the pool on demand up to this cap.
-    MAX_WS_CONNECTIONS = 3
+    MAX_WS_CONNECTIONS = 1
 
     def __init__(self) -> None:
         # Live tick state (populated by KiteTicker callbacks)
