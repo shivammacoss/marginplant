@@ -172,6 +172,25 @@ async def create_broker(
     new.broker_pnl_share_pct = to_decimal128(pnl_share_pct)
     await new.save()
 
+    # Snapshot the creator's current effective settings (segments + risk)
+    # into the new broker's tier-tables. Creator may be super-admin
+    # (top-level broker in platform pool), admin (top-level broker in
+    # admin's pool), or another broker (sub-broker chain). See
+    # `settings_snapshot` module docstring for the inheritance policy.
+    try:
+        from app.services.settings_snapshot import snapshot_for_new_broker
+
+        await snapshot_for_new_broker(new.id, creator=creator)
+    except Exception:
+        # Snapshot is best-effort. Boot-time backfill catches misses.
+        import logging as _lg
+
+        _lg.getLogger(__name__).exception(
+            "settings_snapshot_failed_on_broker_create broker=%s creator=%s",
+            new.id,
+            creator.id,
+        )
+
     await log_event(
         action=AuditAction.BROKER_CREATE,
         entity_type="User",

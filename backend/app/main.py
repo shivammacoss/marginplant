@@ -143,6 +143,26 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logger.exception("clamp_negative_balances_failed_continuing")
 
+    # Settings snapshot backfill: walks every existing ADMIN and BROKER
+    # that has NO rows in their tier-specific override table and seeds
+    # them with the creator's effective settings (admin ← super-admin,
+    # broker ← admin/super, sub-broker ← parent broker). Brings legacy
+    # tiers in line with the new copy-on-create policy without forcing
+    # the operator to recreate each account. Idempotent — cheap no-op
+    # on tiers that already have a row.
+    try:
+        from app.services.settings_snapshot import backfill_missing_snapshots
+
+        bf_result = await backfill_missing_snapshots()
+        if bf_result.get("admins_filled") or bf_result.get("brokers_filled"):
+            logger.info(
+                "startup_backfilled_settings_snapshots admins=%d brokers=%d",
+                bf_result.get("admins_filled", 0),
+                bf_result.get("brokers_filled", 0),
+            )
+    except Exception:
+        logger.exception("settings_snapshot_backfill_failed_continuing")
+
     # Start mock market data tick loop
     import asyncio as _asyncio
     from functools import partial as _partial

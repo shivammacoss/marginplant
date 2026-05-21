@@ -64,6 +64,26 @@ async def create_sub_admin(
     sa.pnl_share_pct = to_decimal128(pnl_share_pct)
     await sa.save()
 
+    # Snapshot the super-admin's current effective settings (segments
+    # + risk) into the new admin's tier-tables so their settings page
+    # opens populated instead of blank. The admin can edit freely from
+    # there — their edits never bubble back to super-admin, and any
+    # future super-admin edits do NOT cascade down. See
+    # `settings_snapshot` module docstring for the policy.
+    try:
+        from app.services.settings_snapshot import snapshot_for_new_admin
+
+        await snapshot_for_new_admin(sa.id, source_super_admin_id=created_by)
+    except Exception:
+        # Snapshot is best-effort — a Mongo hiccup here must not roll
+        # back the admin creation. The boot-time backfill will pick up
+        # any miss on the next deploy.
+        import logging as _lg
+
+        _lg.getLogger(__name__).exception(
+            "settings_snapshot_failed_on_admin_create admin=%s", sa.id
+        )
+
     await log_event(
         action=AuditAction.SUB_ADMIN_CREATE,
         entity_type="User",
