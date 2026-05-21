@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -29,7 +29,15 @@ function MasterLedgerInner() {
   const searchParams = useSearchParams();
   const queryUserId = searchParams?.get("user_id") ?? null;
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
   const [type, setType] = useState("");
+
+  // Reset to page 1 when switching to a different user filter, otherwise an
+  // admin landing here from a user link can hit an empty page if their
+  // previous view was deep into another user's ledger.
+  useEffect(() => {
+    setPage(1);
+  }, [queryUserId]);
 
   const { data: scopedUser } = useQuery({
     queryKey: ["admin", "user", queryUserId],
@@ -39,15 +47,18 @@ function MasterLedgerInner() {
   });
 
   const { data, isFetching } = useQuery({
-    queryKey: ["admin", "ledger", { type, page, queryUserId }],
+    queryKey: ["admin", "ledger", { type, page, pageSize, queryUserId }],
     queryFn: () =>
       LedgerAdminAPI.list({
         transaction_type: type || undefined,
         user_id: queryUserId || undefined,
         page,
-        page_size: 50,
+        page_size: pageSize,
       }),
   });
+
+  const total = data?.meta?.total ?? 0;
+  const totalPages = data?.meta?.total_pages ?? 1;
 
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ user_id: "", amount: "", transaction_type: "ADJUSTMENT", narration: "" });
@@ -187,6 +198,70 @@ function MasterLedgerInner() {
         }
       />
       <DataTable columns={cols} rows={data?.items} keyExtractor={(r) => r.id} loading={isFetching && !data} />
+
+      {total > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+          <div>
+            Showing{" "}
+            <span className="font-medium text-foreground">
+              {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, total)}
+            </span>{" "}
+            of <span className="font-medium text-foreground">{total}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-1.5">
+              <span>Rows</span>
+              <select
+                value={pageSize}
+                onChange={(e) => {
+                  setPage(1);
+                  setPageSize(Number(e.target.value));
+                }}
+                className="h-8 rounded-md border border-border bg-background px-2 text-xs"
+              >
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+                <option value={200}>200</option>
+              </select>
+            </label>
+            <span>
+              Page {page} of {totalPages}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page <= 1}
+              onClick={() => setPage(1)}
+            >
+              First
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page <= 1}
+              onClick={() => setPage((p) => p - 1)}
+            >
+              Prev
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page >= totalPages}
+              onClick={() => setPage((p) => p + 1)}
+            >
+              Next
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page >= totalPages}
+              onClick={() => setPage(totalPages)}
+            >
+              Last
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
