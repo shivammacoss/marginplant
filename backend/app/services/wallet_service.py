@@ -33,6 +33,7 @@ from app.utils.decimal_utils import (
     to_decimal,
     to_decimal128,
 )
+from app.utils.time_utils import now_utc
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +139,27 @@ async def adjust(
     before = to_decimal(w.available_balance)
     after = add(before, amt)
 
-    # ── Floor-at-0 + settlement booking ────────────────────────────────
+    # ── Auto vs Manual settlement gate ─────────────────────────────────
+    # The default `User.auto_settlement = True` runs the legacy
+    # floor-at-0 + auto-book-settlement branch below. When admin has
+    # flipped a user to `auto_settlement = False`, we instead let
+    # `available_balance` go negative and enqueue a pending
+    # SettlementRequest for manual admin approval (see
+    # `_ensure_pending_settlement_request` below).
+    auto_settlement_on = True
+    try:
+        from app.models.user import User as _User
+
+        _u = await _User.get(PydanticObjectId(user_id))
+        if _u is not None:
+            auto_settlement_on = bool(getattr(_u, "auto_settlement", True))
+    except Exception:
+        # If the user lookup itself fails treat as default-ON so we
+        # NEVER accidentally allow negative balances on a transient
+        # Mongo hiccup. Safer to over-restrict than over-permit.
+        auto_settlement_on = True
+
+    # ── Floor-at-0 + settlement booking (auto-ON branch) ──────────────
     # When a debit would push the balance below 0 we clip it to 0 and
     # send the overflow to settlement_outstanding. Two distinct cases:
     #   1) before >= 0 and after < 0 — normal "loss > balance" close.
@@ -150,7 +171,7 @@ async def adjust(
     #      keeps the migration path graceful for any wallet that was
     #      already negative before redeploy.
     settlement_booked = ZERO
-    if amt < ZERO and after < ZERO:
+    if auto_settlement_on and amt < ZERO and after < ZERO:
         if before > ZERO:
             settlement_booked = -after  # overflow past zero
             after = ZERO
@@ -158,6 +179,10 @@ async def adjust(
             # Already at or below zero — entire debit goes to settlement.
             settlement_booked = -amt
             after = max(before, ZERO)
+    # In manual mode (`auto_settlement_on == False`) we deliberately
+    # leave `after` at its raw negative value so the wallet ledger row
+    # below records the genuine shortfall. The pending
+    # SettlementRequest is queued after the wallet save.
 
     w.available_balance = to_decimal128(after)
     if settlement_booked > ZERO:
@@ -262,7 +287,260 @@ async def adjust(
             balance_after=after,
         )
     )
+
+    # ── Manual-settlement enqueue ─────────────────────────────────────
+    # In auto-OFF mode, a debit that left the wallet in red queues a
+    # pending SettlementRequest. Best-effort: a Mongo hiccup here must
+    # NOT roll back the wallet write — the admin can always re-sync
+    # later from the Payments → Settlement Requests tab (the row is
+    # re-derived from |available_balance| each time).
+    if not auto_settlement_on and after < ZERO:
+        try:
+            await _ensure_pending_settlement_request(
+                user_id=user_id,
+                narration=narration,
+                reference_type=reference_type,
+                reference_id=reference_id,
+            )
+        except Exception:  # pragma: no cover
+            logger.exception(
+                "settlement_request_enqueue_failed user=%s", user_id
+            )
+
     return txn
+
+
+async def _ensure_pending_settlement_request(
+    *,
+    user_id: str | PydanticObjectId,
+    narration: str,
+    reference_type: str | None,
+    reference_id: str | None,
+) -> None:
+    """Upsert the per-user pending SettlementRequest.
+
+    Per-user invariant: at most ONE pending row at a time (enforced by
+    the partial unique index in the model). This helper either creates
+    a fresh PENDING row or refreshes the existing one's
+    `requested_amount` to reflect the latest |available_balance|, so the
+    admin always sees the current shortfall when they open the
+    Settlement Requests tab — even after several debits have piled on
+    since the original request.
+    """
+    from app.models.transaction import SettlementRequest, SettlementStatus
+
+    uid = PydanticObjectId(user_id)
+    w = await Wallet.find_one(Wallet.user_id == uid)
+    if w is None:
+        return
+    avail = to_decimal(w.available_balance)
+    if avail >= ZERO:
+        # Wallet is back in the black — nothing to enqueue. (Possible
+        # if a winning trade or admin credit closed the gap between
+        # the debit that called us and now.)
+        return
+    shortfall = -avail  # positive
+    outstanding = to_decimal(w.settlement_outstanding)
+
+    existing = await SettlementRequest.find_one(
+        SettlementRequest.user_id == uid,
+        SettlementRequest.status == SettlementStatus.PENDING,
+    )
+    if existing is not None:
+        existing.requested_amount = to_decimal128(shortfall)
+        # Refresh the latest trigger so the admin sees the most recent
+        # cause when they read the row. The original `available_at_request`
+        # stays as the snapshot from when the row was first created.
+        existing.narration = narration or existing.narration
+        if reference_type is not None:
+            existing.reference_type = reference_type
+        if reference_id is not None:
+            existing.reference_id = reference_id
+        await existing.save()
+        logger.info(
+            "settlement_request_updated user=%s amount=%s",
+            uid,
+            shortfall,
+        )
+        return
+
+    req = SettlementRequest(
+        user_id=uid,
+        requested_amount=to_decimal128(shortfall),
+        available_at_request=to_decimal128(avail),
+        settlement_outstanding_at_request=to_decimal128(outstanding),
+        reference_type=reference_type,
+        reference_id=reference_id,
+        narration=narration,
+        status=SettlementStatus.PENDING,
+    )
+    await req.insert()
+    logger.info(
+        "settlement_request_created user=%s amount=%s",
+        uid,
+        shortfall,
+    )
+
+
+async def approve_settlement_request(
+    request_id: str | PydanticObjectId,
+    admin_id: PydanticObjectId,
+    admin_user_code: str | None = None,
+) -> WalletTransaction:
+    """Admin-side approval: do the exact floor-to-0 + settlement booking
+    that auto-mode would have done.
+
+    Reads the current `available_balance` (which should be negative for
+    a legitimate PENDING request) and:
+      • Floors available_balance to 0
+      • Adds the magnitude to settlement_outstanding
+      • Writes one SETTLEMENT_OUTSTANDING_BOOKED ledger row with
+        narration that names the approving admin
+      • Marks the SettlementRequest APPROVED + stamps approved_by /
+        approved_at
+
+    Returns the ledger row so the calling endpoint can echo it back.
+    """
+    from app.models.transaction import SettlementRequest, SettlementStatus
+
+    req = await SettlementRequest.get(PydanticObjectId(str(request_id)))
+    if req is None:
+        raise ValueError("Settlement request not found")
+    if req.status != SettlementStatus.PENDING:
+        raise ValueError(
+            f"Settlement request is {req.status.value}, not PENDING"
+        )
+
+    uid = req.user_id
+    w = await Wallet.find_one(Wallet.user_id == uid)
+    if w is None:
+        raise ValueError("Wallet not found for user")
+    avail = to_decimal(w.available_balance)
+
+    if avail >= ZERO:
+        # Wallet already self-healed (winning trade / admin credit
+        # cleared the gap). Mark the request APPROVED with a zero-
+        # magnitude record so the audit trail still shows the admin
+        # action — no money movement needed.
+        req.status = SettlementStatus.APPROVED
+        req.approved_by = admin_id
+        req.approved_at = now_utc()
+        req.requested_amount = to_decimal128(ZERO)
+        await req.save()
+        # Synthesise a marker transaction so the ledger still records
+        # the admin action.
+        marker = WalletTransaction(
+            user_id=uid,
+            transaction_type=TransactionType.SETTLEMENT_OUTSTANDING_BOOKED,
+            amount=Decimal128("0"),
+            balance_before=Decimal128(str(avail)),
+            balance_after=Decimal128(str(avail)),
+            reference_type="SettlementRequest",
+            reference_id=str(req.id),
+            narration=(
+                f"Admin {admin_user_code or admin_id} approved settlement "
+                f"request — wallet had already recovered, no booking needed"
+            ),
+            status=TransactionStatus.COMPLETED,
+            created_by=admin_id,
+        )
+        await marker.insert()
+        return marker
+
+    shortfall = -avail  # positive magnitude
+    new_outstanding = add(to_decimal(w.settlement_outstanding), shortfall)
+
+    w.available_balance = to_decimal128(ZERO)
+    w.settlement_outstanding = to_decimal128(new_outstanding)
+    w.version += 1
+    await w.save()
+
+    ledger = WalletTransaction(
+        user_id=uid,
+        transaction_type=TransactionType.SETTLEMENT_OUTSTANDING_BOOKED,
+        amount=Decimal128(str(-shortfall)),
+        balance_before=Decimal128(str(avail)),
+        balance_after=Decimal128("0"),
+        reference_type="SettlementRequest",
+        reference_id=str(req.id),
+        narration=(
+            f"Admin {admin_user_code or admin_id} approved settlement "
+            f"request — shortfall ₹{shortfall} booked to settlement"
+        ),
+        status=TransactionStatus.COMPLETED,
+        created_by=admin_id,
+    )
+    await ledger.insert()
+
+    req.status = SettlementStatus.APPROVED
+    req.approved_by = admin_id
+    req.approved_at = now_utc()
+    req.requested_amount = to_decimal128(shortfall)
+    await req.save()
+
+    asyncio.create_task(
+        _publish_wallet_event(
+            uid,
+            reason="SETTLEMENT_APPROVED",
+            amount=-shortfall,
+            balance_after=ZERO,
+        )
+    )
+    logger.info(
+        "settlement_request_approved user=%s amount=%s admin=%s",
+        uid,
+        shortfall,
+        admin_id,
+    )
+    return ledger
+
+
+async def reject_settlement_request(
+    request_id: str | PydanticObjectId,
+    admin_id: PydanticObjectId,
+    reason: str,
+) -> None:
+    """Admin-side rejection: mark the request REJECTED with the admin's
+    reason. Balance stays NEGATIVE; the user stays blocked from new
+    opening orders until a fresh debit pushes the wallet further into
+    red (which writes a brand-new PENDING request) or until they
+    deposit / win enough to bring the balance back above 0.
+    """
+    from app.models.transaction import SettlementRequest, SettlementStatus
+
+    req = await SettlementRequest.get(PydanticObjectId(str(request_id)))
+    if req is None:
+        raise ValueError("Settlement request not found")
+    if req.status != SettlementStatus.PENDING:
+        raise ValueError(
+            f"Settlement request is {req.status.value}, not PENDING"
+        )
+    req.status = SettlementStatus.REJECTED
+    req.approved_by = admin_id  # actor stamp
+    req.approved_at = now_utc()
+    req.rejected_reason = reason
+    await req.save()
+    logger.info(
+        "settlement_request_rejected user=%s admin=%s reason=%s",
+        req.user_id,
+        admin_id,
+        reason,
+    )
+
+
+async def has_pending_settlement_request(
+    user_id: str | PydanticObjectId,
+) -> bool:
+    """O(1) probe used by `order_validator` to block new opening orders
+    while a user has a PENDING settlement request hanging."""
+    from app.models.transaction import SettlementRequest, SettlementStatus
+
+    uid = PydanticObjectId(str(user_id))
+    existing = await SettlementRequest.find_one(
+        SettlementRequest.user_id == uid,
+        SettlementRequest.status == SettlementStatus.PENDING,
+    )
+    return existing is not None
 
 
 async def force_debit(
@@ -292,12 +570,35 @@ async def force_debit(
     w = await get_or_create(user_id)
     before = to_decimal(w.available_balance)
 
-    # Split: take from available first, overflow goes to outstanding.
-    from_balance = min(before, amt)
-    overflow = amt - from_balance
+    # ── Auto vs Manual settlement gate (same as adjust()) ─────────────
+    # Risk-enforcer stop-outs run through force_debit. On an auto-OFF
+    # user we still want the position to close, but we shouldn't
+    # auto-book the shortfall to `settlement_outstanding` — that's the
+    # admin's call. Instead we let `available_balance` go negative and
+    # enqueue a SettlementRequest, mirroring the adjust() OFF branch.
+    auto_settlement_on = True
+    try:
+        from app.models.user import User as _User
 
-    new_balance = before - from_balance
-    new_outstanding = to_decimal(w.settlement_outstanding) + overflow
+        _u = await _User.get(PydanticObjectId(user_id))
+        if _u is not None:
+            auto_settlement_on = bool(getattr(_u, "auto_settlement", True))
+    except Exception:
+        auto_settlement_on = True
+
+    if auto_settlement_on:
+        # Legacy split: take from available first, overflow → settlement.
+        from_balance = min(before, amt)
+        overflow = amt - from_balance
+        new_balance = before - from_balance
+        new_outstanding = to_decimal(w.settlement_outstanding) + overflow
+    else:
+        # Manual mode: full magnitude hits available, no settlement
+        # booking. The pending SettlementRequest captures the gap.
+        from_balance = amt
+        overflow = ZERO
+        new_balance = before - amt  # may go negative
+        new_outstanding = to_decimal(w.settlement_outstanding)
 
     w.available_balance = to_decimal128(new_balance)
     w.settlement_outstanding = to_decimal128(new_outstanding)
@@ -345,6 +646,22 @@ async def force_debit(
             balance_after=new_balance,
         )
     )
+
+    # Enqueue pending settlement when manual mode left the wallet in red.
+    if not auto_settlement_on and new_balance < ZERO:
+        try:
+            await _ensure_pending_settlement_request(
+                user_id=user_id,
+                narration=narration,
+                reference_type=reference_type,
+                reference_id=reference_id,
+            )
+        except Exception:  # pragma: no cover
+            logger.exception(
+                "settlement_request_enqueue_failed_on_force_debit user=%s",
+                user_id,
+            )
+
     return primary_tx  # type: ignore[return-value]
 
 

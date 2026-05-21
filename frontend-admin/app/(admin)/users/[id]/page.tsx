@@ -14,6 +14,8 @@ import {
   EyeOff,
   KeyRound,
   ListOrdered,
+  ShieldCheck,
+  ShieldOff,
   TrendingUp,
   UserCog,
 } from "lucide-react";
@@ -54,6 +56,37 @@ export default function UserDetailPage() {
     },
     onError: (e: any) => toast.error(e.message || "Failed"),
   });
+
+  // Auto-settlement toggle. Confirm before turning OFF (changes risk
+  // behaviour: balance allowed to go negative until admin manually
+  // approves each settlement from Payments → Settlement Requests).
+  const autoSettlementMut = useMutation({
+    mutationFn: (enabled: boolean) => UsersAPI.setAutoSettlement(id, enabled),
+    onSuccess: (_d, enabled) => {
+      qc.invalidateQueries({ queryKey: ["admin", "user", id] });
+      toast.success(
+        enabled
+          ? "Auto-settlement ON · wallet auto-floors at 0"
+          : "Auto-settlement OFF · settlements need your approval",
+      );
+    },
+    onError: (e: any) => toast.error(e.message || "Failed"),
+  });
+  function toggleAutoSettlement() {
+    const current = !!u?.auto_settlement;
+    if (current) {
+      // Turning OFF — confirm the operational impact.
+      const ok = window.confirm(
+        "Turn OFF auto-settlement?\n\n" +
+          "The user's wallet will be ALLOWED to go negative on losses. " +
+          "Until you manually approve each settlement from " +
+          "Payments → Settlement Requests, the user is blocked from " +
+          "opening new trades.",
+      );
+      if (!ok) return;
+    }
+    autoSettlementMut.mutate(!current);
+  }
 
   const [adjAmount, setAdjAmount] = useState("");
   const [adjNote, setAdjNote] = useState("");
@@ -168,6 +201,28 @@ export default function UserDetailPage() {
             </Button>
             <Button variant="outline" onClick={openResetDialog}>
               <KeyRound className="size-4" /> Reset password
+            </Button>
+            {/* Auto-settlement toggle — same shape as the Block button.
+                ON (default): green ShieldCheck. OFF: amber ShieldOff —
+                signals risk mode at a glance. Click runs through a
+                confirm dialog when switching ON → OFF (see
+                `toggleAutoSettlement`). */}
+            <Button
+              variant="outline"
+              onClick={toggleAutoSettlement}
+              loading={autoSettlementMut.isPending}
+              className={
+                u.auto_settlement
+                  ? ""
+                  : "border-amber-500/50 text-amber-700 dark:text-amber-300"
+              }
+            >
+              {u.auto_settlement ? (
+                <ShieldCheck className="size-4" />
+              ) : (
+                <ShieldOff className="size-4" />
+              )}
+              Auto Settlement: {u.auto_settlement ? "ON" : "OFF"}
             </Button>
             <Button
               variant={u.status === "BLOCKED" ? "default" : "destructive"}

@@ -58,6 +58,11 @@ def _ser(u: User) -> dict:
         "last_transferred_by": (
             str(u.last_transferred_by) if u.last_transferred_by else None
         ),
+        # Per-user auto-settlement toggle. Default True; when False the
+        # wallet allows negative balance and queues a SettlementRequest
+        # for admin approval. Drives the user-detail toggle button +
+        # the Payments → Settlement Requests tab.
+        "auto_settlement": bool(getattr(u, "auto_settlement", True)),
     }
 
 
@@ -336,6 +341,40 @@ async def unblock(
     await u.save()
     await log_event(
         action=AuditAction.UNBLOCK, entity_type="User", entity_id=u.id, actor_id=admin.id, target_user_id=u.id
+    )
+    return APIResponse(data=_ser(u))
+
+
+@router.post("/{user_id}/auto-settlement", response_model=APIResponse[dict])
+async def set_auto_settlement(
+    user_id: str,
+    payload: dict,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("users", "write")),
+):
+    """Toggle a user's `auto_settlement` flag (default True). When True
+    the wallet auto-floors at 0 + books shortfall to
+    `settlement_outstanding` as today. When False the wallet is allowed
+    to go negative and `wallet_service` queues a pending
+    SettlementRequest for admin approval from Payments → Settlement
+    Requests.
+
+    Payload: `{"enabled": bool}`. Audit-logged.
+    """
+    enabled = bool(payload.get("enabled"))
+    u = await assert_user_in_scope(admin, user_id)
+    old_value = bool(getattr(u, "auto_settlement", True))
+    u.auto_settlement = enabled
+    await u.save()
+    await log_event(
+        action=AuditAction.SETTING_CHANGE,
+        entity_type="User",
+        entity_id=u.id,
+        actor_id=admin.id,
+        target_user_id=u.id,
+        old_values={"auto_settlement": old_value},
+        new_values={"auto_settlement": enabled},
+        metadata={"action": "AUTO_SETTLEMENT_TOGGLE"},
     )
     return APIResponse(data=_ser(u))
 

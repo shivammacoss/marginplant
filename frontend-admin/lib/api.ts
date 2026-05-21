@@ -154,6 +154,12 @@ export const UsersAPI = {
   update: (id: string, body: any) => unwrap<any>(api.put(`/admin/users/${id}`, body)),
   block: (id: string, reason?: string) => unwrap<any>(api.post(`/admin/users/${id}/block`, { reason })),
   unblock: (id: string) => unwrap<any>(api.post(`/admin/users/${id}/unblock`)),
+  // Per-user auto-settlement toggle. ON (default): wallet auto-floors
+  // at 0 + books shortfall to settlement_outstanding. OFF: wallet
+  // allowed to go negative + a pending SettlementRequest queued for
+  // admin approval (Payments → Settlement Requests).
+  setAutoSettlement: (id: string, enabled: boolean) =>
+    unwrap<any>(api.post(`/admin/users/${id}/auto-settlement`, { enabled })),
   resetPassword: (id: string, new_password: string) =>
     unwrap<any>(api.post(`/admin/users/${id}/reset-password`, { new_password })),
   walletAdjust: (id: string, body: { amount: number; narration: string; transaction_type?: string }) =>
@@ -252,6 +258,16 @@ export const PayinOutAPI = {
     unwrap<any>(api.post(`/admin/deposits/${id}/approve`, { admin_remark })),
   rejectDeposit: (id: string, admin_remark: string) =>
     unwrap<any>(api.post(`/admin/deposits/${id}/reject`, { admin_remark })),
+  // Settlement requests — queued by wallet_service when an auto-OFF
+  // user's balance goes negative. Approval triggers the floor-to-0 +
+  // settlement booking that auto-mode would have done; rejection
+  // leaves the wallet negative (user stays blocked from new opens).
+  settlementRequests: (status?: string) =>
+    unwrap<any[]>(api.get("/admin/settlement-requests", { params: { status } })),
+  approveSettlement: (id: string) =>
+    unwrap<any>(api.post(`/admin/settlement-requests/${id}/approve`)),
+  rejectSettlement: (id: string, reason: string) =>
+    unwrap<any>(api.post(`/admin/settlement-requests/${id}/reject`, { reason })),
   withdrawals: (status?: string) => unwrap<any[]>(api.get("/admin/withdrawals", { params: { status } })),
   approveWithdrawal: (id: string, body: any) => unwrap<any>(api.post(`/admin/withdrawals/${id}/approve`, body)),
   rejectWithdrawal: (id: string, rejection_reason: string) =>

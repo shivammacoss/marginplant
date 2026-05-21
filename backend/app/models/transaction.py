@@ -173,6 +173,67 @@ class WithdrawalRequest(TimestampMixin):
         ]
 
 
+# ── 21. settlement_requests ──────────────────────────────────────────
+# A "settlement request" is queued by `wallet_service.adjust()` when a
+# user whose `User.auto_settlement == False` incurs a debit that pushes
+# `available_balance` below 0. Instead of the default auto-flow that
+# clips the balance to 0 and books the overflow into
+# `settlement_outstanding`, the wallet is left NEGATIVE and the admin
+# is asked to approve from the Payments → Settlement Requests tab.
+#
+# Per-user invariant: at most ONE pending row at a time. Successive
+# debits that grow the shortfall update the same row's `requested_amount`
+# (= |available_balance|) so the admin always sees the latest figure.
+# Enforced with a unique partial index on (user_id, status=PENDING).
+class SettlementStatus(StrEnum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
+class SettlementRequest(TimestampMixin):
+    user_id: PydanticObjectId
+
+    # |available_balance| at the moment of the latest debit that grew
+    # the shortfall. Updated in place while the row stays PENDING.
+    # Frozen at the value the admin saw the instant they hit Approve.
+    requested_amount: Money = Field(default_factory=_zero)
+
+    # Snapshot of the wallet at request time — useful for audit when
+    # the operator wants to know how the user landed in this state.
+    available_at_request: Money = Field(default_factory=_zero)
+    settlement_outstanding_at_request: Money = Field(default_factory=_zero)
+
+    # What triggered the most recent shortfall growth. Mirrors the
+    # WalletTransaction.reference_* fields so the admin row can link
+    # back to the closing order / trade that pushed the user into red.
+    reference_type: str | None = None  # "ORDER" / "PNL" / "CHARGES"
+    reference_id: str | None = None
+    narration: str = ""
+
+    status: SettlementStatus = SettlementStatus.PENDING
+    approved_by: PydanticObjectId | None = None
+    approved_at: datetime | None = None
+    rejected_reason: str | None = None
+
+    class Settings:
+        name = "settlement_requests"
+        indexes = [
+            IndexModel([("status", ASCENDING), ("created_at", DESCENDING)]),
+            IndexModel([("user_id", ASCENDING), ("created_at", DESCENDING)]),
+            # Structural one-pending-per-user guarantee: the partial
+            # filter limits the unique constraint to PENDING rows
+            # only, so an APPROVED + a new PENDING on the same user
+            # are both legal — but two PENDING ones are not.
+            IndexModel(
+                [("user_id", ASCENDING)],
+                unique=True,
+                partialFilterExpression={"status": "PENDING"},
+                name="settlement_one_pending_per_user",
+            ),
+        ]
+
+
 # ── 22. wd_rules ─────────────────────────────────────────────────────
 class WdRuleType(StrEnum):
     DEPOSIT = "DEPOSIT"

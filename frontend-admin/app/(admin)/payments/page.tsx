@@ -8,11 +8,18 @@ import { WithdrawalsPanel } from "@/components/admin/payments/WithdrawalsPanel";
 import { RejectedPanel } from "@/components/admin/payments/RejectedPanel";
 import { HistoryPanel } from "@/components/admin/payments/HistoryPanel";
 import { BankAccountsPanel } from "@/components/admin/payments/BankAccountsPanel";
+import { SettlementRequestsPanel } from "@/components/admin/payments/SettlementRequestsPanel";
 import { cn } from "@/lib/utils";
 import { useAdminAuthStore } from "@/stores/authStore";
 import { canSee, type PermissionKey } from "@/lib/permissions";
 
-type Tab = "deposits" | "withdrawals" | "history" | "rejected" | "banks";
+type Tab =
+  | "deposits"
+  | "withdrawals"
+  | "settlements"
+  | "history"
+  | "rejected"
+  | "banks";
 
 type TabDef = {
   id: Tab;
@@ -27,6 +34,13 @@ type TabDef = {
 const TABS: TabDef[] = [
   { id: "deposits", label: "Deposits", description: "User-initiated deposit requests — review proof, approve to credit wallet, or reject with reason.", perm: "deposits" },
   { id: "withdrawals", label: "Withdrawals", description: "User withdrawal requests — verify bank, approve with UTR to debit, or reject with reason.", perm: "withdrawals" },
+  // Settlement Requests — queued automatically when an `auto_settlement
+  // = false` user's wallet goes negative. Admin approval is what
+  // floors the wallet to 0 and books the shortfall into
+  // settlement_outstanding (the auto-mode flow lives in wallet_service).
+  // Reuses the `deposits` permission key — same operator group already
+  // owns the cash-flow approvals queue.
+  { id: "settlements", label: "Settlement Requests", description: "Pending settlements from auto-OFF users awaiting admin approval. Approve floors the balance to ₹0 and books the shortfall.", perm: "deposits" },
   { id: "history", label: "History", description: "Unified ledger of every deposit and withdrawal across all users — filterable by type, status, user or UTR." },
   { id: "rejected", label: "Rejected", description: "Read-only history of all rejected deposits and withdrawals with the reason given." },
   { id: "banks", label: "Bank Accounts", description: "Bank accounts, UPI IDs and QR codes shown to users on the deposit form.", perm: "banks" },
@@ -80,6 +94,7 @@ export default function PaymentsPage() {
 
       {tab === "deposits" && <DepositsPanel />}
       {tab === "withdrawals" && <WithdrawalsPanel />}
+      {tab === "settlements" && <SettlementRequestsPanel />}
       {tab === "history" && <HistoryPanel />}
       {tab === "rejected" && <RejectedPanel />}
       {tab === "banks" && <BankAccountsPanel />}

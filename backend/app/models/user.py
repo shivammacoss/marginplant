@@ -218,6 +218,21 @@ class User(TimestampMixin):
     broker_permissions: BrokerPermissions | None = None
     broker_pnl_share_pct: Decimal128 | None = None  # 0..100
 
+    # Per-user "auto settle" toggle (default ON). When True (default),
+    # `wallet_service.adjust()` floors any debit that would push
+    # available_balance below 0 and books the overflow into
+    # settlement_outstanding automatically — that's the existing
+    # 21-May floor-at-0 behaviour every legacy user runs.
+    #
+    # When False (admin opt-out via the user-detail toggle), the
+    # wallet is allowed to go NEGATIVE. The same path queues a
+    # pending `SettlementRequest` instead so the admin can manually
+    # approve from the Payments → Settlement Requests tab. While a
+    # PENDING request exists the order validator refuses new-opening
+    # orders (closing trades still pass through via the existing
+    # `is_reducing` exemption).
+    auto_settlement: bool = True
+
     class Settings:
         name = "users"
         use_state_management = True

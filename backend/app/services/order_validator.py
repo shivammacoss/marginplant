@@ -221,6 +221,34 @@ async def validate(
             code="EXIT_ONLY_MODE",
         )
 
+    # ── Settlement-pending gate ────────────────────────────────────
+    # When `User.auto_settlement == False` and a debit has left the
+    # wallet's available_balance below 0, `wallet_service` queues a
+    # PENDING SettlementRequest. While that row exists the user is
+    # blocked from new OPENING trades — only `is_reducing` (closing /
+    # partial close) or `is_squareoff` (admin / risk auto-flatten)
+    # orders pass through, mirroring the exit-only-mode exemption
+    # pattern just above. Admin clears the block by approving the
+    # request from Payments → Settlement Requests.
+    if not is_reducing and not is_squareoff:
+        try:
+            from app.services import wallet_service as _ws
+
+            if await _ws.has_pending_settlement_request(user.id):
+                raise OrderRejectedError(
+                    "Settlement pending — close existing positions or "
+                    "wait for admin approval before opening new trades",
+                    code="SETTLEMENT_PENDING",
+                )
+        except OrderRejectedError:
+            raise
+        except Exception:  # pragma: no cover
+            # A Mongo hiccup on the probe must NOT block legitimate
+            # orders. Fail-open is acceptable here because the
+            # downstream `wallet_service.adjust` will still gate via
+            # InsufficientFundsError if margin can't be sourced.
+            pass
+
     # ── Block gate (segment level): tradingEnabled = false ────────
     # Admin paused this segment. Existing positions can still be closed
     # (the user can exit their book) but no new entries are allowed.

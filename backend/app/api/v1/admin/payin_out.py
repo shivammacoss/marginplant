@@ -22,6 +22,8 @@ from app.models.bank_account import CompanyBankAccount
 from app.models.transaction import (
     DepositRequest,
     DepositStatus,
+    SettlementRequest,
+    SettlementStatus,
     TransactionType,
     WdRule,
     WithdrawalRequest,
@@ -183,6 +185,184 @@ async def reject_deposit(
     except Exception:  # pragma: no cover
         pass
     return APIResponse(data={"id": str(r.id), "status": r.status.value})
+
+
+# ── Settlement Requests ─────────────────────────────────────────────
+# Pending settlements queued by `wallet_service.adjust()` / `force_debit`
+# when a user with `User.auto_settlement = False` incurs a debit that
+# pushes available_balance below 0. Admin approves from the Payments
+# → Settlement Requests tab. Reuses the deposit `deposits` permission
+# key — same operator group already manages cash-flow approvals.
+@router.get("/settlement-requests", response_model=APIResponse[list])
+async def list_settlement_requests(
+    admin: CurrentAdmin,
+    status: str | None = "PENDING",
+    limit: int = 200,
+    _: None = Depends(require_perm("deposits", "read")),
+):
+    q: dict[str, Any] = {}
+    if status:
+        q["status"] = status
+    scope = await scoped_user_ids(admin)
+    if scope is not None:
+        if not scope:
+            return APIResponse(data=[])
+        q["user_id"] = {"$in": scope}
+    rows = (
+        await SettlementRequest.find(q)
+        .sort("-created_at")
+        .limit(limit)
+        .to_list()
+    )
+    owner_map = await build_owner_map([r.user_id for r in rows])
+
+    # Pull each user's CURRENT available_balance so the admin sees the
+    # live shortfall (the request's `requested_amount` is updated on
+    # every debit but a fresh read is safer at approval time).
+    from app.models.wallet import Wallet
+
+    user_ids = list({r.user_id for r in rows})
+    wallets = (
+        await Wallet.find({"user_id": {"$in": user_ids}}).to_list()
+        if user_ids
+        else []
+    )
+    wallet_map = {str(w.user_id): w for w in wallets}
+
+    return APIResponse(
+        data=[
+            {
+                "id": str(r.id),
+                "user_id": str(r.user_id),
+                "requested_amount": str(r.requested_amount),
+                "available_at_request": str(r.available_at_request),
+                "current_available": (
+                    str(wallet_map[str(r.user_id)].available_balance)
+                    if str(r.user_id) in wallet_map
+                    else None
+                ),
+                "settlement_outstanding_at_request": str(
+                    r.settlement_outstanding_at_request
+                ),
+                "reference_type": r.reference_type,
+                "reference_id": r.reference_id,
+                "narration": r.narration,
+                "status": r.status.value,
+                "approved_by": str(r.approved_by) if r.approved_by else None,
+                "approved_at": r.approved_at,
+                "rejected_reason": r.rejected_reason,
+                "created_at": r.created_at,
+                **owner_fields(owner_map.get(str(r.user_id))),
+            }
+            for r in rows
+        ]
+    )
+
+
+@router.post(
+    "/settlement-requests/{request_id}/approve",
+    response_model=APIResponse[dict],
+)
+async def approve_settlement(
+    request_id: str,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("deposits", "write")),
+):
+    r = await SettlementRequest.get(PydanticObjectId(request_id))
+    if r is None:
+        raise HTTPException(status_code=404, detail="Settlement request not found")
+    await assert_user_in_scope(admin, r.user_id)
+    if r.status != SettlementStatus.PENDING:
+        raise HTTPException(status_code=400, detail="Already processed")
+
+    # Delegated to wallet_service so the floor-to-0 + ledger write +
+    # SettlementRequest stamp + WS push all happen atomically (as a
+    # unit — Mongo here is single-replica so there's no transaction
+    # guard either way).
+    try:
+        await wallet_service.approve_settlement_request(
+            r.id, admin.id, admin_user_code=admin.user_code
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    await log_event(
+        action=AuditAction.APPROVE,
+        entity_type="SettlementRequest",
+        entity_id=r.id,
+        actor_id=admin.id,
+        target_user_id=r.user_id,
+        metadata={"requested_amount": str(r.requested_amount)},
+    )
+
+    # Fan-out so any other admin watching the Settlement Requests tab
+    # sees the row flip from PENDING → APPROVED without F5.
+    try:
+        from app.services.admin_events import publish_admin_event
+
+        await publish_admin_event(
+            "settlement_update",
+            {
+                "event": "approved",
+                "user_id": str(r.user_id),
+                "request_id": str(r.id),
+            },
+        )
+    except Exception:  # pragma: no cover
+        pass
+
+    return APIResponse(data={"id": str(r.id), "status": "APPROVED"})
+
+
+@router.post(
+    "/settlement-requests/{request_id}/reject",
+    response_model=APIResponse[dict],
+)
+async def reject_settlement(
+    request_id: str,
+    payload: dict,
+    admin: CurrentAdmin,
+    _: None = Depends(require_perm("deposits", "write")),
+):
+    reason = (payload.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Reason is required")
+    r = await SettlementRequest.get(PydanticObjectId(request_id))
+    if r is None:
+        raise HTTPException(status_code=404, detail="Settlement request not found")
+    await assert_user_in_scope(admin, r.user_id)
+    if r.status != SettlementStatus.PENDING:
+        raise HTTPException(status_code=400, detail="Already processed")
+
+    try:
+        await wallet_service.reject_settlement_request(r.id, admin.id, reason)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    await log_event(
+        action=AuditAction.REJECT,
+        entity_type="SettlementRequest",
+        entity_id=r.id,
+        actor_id=admin.id,
+        target_user_id=r.user_id,
+        metadata={"reason": reason},
+    )
+
+    try:
+        from app.services.admin_events import publish_admin_event
+
+        await publish_admin_event(
+            "settlement_update",
+            {
+                "event": "rejected",
+                "user_id": str(r.user_id),
+                "request_id": str(r.id),
+            },
+        )
+    except Exception:  # pragma: no cover
+        pass
+
+    return APIResponse(data={"id": str(r.id), "status": "REJECTED"})
 
 
 # ── Withdrawals ─────────────────────────────────────────────────────
