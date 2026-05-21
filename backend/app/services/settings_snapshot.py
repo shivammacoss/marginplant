@@ -76,12 +76,19 @@ _RISK_FIELDS = list(RiskSettingsBase.model_fields.keys())
 async def _segment_seed_dict(segment_name: str) -> dict[str, Any]:
     """Platform seed values for a segment, dumped as a dict that maps
     directly onto NettingFieldsBase. Source of last resort when a tier
-    has no override of its own."""
-    seg = await NettingSegment.find_one(NettingSegment.segment_name == segment_name)
+    has no override of its own.
+
+    NB: ``NettingSegment``'s key column is ``name`` (e.g. "NSE_EQ") —
+    NOT ``segment_name`` like the per-tier override tables. Using the
+    wrong field raises ``AttributeError: segment_name`` at query
+    construction because Beanie probes the model class for the
+    attribute before issuing the find.
+    """
+    seg = await NettingSegment.find_one(NettingSegment.name == segment_name)
     if seg is None:
         return {}
     # Only carry fields that are part of the overlay shape — drops
-    # `segment_name`, timestamps, etc.
+    # `name`, `displayName`, timestamps, etc.
     full = seg.model_dump()
     return {k: full.get(k) for k in _SEGMENT_FIELDS}
 
@@ -375,26 +382,37 @@ async def snapshot_for_new_broker(
 
 
 async def backfill_missing_snapshots() -> dict[str, int]:
-    """Boot-time migration. Walks every ADMIN and BROKER user that does
-    NOT yet have at least one segment override row, and runs the
-    appropriate snapshot. Cheap no-op on already-snapshotted tiers
-    (the per-row upserts use unique-index check).
+    """Boot-time migration. Walks every ADMIN and BROKER user and runs
+    the snapshot helper if their tier-tables don't yet cover all 13
+    segments. Cheap no-op on tiers that already have the full set
+    (the per-row upserts skip existing rows).
 
-    Why: when this feature ships, existing admins/brokers see blank
-    settings pages because their tier tables were never populated.
-    This migration brings them in line with the new behaviour without
-    needing the operator to recreate each user.
+    The previous version checked "find_one returns something → skip"
+    which left partial-fill rows behind whenever a single segment
+    failed during the original snapshot. Counting rows against the
+    expected total catches that — re-running the snapshot will fill
+    in the missing segments without touching the existing ones.
+
+    Why this exists: when this feature shipped, every existing
+    admin / broker had a blank settings page because their tier
+    tables were never populated. The backfill brings them in line
+    with the new copy-on-create behaviour without forcing the
+    operator to recreate each account. The per-segment count check
+    also recovers from any boot where the snapshot crashed
+    mid-segment (e.g. the 21-May `AttributeError: segment_name`
+    bug, which left several admins at 0–3 segments before the fix).
     """
+    expected = len(SEGMENT_CODES)
     admins = await User.find(User.role == UserRole.ADMIN).to_list()
     brokers = await User.find(User.role == UserRole.BROKER).to_list()
 
     admin_filled = 0
     for a in admins:
         try:
-            existing = await SubAdminSegmentOverride.find_one(
+            have = await SubAdminSegmentOverride.find(
                 SubAdminSegmentOverride.sub_admin_id == a.id
-            )
-            if existing is not None:
+            ).count()
+            if have >= expected:
                 continue
             await snapshot_for_new_admin(a.id)
             admin_filled += 1
@@ -404,10 +422,10 @@ async def backfill_missing_snapshots() -> dict[str, int]:
     broker_filled = 0
     for b in brokers:
         try:
-            existing = await BrokerSegmentOverride.find_one(
+            have = await BrokerSegmentOverride.find(
                 BrokerSegmentOverride.broker_id == b.id
-            )
-            if existing is not None:
+            ).count()
+            if have >= expected:
                 continue
             # Resolve the creator from the broker's ancestry / assignment.
             creator: User | None = None
@@ -434,3 +452,35 @@ async def backfill_missing_snapshots() -> dict[str, int]:
             broker_filled,
         )
     return {"admins_filled": admin_filled, "brokers_filled": broker_filled}
+
+
+async def repair_null_seed_rows() -> dict[str, int]:
+    """One-shot repair for rows written by the buggy 21-May boot where
+    ``_segment_seed_dict`` returned an empty dict (the
+    ``NettingSegment.segment_name`` → ``name`` bug). Those rows have
+    ``intradayMargin`` AND ``isActive`` BOTH null — neither value
+    survives a properly resolved snapshot, so this combination is a
+    reliable fingerprint.
+
+    Walks both SubAdminSegmentOverride and BrokerSegmentOverride,
+    deletes rows matching the fingerprint, and lets the next
+    ``backfill_missing_snapshots`` run regenerate them from the live
+    cascade. Safe: any tier that had a real admin-set override stays
+    untouched because at least one of those two fields will be
+    populated.
+    """
+    coll_admin = SubAdminSegmentOverride.get_motor_collection()
+    coll_broker = BrokerSegmentOverride.get_motor_collection()
+    bad_filter = {"intradayMargin": None, "isActive": None}
+    admin_deleted = (await coll_admin.delete_many(bad_filter)).deleted_count
+    broker_deleted = (await coll_broker.delete_many(bad_filter)).deleted_count
+    if admin_deleted or broker_deleted:
+        logger.info(
+            "settings_snapshot_repaired_null_seed admin=%d broker=%d",
+            admin_deleted,
+            broker_deleted,
+        )
+    return {
+        "admin_deleted": admin_deleted,
+        "broker_deleted": broker_deleted,
+    }

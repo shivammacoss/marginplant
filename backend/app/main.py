@@ -144,14 +144,29 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         logger.exception("clamp_negative_balances_failed_continuing")
 
     # Settings snapshot backfill: walks every existing ADMIN and BROKER
-    # that has NO rows in their tier-specific override table and seeds
-    # them with the creator's effective settings (admin ← super-admin,
-    # broker ← admin/super, sub-broker ← parent broker). Brings legacy
-    # tiers in line with the new copy-on-create policy without forcing
-    # the operator to recreate each account. Idempotent — cheap no-op
-    # on tiers that already have a row.
+    # and ensures their tier-specific override table has one row per
+    # segment, seeded from the creator's effective settings
+    # (admin ← super-admin, broker ← admin/super, sub-broker ← parent
+    # broker). Brings legacy tiers in line with the new copy-on-create
+    # policy without forcing the operator to recreate each account.
+    # Idempotent — per-segment upserts skip rows that already exist.
+    #
+    # `repair_null_seed_rows` runs FIRST to delete rows written by the
+    # buggy 21-May boot (NettingSegment.segment_name → name) so the
+    # subsequent backfill regenerates them with the seed values.
     try:
-        from app.services.settings_snapshot import backfill_missing_snapshots
+        from app.services.settings_snapshot import (
+            backfill_missing_snapshots,
+            repair_null_seed_rows,
+        )
+
+        repair = await repair_null_seed_rows()
+        if repair.get("admin_deleted") or repair.get("broker_deleted"):
+            logger.info(
+                "startup_repaired_null_seed_rows admin=%d broker=%d",
+                repair.get("admin_deleted", 0),
+                repair.get("broker_deleted", 0),
+            )
 
         bf_result = await backfill_missing_snapshots()
         if bf_result.get("admins_filled") or bf_result.get("brokers_filled"):
