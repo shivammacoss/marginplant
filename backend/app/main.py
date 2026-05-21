@@ -124,43 +124,23 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logger.exception("heal_pnl_sharing_agreement_type_failed_continuing")
 
-    # Wallet floor migration: clamp any wallet still showing a negative
-    # available_balance up to 0 and book the shortfall as settlement.
-    # Catches users left in a bad state by the pre-fix code path where
-    # credit_limit was allowed to mask a negative balance. Idempotent —
-    # cheap no-op once all wallets are at or above 0.
-    try:
-        from app.services.wallet_service import (
-            clamp_negative_balances_to_settlement,
-        )
-
-        clamp_result = await clamp_negative_balances_to_settlement()
-        if clamp_result.get("fixed"):
-            logger.info(
-                "startup_clamped_negative_wallets fixed=%d",
-                clamp_result["fixed"],
-            )
-    except Exception:
-        logger.exception("clamp_negative_balances_failed_continuing")
-
-    # Realized P&L backfill: until 21-May `adjust()` never updated
-    # `wallet.realized_pnl` on PNL transactions, so every wallet showed
-    # ₹0 realized P&L regardless of actual trading. This walks the
-    # `wallet_transactions` ledger, sums PNL per user, and writes the
-    # correct cumulative figure onto each wallet. Idempotent — cheap
-    # no-op on every boot after the first one that repairs the drift.
-    try:
-        from app.services.wallet_service import recompute_realized_pnl_for_all
-
-        rp_result = await recompute_realized_pnl_for_all()
-        if rp_result.get("repaired"):
-            logger.info(
-                "startup_repaired_realized_pnl scanned=%d repaired=%d",
-                rp_result.get("scanned", 0),
-                rp_result.get("repaired", 0),
-            )
-    except Exception:
-        logger.exception("realized_pnl_backfill_failed_continuing")
+    # ── Historical wallet migrations: DISABLED 21-May per operator ───
+    # Operator decision (after seeing MEHUL/CL62477932 state):
+    #     "esse pehle vale logic galat tha settlement aaj se start
+    #      karo, ab se next trade se pehle ka rehne do"
+    # i.e. leave any existing wallet state — available_balance,
+    # used_margin, settlement_outstanding, realized_pnl — exactly as
+    # it is right now. The new floor-at-0 / route-to-settlement rule
+    # in `wallet_service.adjust()` applies ONLY to new debits from
+    # this point forward. No retroactive clamping, no retroactive
+    # PnL backfill that could re-rewrite tracker fields.
+    #
+    # The helpers themselves stay in `wallet_service` so an operator
+    # can run them manually later if they ever want to bulk-repair —
+    # but the boot hooks are gone so a redeploy never silently
+    # mutates user balances. Functions to call manually if needed:
+    #   • wallet_service.clamp_negative_balances_to_settlement()
+    #   • wallet_service.recompute_realized_pnl_for_all()
 
     # Settings snapshot backfill: walks every existing ADMIN and BROKER
     # and ensures their tier-specific override table has one row per
