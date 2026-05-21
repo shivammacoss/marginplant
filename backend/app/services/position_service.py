@@ -720,20 +720,30 @@ async def convert_intraday_to_carry(segment_set: frozenset[str] | set[str]) -> d
 
         # Compute the overnight margin requirement against the same
         # notional that's currently locked. Mirrors order_validator's
-        # fixed-mode vs percent-vs-times logic.
+        # fixed-mode vs percent-vs-times logic — BUT we read the
+        # `overnight_*` triple, not the product-aware `leverage` /
+        # `margin_percentage` / `fixed_margin_per_lot`. In Times mode the
+        # resolver deliberately keeps those product-aware fields on the
+        # INTRADAY value (the "symmetric-Times patch"), so reading them
+        # here returned 500× for an MCX FUT row whose admin had set
+        # 500× intraday / 70× overnight — and the loop computed
+        # delta=0 and silently skipped force-close. Reading the
+        # explicit overnight fields gives the rollover the right
+        # requirement so a wallet that can't cover the carry actually
+        # triggers the force-squareoff branch below.
         cur_avg = to_decimal(pos.avg_price)
         cur_qty_abs = to_decimal(abs(pos.quantity))
         notional = cur_avg * cur_qty_abs
 
-        fixed_per_lot = to_decimal(s.get("fixed_margin_per_lot") or 0)
-        if (s.get("margin_calc_mode") == "fixed") and fixed_per_lot > 0:
+        ovn_fixed_per_lot = to_decimal(s.get("overnight_fixed_margin_per_lot") or 0)
+        if (s.get("margin_calc_mode") == "fixed") and ovn_fixed_per_lot > 0:
             lot_size = max(1, int(pos.instrument.lot_size or 1))
             lots = cur_qty_abs / to_decimal(lot_size)
-            new_margin = fixed_per_lot * lots
+            new_margin = ovn_fixed_per_lot * lots
         else:
-            margin_pct = to_decimal(s.get("margin_percentage") or 100.0) / to_decimal(100)
-            leverage = to_decimal(s.get("leverage") or 1.0) or to_decimal(1)
-            new_margin = notional * margin_pct / leverage
+            ovn_margin_pct = to_decimal(s.get("overnight_margin_percentage") or 100.0) / to_decimal(100)
+            ovn_leverage = to_decimal(s.get("overnight_leverage") or 1.0) or to_decimal(1)
+            new_margin = notional * ovn_margin_pct / ovn_leverage
 
         # USD-quoted instruments lock margin in INR; same conversion as
         # order_validator.validate. Skipped for fixed-per-lot (already INR).
@@ -741,7 +751,7 @@ async def convert_intraday_to_carry(segment_set: frozenset[str] | set[str]) -> d
             is_usd_quoted_segment(pos.segment_type)
             or is_usd_quoted_segment(pos.instrument.segment)
         ):
-            if not ((s.get("margin_calc_mode") == "fixed") and fixed_per_lot > 0):
+            if not ((s.get("margin_calc_mode") == "fixed") and ovn_fixed_per_lot > 0):
                 from app.services.market_data_service import get_usd_inr_rate
 
                 new_margin = new_margin * to_decimal(get_usd_inr_rate())

@@ -214,7 +214,37 @@ export function OrderPanel({ instrument, ltp, bid, ask, fxRate }: Props) {
     return +(((lotSize * (refPrice || ltp || 0) * serverMarginPct) / serverLeverage) * fxMultiplier).toFixed(2);
   }, [marginCalcMode, fixedMarginPerLot, lotSize, refPrice, ltp, serverMarginPct, serverLeverage, fxMultiplier]);
   const intradayMargin = +(marginPerLot * lots).toFixed(2);
-  const carryforwardMargin = +(intradayMargin * 1.4).toFixed(2);
+  // Carry-forward margin uses the OVERNIGHT triple from segment settings
+  // — same shape as the intraday calc but reads the `overnight_*` fields
+  // the admin matrix exposes (Fixed ₹/lot OR Times-leverage OR legacy
+  // percent). The old `intradayMargin × 1.4` heuristic was only right
+  // for NSE equity tiers; on MCX FUT with Intraday=500× / Overnight=70×
+  // it under-reported by ~7× and let users open positions they couldn't
+  // afford to carry past the rollover.
+  const ovnFixedPerLot = Number(effSettings?.overnight_fixed_margin_per_lot ?? 0);
+  const ovnLeverage = Number(effSettings?.overnight_leverage ?? 1) || 1;
+  const ovnMarginPct =
+    effSettings?.overnight_margin_percentage != null
+      ? Number(effSettings.overnight_margin_percentage) / 100
+      : 1;
+  const carryforwardMargin = useMemo(() => {
+    if (marginCalcMode === "fixed" && ovnFixedPerLot > 0) {
+      return +(ovnFixedPerLot * lots).toFixed(2);
+    }
+    const perLotCarry =
+      ((lotSize * (refPrice || ltp || 0) * ovnMarginPct) / ovnLeverage) * fxMultiplier;
+    return +(perLotCarry * lots).toFixed(2);
+  }, [
+    marginCalcMode,
+    ovnFixedPerLot,
+    ovnMarginPct,
+    ovnLeverage,
+    lotSize,
+    refPrice,
+    ltp,
+    fxMultiplier,
+    lots,
+  ]);
   // `notional` is in the instrument's quote currency. For USD-quoted segments
   // (crypto / forex / spot metals / energy) that's dollars; for Indian segments
   // it's already rupees. The breakdown tile renders everything with ₹, so we

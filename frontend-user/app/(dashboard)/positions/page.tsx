@@ -127,18 +127,22 @@ const CLOSE_REASON_META: Record<
   },
 };
 
-// Overnight (carry-forward) margin estimate for a single position or
-// active-trade row. MIS blocks ~40% less margin intraday than NRML, so
-// rolling a MIS position past 3:20 PM needs roughly 1.4× the current
-// block; NRML/CNC already sits at full margin so it's unchanged. Used
-// by the per-position "Holding Margin" tile AND the wallet strip's CF
-// Required aggregate so both stay in lockstep — previously the strip
-// summed `margin_used` (intraday) which made it identical to the Used
-// Margin tile and meaningless as a CF indicator.
+// Overnight (carry-forward) margin requirement for a single position or
+// active-trade row. PREFERS the backend-computed `holding_margin` value
+// (resolved per-position against the user's effective overnight margin
+// settings — MCX FUT 70× / NSE OPT 100% / Fixed-per-lot, whatever the
+// admin matrix said). The old client-side `intraday × 1.4` heuristic
+// was a guess that matched NSE equity but was wildly wrong on MCX
+// (operator's CRUDEOIL row showed ₹2,648 instead of ₹13,511).
+// Falls back to the locked intraday margin if the backend hasn't
+// stamped a value yet (stale cached payloads from before the upgrade).
 function holdingMarginFor(row: any): number {
-  const used = Number(row?.margin_used ?? row?.margin ?? row?.used_margin ?? 0);
-  const isMIS = String(row?.product_type ?? "").toUpperCase() === "MIS";
-  return isMIS ? +(used * 1.4).toFixed(2) : used;
+  const stamped = row?.holding_margin;
+  if (stamped !== null && stamped !== undefined && stamped !== "") {
+    const n = Number(stamped);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return Number(row?.margin_used ?? row?.margin ?? row?.used_margin ?? 0);
 }
 
 function CloseReasonChip({ reason }: { reason?: string | null }) {
@@ -871,12 +875,7 @@ export default function PositionsPage() {
       key: "holding_margin",
       header: "Holding",
       align: "right",
-      render: (r) => {
-        const used = Number(r.margin ?? r.used_margin ?? r.margin_used ?? 0);
-        const isMIS = String(r.product_type ?? "").toUpperCase() === "MIS";
-        const holding = isMIS ? +(used * 1.4).toFixed(2) : used;
-        return formatINR(holding);
-      },
+      render: (r) => formatINR(holdingMarginFor(r)),
     },
     {
       key: "pnl",

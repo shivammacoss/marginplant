@@ -15,7 +15,7 @@ from app.models.position import Position, PositionStatus
 from app.models.trade import Trade
 from app.schemas.common import APIResponse
 from app.schemas.trading import HoldingOut, PositionOut
-from app.services import audit_service, market_data_service, order_service, position_service
+from app.services import audit_service, market_data_service, netting_service, order_service, position_service
 from app.utils.decimal_utils import to_decimal
 
 router = APIRouter(prefix="/positions", tags=["user-positions"])
@@ -271,8 +271,31 @@ async def open_positions(user: CurrentUser):
         return_exceptions=True,
     )
 
+    # Resolve each row's effective overnight margin in parallel so we can
+    # stamp a real `holding_margin` field on every position. Used to be
+    # computed frontend-side as `intraday × 1.4` for MIS (and as-is for
+    # NRML), which was a guess that only matched NSE equity tiers — and
+    # diverged badly on MCX FUT where the operator had set Intraday=500×,
+    # Overnight=70× (carry-forward needs ~7× the locked intraday).
+    # Resolver result is cached 5 min per (user, segment, symbol, side,
+    # product), so this stays cheap on subsequent reloads.
+    ovn_resolved = await asyncio.gather(
+        *[
+            netting_service.get_effective_settings(
+                r.user_id,
+                r.instrument.segment,
+                action="BUY" if r.quantity >= 0 else "SELL",
+                option_type=None,
+                product_type="NRML",
+                symbol=r.instrument.symbol,
+            )
+            for r in rows
+        ],
+        return_exceptions=True,
+    )
+
     out = []
-    for r in rows:
+    for r, resolved in zip(rows, ovn_resolved):
         d = _pos(r)
         k = (r.instrument.token, str(r.product_type.value))
         charges_amt = charges_map.get(k, 0.0)
@@ -291,6 +314,43 @@ async def open_positions(user: CurrentUser):
                 d["realized_pnl"] = f"{float(d['realized_pnl']) - charges_amt:.2f}"
             except (TypeError, ValueError):
                 pass
+
+        # ── Carry-forward margin (the "Holding Margin" tile) ──
+        # Compute against the same notional currently locked, using the
+        # OVERNIGHT triple from the resolver. The resolver keeps the
+        # product-aware `leverage` on the INTRADAY value in Times mode
+        # (symmetric-Times patch in netting_service), so we MUST read
+        # the explicit overnight fields, otherwise an MCX FUT row with
+        # 500× intraday / 70× overnight reports holding = intraday and
+        # the user has no warning before the EOD rollover force-closes.
+        holding_margin = float(d.get("margin_used") or 0.0)
+        if not isinstance(resolved, BaseException) and resolved is not None:
+            s = (resolved.get("settings") if isinstance(resolved, dict) else None) or {}
+            try:
+                avg_native = float(str(r.avg_price))
+                qty_abs = abs(float(r.quantity))
+                notional = avg_native * qty_abs
+                mode = s.get("margin_calc_mode") or "times"
+                ovn_fixed = float(s.get("overnight_fixed_margin_per_lot") or 0)
+                if mode == "fixed" and ovn_fixed > 0:
+                    lot_size = max(1, int(getattr(r.instrument, "lot_size", 1) or 1))
+                    lots = qty_abs / lot_size
+                    cf = ovn_fixed * lots
+                else:
+                    ovn_pct = float(s.get("overnight_margin_percentage") or 100.0) / 100.0
+                    ovn_lev = float(s.get("overnight_leverage") or 1.0) or 1.0
+                    cf = notional * ovn_pct / ovn_lev
+                    # USD-quoted instruments — convert to INR like the
+                    # validator does at order time (fixed-per-lot is
+                    # already admin-entered in INR so it's skipped).
+                    if market_data_service.is_usd_quoted_segment(r.segment_type) or \
+                            market_data_service.is_usd_quoted_segment(r.instrument.segment):
+                        cf = cf * market_data_service.get_usd_inr_rate()
+                holding_margin = round(cf, 2)
+            except Exception:
+                pass
+        d["holding_margin"] = f"{holding_margin:.2f}"
+
         out.append(d)
     return APIResponse(data=out)
 
