@@ -80,14 +80,52 @@ router = APIRouter(tags=["admin-trading"])
 async def list_orders(
     admin: CurrentAdmin,
     status: str | None = None,
+    statuses: str | None = None,
+    sl_tp: bool = False,
     user_id: str | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     _: None = Depends(require_perm("trading_view", "read")),
 ):
+    """Admin orders monitor — paginated.
+
+    Filter params:
+      • `status`    — single status filter (back-compat with old UI)
+      • `statuses`  — CSV of statuses; drives the new tab UI which
+                      bundles "Pending" = PENDING + OPEN + PARTIAL,
+                      "Executed" = EXECUTED, "Rejected" = REJECTED,
+                      so a single tab maps to multiple wire statuses.
+      • `sl_tp`     — when true, narrow to orders that have any SL/TP
+                      attached: SL/SL_M order types OR a bracket
+                      stop_loss/target stamped on the row. Powers the
+                      "SL / TP" tab.
+      • `user_id`   — scope to one user (used by user-detail deep links).
+    """
     q: dict[str, Any] = {}
     if status:
         q["status"] = status
+    elif statuses:
+        status_list = [s.strip() for s in statuses.split(",") if s.strip()]
+        if status_list:
+            q["status"] = {"$in": status_list}
+    if sl_tp:
+        # An order belongs in the SL/TP view if EITHER it's a
+        # stop-loss / stop-loss-market order, OR it carries a
+        # bracket SL / TP that fires once the entry leg fills. The
+        # `$or` is added to the same query — but we have to AND it
+        # with whatever the status / scope filter already accumulated
+        # so a "Pending + SL/TP" combination still narrows correctly.
+        sl_tp_branch = {
+            "$or": [
+                {"order_type": {"$in": ["SL", "SL_M"]}},
+                {"bracket_stop_loss": {"$ne": None}},
+                {"bracket_target": {"$ne": None}},
+            ]
+        }
+        if q:
+            q = {"$and": [q, sl_tp_branch]}
+        else:
+            q = sl_tp_branch
     if user_id:
         await assert_user_in_scope(admin, user_id)
         q["user_id"] = PydanticObjectId(user_id)
@@ -150,6 +188,10 @@ async def list_orders(
                     "filled_quantity": r.filled_quantity,
                     "price": str(r.price),
                     "average_price": str(r.average_price),
+                    "trigger_price": str(r.trigger_price) if r.trigger_price is not None else None,
+                    "bracket_stop_loss": str(r.bracket_stop_loss) if r.bracket_stop_loss is not None else None,
+                    "bracket_target": str(r.bracket_target) if r.bracket_target is not None else None,
+                    "rejection_reason": r.rejection_reason,
                     "status": r.status.value,
                     "created_at": r.created_at,
                     "executed_at": r.executed_at,

@@ -164,7 +164,7 @@ export default function UserDetailPage() {
         actions={
           <div className="flex flex-wrap gap-2">
             <Button asChild variant="outline">
-              <Link href={`/orders?tab=orders&user_id=${id}`}>
+              <Link href={`/orders?tab=pending&user_id=${id}`}>
                 <ListOrdered className="size-4" /> View orders
               </Link>
             </Button>
