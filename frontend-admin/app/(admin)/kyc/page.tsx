@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Check, Eye, FileText, X } from "lucide-react";
@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/card";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { Pagination } from "@/components/common/Pagination";
 import { cn } from "@/lib/utils";
 
 type KycStatus = "PENDING" | "APPROVED" | "REJECTED" | "RESUBMIT";
@@ -44,6 +45,20 @@ export default function AdminKycPage() {
     queryFn: () => KycAPI.list(tab),
     refetchInterval: 5000,
   });
+
+  // Client-side pagination — KYC list endpoint returns up to 200 rows.
+  // Resetting page to 1 on tab change keeps the admin from landing on
+  // an empty page when switching between Pending / Approved / Rejected.
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  useEffect(() => {
+    setPage(1);
+  }, [tab]);
+  const pagedRows = useMemo(() => {
+    const all = (data ?? []) as any[];
+    const start = (page - 1) * pageSize;
+    return all.slice(start, start + pageSize);
+  }, [data, page, pageSize]);
 
   const [reviewing, setReviewing] = useState<any | null>(null);
   const [rejectReason, setRejectReason] = useState("");
@@ -163,10 +178,19 @@ export default function AdminKycPage() {
 
       <DataTable
         columns={cols}
-        rows={data}
+        rows={pagedRows}
         keyExtractor={(r) => r.id}
         loading={isFetching && !data}
         empty={`No ${tab.toLowerCase()} submissions.`}
+      />
+
+      <Pagination
+        page={page}
+        pageSize={pageSize}
+        total={data?.length ?? 0}
+        onPageChange={setPage}
+        onPageSizeChange={setPageSize}
+        pageSizeOptions={[25, 50, 100]}
       />
 
       <Dialog open={!!reviewing} onOpenChange={(o) => !o && setReviewing(null)}>

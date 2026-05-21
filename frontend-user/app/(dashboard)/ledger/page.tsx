@@ -1,14 +1,24 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { LedgerAPI } from "@/lib/api";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { Pagination } from "@/components/common/Pagination";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatINR, pnlColor } from "@/lib/utils";
 
 export default function UserLedgerPage() {
   const { data, isFetching } = useQuery({ queryKey: ["ledger"], queryFn: () => LedgerAPI.list() });
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+
+  const allRows = (data?.rows ?? []) as any[];
+  const pagedRows = useMemo(() => {
+    const start = (page - 1) * pageSize;
+    return allRows.slice(start, start + pageSize);
+  }, [allRows, page, pageSize]);
 
   const cols: Column<any>[] = [
     { key: "date", header: "Date", render: (r) => new Date(r.date).toLocaleString() },
@@ -58,7 +68,15 @@ export default function UserLedgerPage() {
           </CardHeader>
         </Card>
       </div>
-      <DataTable columns={cols} rows={data?.rows} keyExtractor={(r) => r.id} loading={isFetching && !data} />
+      <DataTable columns={cols} rows={pagedRows} keyExtractor={(r) => r.id} loading={isFetching && !data} />
+      <Pagination
+        page={page}
+        pageSize={pageSize}
+        total={allRows.length}
+        onPageChange={setPage}
+        onPageSizeChange={setPageSize}
+        pageSizeOptions={[25, 50, 100, 200]}
+      />
     </div>
   );
 }

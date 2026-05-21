@@ -13,6 +13,7 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { Pagination } from "@/components/common/Pagination";
 import { StatusPill } from "@/components/common/StatusPill";
 import { formatINR, pnlColor } from "@/lib/utils";
 
@@ -58,7 +59,6 @@ function MasterLedgerInner() {
   });
 
   const total = data?.meta?.total ?? 0;
-  const totalPages = data?.meta?.total_pages ?? 1;
 
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ user_id: "", amount: "", transaction_type: "ADJUSTMENT", narration: "" });
@@ -199,69 +199,14 @@ function MasterLedgerInner() {
       />
       <DataTable columns={cols} rows={data?.items} keyExtractor={(r) => r.id} loading={isFetching && !data} />
 
-      {total > 0 && (
-        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-          <div>
-            Showing{" "}
-            <span className="font-medium text-foreground">
-              {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, total)}
-            </span>{" "}
-            of <span className="font-medium text-foreground">{total}</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <label className="flex items-center gap-1.5">
-              <span>Rows</span>
-              <select
-                value={pageSize}
-                onChange={(e) => {
-                  setPage(1);
-                  setPageSize(Number(e.target.value));
-                }}
-                className="h-8 rounded-md border border-border bg-background px-2 text-xs"
-              >
-                <option value={50}>50</option>
-                <option value={100}>100</option>
-                <option value={200}>200</option>
-              </select>
-            </label>
-            <span>
-              Page {page} of {totalPages}
-            </span>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={page <= 1}
-              onClick={() => setPage(1)}
-            >
-              First
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={page <= 1}
-              onClick={() => setPage((p) => p - 1)}
-            >
-              Prev
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={page >= totalPages}
-              onClick={() => setPage((p) => p + 1)}
-            >
-              Next
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={page >= totalPages}
-              onClick={() => setPage(totalPages)}
-            >
-              Last
-            </Button>
-          </div>
-        </div>
-      )}
+      <Pagination
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        onPageChange={setPage}
+        onPageSizeChange={setPageSize}
+        pageSizeOptions={[50, 100, 200]}
+      />
     </div>
   );
 }

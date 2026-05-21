@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/dialog";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { Pagination } from "@/components/common/Pagination";
 import { StatusPill } from "@/components/common/StatusPill";
 import { TradeDetailSheet } from "@/components/trading/TradeDetailSheet";
 import { cn, formatINR, formatIST, formatPrice, pnlColor } from "@/lib/utils";
@@ -940,10 +941,22 @@ export default function PositionsPage() {
     },
   ];
 
+  // Closed-tab pagination — client-side. The endpoint already returns
+  // only this user's trades and lifetime closed trades for an active
+  // trader can easily run into hundreds of rows; rendering them all at
+  // once jankifies scroll on phones.
+  const [closedPage, setClosedPage] = useState(1);
+  const [closedPageSize, setClosedPageSize] = useState(25);
+  const pagedClosed = useMemo(() => {
+    const all = (closed ?? []) as any[];
+    const start = (closedPage - 1) * closedPageSize;
+    return all.slice(start, start + closedPageSize);
+  }, [closed, closedPage, closedPageSize]);
+
   // Pick what to render based on the selected tab.
   const tableProps =
     tab === "closed"
-      ? { columns: closedCols, rows: closed, loading: closedLoading && !closed }
+      ? { columns: closedCols, rows: pagedClosed, loading: closedLoading && !closed }
       : tab === "active"
         ? {
             columns: activeCols,
@@ -1045,7 +1058,7 @@ export default function PositionsPage() {
       {tab === "closed" ? (
         <>
           <div className="md:hidden">
-            <ClosedMobileList rows={(closed ?? []) as any[]} loading={closedLoading && !closed} />
+            <ClosedMobileList rows={pagedClosed} loading={closedLoading && !closed} />
           </div>
           <div className="hidden md:block">
             <DataTable
@@ -1055,6 +1068,14 @@ export default function PositionsPage() {
               loading={tableProps.loading}
             />
           </div>
+          <Pagination
+            page={closedPage}
+            pageSize={closedPageSize}
+            total={closed?.length ?? 0}
+            onPageChange={setClosedPage}
+            onPageSizeChange={setClosedPageSize}
+            pageSizeOptions={[10, 25, 50, 100]}
+          />
         </>
       ) : tab === "active" ? (
         <>

@@ -1,15 +1,26 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ReportsAPI } from "@/lib/api";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { Pagination } from "@/components/common/Pagination";
 import { StatusPill } from "@/components/common/StatusPill";
 import { ReportPdfButton } from "@/components/common/ReportPdfButton";
 import { formatINR, formatPrice } from "@/lib/utils";
 
 export default function TradebookPage() {
   const { data, isFetching } = useQuery({ queryKey: ["reports", "tradebook"], queryFn: () => ReportsAPI.tradebook() });
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+
+  const allRows = (data ?? []) as any[];
+  const pagedRows = useMemo(() => {
+    const start = (page - 1) * pageSize;
+    return allRows.slice(start, start + pageSize);
+  }, [allRows, page, pageSize]);
+
   const cols: Column<any>[] = [
     { key: "executed_at", header: "When", render: (r) => new Date(r.executed_at).toLocaleString() },
     { key: "trade_number", header: "Trade #", render: (r) => <span className="font-mono text-[11px]">{r.trade_number}</span> },
@@ -40,7 +51,15 @@ export default function TradebookPage() {
         description={`${data?.length ?? 0} trades`}
         actions={<ReportPdfButton kind="tradebook" params={{ limit: 500 }} />}
       />
-      <DataTable columns={cols} rows={data} keyExtractor={(r) => r.id} loading={isFetching && !data} />
+      <DataTable columns={cols} rows={pagedRows} keyExtractor={(r) => r.id} loading={isFetching && !data} />
+      <Pagination
+        page={page}
+        pageSize={pageSize}
+        total={allRows.length}
+        onPageChange={setPage}
+        onPageSizeChange={setPageSize}
+        pageSizeOptions={[25, 50, 100, 200]}
+      />
     </div>
   );
 }

@@ -10,6 +10,7 @@ import { TradingAPI, UsersAPI } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { Pagination } from "@/components/common/Pagination";
 import { StatusPill } from "@/components/common/StatusPill";
 import { formatINR, cn } from "@/lib/utils";
 
@@ -116,15 +117,16 @@ function OrdersTable({ userId }: { userId?: string | null }) {
   const qc = useQueryClient();
   const [status, setStatus] = useState("");
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
 
   const { data, isFetching } = useQuery({
-    queryKey: ["admin", "orders", { status, page, userId }],
+    queryKey: ["admin", "orders", { status, page, pageSize, userId }],
     queryFn: () =>
       TradingAPI.orders({
         status: status || undefined,
         user_id: userId || undefined,
         page,
-        page_size: 50,
+        page_size: pageSize,
       }),
     refetchInterval: 5000,
   });
@@ -273,46 +275,53 @@ function OrdersTable({ userId }: { userId?: string | null }) {
         </select>
       </div>
       <DataTable columns={cols} rows={data?.items} keyExtractor={(r) => r.id} loading={isFetching && !data} />
-      {(data?.meta?.total_pages ?? 1) > 1 && (
-        <div className="flex justify-end gap-2 text-xs">
-          <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
-            Prev
-          </Button>
-          <span className="self-center text-muted-foreground">
-            {page} / {data?.meta?.total_pages}
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={page >= (data?.meta?.total_pages ?? 1)}
-            onClick={() => setPage((p) => p + 1)}
-          >
-            Next
-          </Button>
-        </div>
-      )}
+      <Pagination
+        page={page}
+        pageSize={pageSize}
+        total={data?.meta?.total ?? 0}
+        onPageChange={setPage}
+        onPageSizeChange={setPageSize}
+        pageSizeOptions={[25, 50, 100, 200]}
+      />
     </div>
   );
 }
 
 function TradesTable({ userId }: { userId?: string | null }) {
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+
   const { data, isFetching } = useQuery({
     queryKey: ["admin", "trades", { userId }],
     queryFn: () =>
-      TradingAPI.trades({ limit: 200, user_id: userId || undefined }),
+      TradingAPI.trades({ limit: 1000, user_id: userId || undefined }),
     refetchInterval: 5000,
   });
 
+  // Trades endpoint returns a plain list capped by `limit` — paginate
+  // client-side so the table stays smooth even at 1000 rows. Switching
+  // user filter resets back to page 1.
+  useEffect(() => {
+    setPage(1);
+  }, [userId]);
+
+  const pagedRows = useMemo(() => {
+    const all = (data ?? []) as any[];
+    const start = (page - 1) * pageSize;
+    return all.slice(start, start + pageSize);
+  }, [data, page, pageSize]);
+
   // Same live-LTP overlay pattern as the Orders tab — gives admins a "what
-  // would this fill be worth right now" P&L next to each execution.
+  // would this fill be worth right now" P&L next to each execution. Limited
+  // to the visible page so we don't quote tokens that aren't being rendered.
   const tradeTokens = useMemo(() => {
     const set = new Set<string>();
-    for (const t of (data ?? []) as any[]) {
+    for (const t of pagedRows) {
       const tok = t.instrument_token || t.token;
       if (tok) set.add(String(tok));
     }
     return Array.from(set);
-  }, [data]);
+  }, [pagedRows]);
 
   const { data: quotes } = useQuery({
     queryKey: ["admin", "trade-quotes", tradeTokens.sort().join(",")],
@@ -407,7 +416,15 @@ function TradesTable({ userId }: { userId?: string | null }) {
   return (
     <div className="space-y-3">
       <div className="text-xs text-muted-foreground">{data?.length ?? 0} executions</div>
-      <DataTable columns={cols} rows={data} keyExtractor={(r) => r.id} loading={isFetching && !data} />
+      <DataTable columns={cols} rows={pagedRows} keyExtractor={(r) => r.id} loading={isFetching && !data} />
+      <Pagination
+        page={page}
+        pageSize={pageSize}
+        total={data?.length ?? 0}
+        onPageChange={setPage}
+        onPageSizeChange={setPageSize}
+        pageSizeOptions={[25, 50, 100, 200]}
+      />
     </div>
   );
 }

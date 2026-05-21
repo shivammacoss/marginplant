@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/dialog";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { Pagination } from "@/components/common/Pagination";
 import { NettingEntriesDialog } from "@/components/admin/NettingEntriesDialog";
 import { StatusPill } from "@/components/common/StatusPill";
 import { cn, formatINR, pnlColor } from "@/lib/utils";
@@ -377,6 +378,22 @@ function AdminPositionsInner() {
     (s: number, r: any) => s + Number(r.unrealized_pnl || 0),
     0
   );
+
+  // Client-side pagination — backend returns up to 500 rows in one shot.
+  // Slicing on the client keeps the DOM small (50–200 rows per page) so
+  // the table stays smooth on accounts with hundreds of closed positions.
+  // Live PnL on the Open tab still works because openRowsLive is computed
+  // BEFORE pagination — totalPnl tile remains the full visible-rows sum.
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  useEffect(() => {
+    setPage(1);
+  }, [tab, queryUserId, search]);
+  const pagedData = useMemo(() => {
+    const all = data ?? [];
+    const start = (page - 1) * pageSize;
+    return all.slice(start, start + pageSize);
+  }, [data, page, pageSize]);
 
   // ── Original column set, plus a new "Hold Time" + polished action buttons ──
   const cols: Column<any>[] = [
@@ -800,7 +817,7 @@ function AdminPositionsInner() {
 
       <DataTable
         columns={cols}
-        rows={data}
+        rows={pagedData}
         keyExtractor={(r) => r.id}
         loading={isFetching && !data}
         onRowClick={(r: any) => setNettingId(String(r.id))}
@@ -811,6 +828,15 @@ function AdminPositionsInner() {
               ? "bg-atm/5"
               : undefined
         }
+      />
+
+      <Pagination
+        page={page}
+        pageSize={pageSize}
+        total={data?.length ?? 0}
+        onPageChange={setPage}
+        onPageSizeChange={setPageSize}
+        pageSizeOptions={[25, 50, 100, 200]}
       />
 
       {/* Row-click opens the per-position fill breakdown. Same dialog
