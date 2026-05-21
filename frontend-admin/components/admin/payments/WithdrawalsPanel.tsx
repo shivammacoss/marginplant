@@ -88,12 +88,25 @@ export function WithdrawalsPanel() {
   // flagged 21-May that landing on an empty PENDING list looked
   // like the queue was broken).
   const [status, setStatus] = useState("");
+  const [page, setPage] = useState(1);
+  const pageSize = 15;
   const [approving, setApproving] = useState<{ id: string; utr: string } | null>(null);
   const [rejecting, setRejecting] = useState<{ id: string; reason: string } | null>(null);
 
+  function changeStatus(next: string) {
+    setStatus(next);
+    setPage(1);
+  }
+
   const { data, isFetching } = useQuery({
-    queryKey: ["admin", "withdrawals", status],
-    queryFn: () => PayinOutAPI.withdrawals(status || undefined),
+    queryKey: ["admin", "withdrawals", status, page],
+    queryFn: () =>
+      PayinOutAPI.withdrawals({
+        status: status || undefined,
+        page,
+        page_size: pageSize,
+      }),
+    placeholderData: (prev) => prev,
   });
 
   async function approve() {
@@ -229,24 +242,69 @@ export function WithdrawalsPanel() {
     },
   ];
 
+  const items = data?.items ?? [];
+  const meta = data?.meta;
+  const totalPages = meta?.total_pages ?? 1;
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <div className="text-xs text-muted-foreground">
-          {data?.length ?? 0} {status.toLowerCase() || "all"}
+          {meta?.total ?? 0} {status.toLowerCase() || "all"}
+          {meta?.total ? ` · page ${meta.page} of ${totalPages}` : ""}
         </div>
         <select
           value={status}
-          onChange={(e) => setStatus(e.target.value)}
+          onChange={(e) => changeStatus(e.target.value)}
           className="h-9 rounded-md border border-border bg-background px-3 text-sm"
         >
+          <option value="">All</option>
           <option value="PENDING">Pending</option>
           <option value="COMPLETED">Completed</option>
           <option value="REJECTED">Rejected</option>
-          <option value="">All</option>
         </select>
       </div>
-      <DataTable columns={cols} rows={data} keyExtractor={(r) => r.id} loading={isFetching && !data} />
+      <DataTable columns={cols} rows={items} keyExtractor={(r) => r.id} loading={isFetching && !data} />
+
+      {totalPages > 1 && (
+        <div className="flex items-center justify-end gap-2 text-xs">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page <= 1}
+            onClick={() => setPage(1)}
+          >
+            First
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page <= 1}
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+          >
+            Prev
+          </Button>
+          <span className="self-center text-muted-foreground">
+            {page} / {totalPages}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page >= totalPages}
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+          >
+            Next
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page >= totalPages}
+            onClick={() => setPage(totalPages)}
+          >
+            Last
+          </Button>
+        </div>
+      )}
 
       <Dialog open={!!approving} onOpenChange={(v) => !v && setApproving(null)}>
         <DialogContent>

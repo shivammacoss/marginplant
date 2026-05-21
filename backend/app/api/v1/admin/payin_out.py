@@ -45,50 +45,95 @@ router = APIRouter(tags=["admin-payin-out"])
 
 
 # ── Deposits ────────────────────────────────────────────────────────
-@router.get("/deposits", response_model=APIResponse[list])
+@router.get("/deposits", response_model=APIResponse[dict])
 async def list_deposits(
     admin: CurrentAdmin,
-    status: str | None = "PENDING",
-    limit: int = 200,
+    status: str | None = None,
+    page: int = 1,
+    page_size: int = 15,
     _: None = Depends(require_perm("deposits", "read")),
 ):
+    """Admin deposit inbox.
+
+    Status defaults to NONE (i.e. all statuses) instead of the older
+    "PENDING" default. The frontend dropdown shows PENDING / APPROVED
+    / REJECTED / All; landing on "All" by default surfaces the full
+    recent history so a "No data" empty state means a genuinely quiet
+    queue, not a hidden filter (operator-flagged 21-May).
+
+    Paginated at 15 rows per page by default to match the deposits
+    panel's UI pager. `page_size` is capped at 200 so a buggy client
+    can't ask for a million rows.
+    """
+    page = max(1, page)
+    page_size = max(1, min(200, page_size))
     q: dict[str, Any] = {}
     if status:
         q["status"] = status
     scope = await scoped_user_ids(admin)
     if scope is not None:
         if not scope:
-            return APIResponse(data=[])
+            return APIResponse(
+                data={
+                    "items": [],
+                    "meta": {
+                        "page": page,
+                        "page_size": page_size,
+                        "total": 0,
+                        "total_pages": 0,
+                    },
+                }
+            )
         q["user_id"] = {"$in": scope}
-    rows = await DepositRequest.find(q).sort("-created_at").limit(limit).to_list()
+
+    total = await DepositRequest.find(q).count()
+    rows = (
+        await DepositRequest.find(q)
+        .sort("-created_at")
+        .skip((page - 1) * page_size)
+        .limit(page_size)
+        .to_list()
+    )
     owner_map = await build_owner_map([r.user_id for r in rows])
 
     # Batch-lookup settlement_outstanding per user so admin can see at
     # approval time how much of this deposit will be recovered first.
     from app.models.wallet import Wallet
     user_ids = list({r.user_id for r in rows})
-    wallets = await Wallet.find({"user_id": {"$in": user_ids}}).to_list()
+    wallets = (
+        await Wallet.find({"user_id": {"$in": user_ids}}).to_list()
+        if user_ids
+        else []
+    )
     outstanding_map = {str(w.user_id): str(w.settlement_outstanding) for w in wallets}
 
     return APIResponse(
-        data=[
-            {
-                "id": str(r.id),
-                "user_id": str(r.user_id),
-                "amount": str(r.amount),
-                "payment_mode": r.payment_mode.value,
-                "utr_number": r.utr_number,
-                "screenshot_url": r.screenshot_url,
-                "status": r.status.value,
-                "user_remark": r.user_remark,
-                "admin_remark": r.admin_remark,
-                "created_at": r.created_at,
-                "processed_at": r.processed_at,
-                "user_settlement_outstanding": outstanding_map.get(str(r.user_id), "0"),
-                **owner_fields(owner_map.get(str(r.user_id))),
-            }
-            for r in rows
-        ]
+        data={
+            "items": [
+                {
+                    "id": str(r.id),
+                    "user_id": str(r.user_id),
+                    "amount": str(r.amount),
+                    "payment_mode": r.payment_mode.value,
+                    "utr_number": r.utr_number,
+                    "screenshot_url": r.screenshot_url,
+                    "status": r.status.value,
+                    "user_remark": r.user_remark,
+                    "admin_remark": r.admin_remark,
+                    "created_at": r.created_at,
+                    "processed_at": r.processed_at,
+                    "user_settlement_outstanding": outstanding_map.get(str(r.user_id), "0"),
+                    **owner_fields(owner_map.get(str(r.user_id))),
+                }
+                for r in rows
+            ],
+            "meta": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": (total + page_size - 1) // page_size,
+            },
+        }
     )
 
 
@@ -366,40 +411,74 @@ async def reject_settlement(
 
 
 # ── Withdrawals ─────────────────────────────────────────────────────
-@router.get("/withdrawals", response_model=APIResponse[list])
+@router.get("/withdrawals", response_model=APIResponse[dict])
 async def list_withdrawals(
     admin: CurrentAdmin,
-    status: str | None = "PENDING",
-    limit: int = 200,
+    status: str | None = None,
+    page: int = 1,
+    page_size: int = 15,
     _: None = Depends(require_perm("withdrawals", "read")),
 ):
+    """Admin withdrawal inbox. Same shape as `list_deposits` — status
+    defaults to None (all statuses) and pagination at 15 rows / page.
+    Switched from the older "PENDING" default for the same reason
+    (landing on a hidden filter looked like a broken queue).
+    """
+    page = max(1, page)
+    page_size = max(1, min(200, page_size))
     q: dict[str, Any] = {}
     if status:
         q["status"] = status
     scope = await scoped_user_ids(admin)
     if scope is not None:
         if not scope:
-            return APIResponse(data=[])
+            return APIResponse(
+                data={
+                    "items": [],
+                    "meta": {
+                        "page": page,
+                        "page_size": page_size,
+                        "total": 0,
+                        "total_pages": 0,
+                    },
+                }
+            )
         q["user_id"] = {"$in": scope}
-    rows = await WithdrawalRequest.find(q).sort("-created_at").limit(limit).to_list()
+
+    total = await WithdrawalRequest.find(q).count()
+    rows = (
+        await WithdrawalRequest.find(q)
+        .sort("-created_at")
+        .skip((page - 1) * page_size)
+        .limit(page_size)
+        .to_list()
+    )
     owner_map = await build_owner_map([r.user_id for r in rows])
     return APIResponse(
-        data=[
-            {
-                "id": str(r.id),
-                "user_id": str(r.user_id),
-                "amount": str(r.amount),
-                "bank": r.bank.model_dump(),
-                "status": r.status.value,
-                "remarks": r.remarks,
-                "utr_number": r.utr_number,
-                "rejection_reason": r.rejection_reason,
-                "created_at": r.created_at,
-                "processed_at": r.processed_at,
-                **owner_fields(owner_map.get(str(r.user_id))),
-            }
-            for r in rows
-        ]
+        data={
+            "items": [
+                {
+                    "id": str(r.id),
+                    "user_id": str(r.user_id),
+                    "amount": str(r.amount),
+                    "bank": r.bank.model_dump(),
+                    "status": r.status.value,
+                    "remarks": r.remarks,
+                    "utr_number": r.utr_number,
+                    "rejection_reason": r.rejection_reason,
+                    "created_at": r.created_at,
+                    "processed_at": r.processed_at,
+                    **owner_fields(owner_map.get(str(r.user_id))),
+                }
+                for r in rows
+            ],
+            "meta": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": (total + page_size - 1) // page_size,
+            },
+        }
     )
 
 

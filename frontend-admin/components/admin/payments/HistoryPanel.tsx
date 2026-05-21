@@ -76,23 +76,25 @@ export function HistoryPanel() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   // Both endpoints support a `status` query param. We fetch unfiltered
-  // here and apply the status filter client-side so the type chips can
-  // flip instantly without re-firing two requests every time. 10 s poll
-  // matches the busier deposits panel without doubling our request rate.
+  // here (page_size=200 to cover the recent history without paginating
+  // a unified merged view) and apply the status filter client-side so
+  // the type chips can flip instantly without re-firing two requests
+  // every time. 10 s poll matches the busier deposits panel without
+  // doubling our request rate.
   const { data: depositsRaw, isFetching: depLoading } = useQuery({
     queryKey: ["admin", "payments", "history", "deposits"],
-    queryFn: () => PayinOutAPI.deposits(undefined),
+    queryFn: () => PayinOutAPI.deposits({ page: 1, page_size: 200 }),
     refetchInterval: 10000,
   });
   const { data: withdrawalsRaw, isFetching: wdLoading } = useQuery({
     queryKey: ["admin", "payments", "history", "withdrawals"],
-    queryFn: () => PayinOutAPI.withdrawals(undefined),
+    queryFn: () => PayinOutAPI.withdrawals({ page: 1, page_size: 200 }),
     refetchInterval: 10000,
   });
 
   const rows = useMemo<HistoryRow[]>(() => {
-    const deps = (depositsRaw ?? []).map(normalizeDeposit);
-    const wds = (withdrawalsRaw ?? []).map(normalizeWithdrawal);
+    const deps = (depositsRaw?.items ?? []).map(normalizeDeposit);
+    const wds = (withdrawalsRaw?.items ?? []).map(normalizeWithdrawal);
     const all = [...deps, ...wds];
     // Newest-first — admins scan for "what just happened" far more
     // often than they look at the oldest record on the page.

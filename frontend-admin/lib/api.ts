@@ -253,7 +253,12 @@ export const TradingAPI = {
 };
 
 export const PayinOutAPI = {
-  deposits: (status?: string) => unwrap<any[]>(api.get("/admin/deposits", { params: { status } })),
+  // Deposits / withdrawals are paginated (15 per page by default).
+  // Pass `status` empty / undefined to get every status.
+  deposits: (params?: { status?: string; page?: number; page_size?: number }) =>
+    unwrap<{ items: any[]; meta: { page: number; page_size: number; total: number; total_pages: number } }>(
+      api.get("/admin/deposits", { params }),
+    ),
   approveDeposit: (id: string, admin_remark?: string) =>
     unwrap<any>(api.post(`/admin/deposits/${id}/approve`, { admin_remark })),
   rejectDeposit: (id: string, admin_remark: string) =>
@@ -268,7 +273,10 @@ export const PayinOutAPI = {
     unwrap<any>(api.post(`/admin/settlement-requests/${id}/approve`)),
   rejectSettlement: (id: string, reason: string) =>
     unwrap<any>(api.post(`/admin/settlement-requests/${id}/reject`, { reason })),
-  withdrawals: (status?: string) => unwrap<any[]>(api.get("/admin/withdrawals", { params: { status } })),
+  withdrawals: (params?: { status?: string; page?: number; page_size?: number }) =>
+    unwrap<{ items: any[]; meta: { page: number; page_size: number; total: number; total_pages: number } }>(
+      api.get("/admin/withdrawals", { params }),
+    ),
   approveWithdrawal: (id: string, body: any) => unwrap<any>(api.post(`/admin/withdrawals/${id}/approve`, body)),
   rejectWithdrawal: (id: string, rejection_reason: string) =>
     unwrap<any>(api.post(`/admin/withdrawals/${id}/reject`, { rejection_reason })),

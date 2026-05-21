@@ -34,25 +34,42 @@ export function DepositsPanel() {
   // state was confusing on quiet hours -- "No data" suggested the
   // queue was broken when actually all rows had been processed.
   const [status, setStatus] = useState("");
+  const [page, setPage] = useState(1);
+  const pageSize = 15;
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [rejecting, setRejecting] = useState<{ id: string; remark: string } | null>(null);
 
+  // Reset to page 1 whenever the status filter changes so an admin
+  // switching from "All" page 3 back to "Pending" doesn't land on an
+  // empty page out of bounds.
+  function changeStatus(next: string) {
+    setStatus(next);
+    setPage(1);
+  }
+
   const { data, isFetching } = useQuery({
-    queryKey: ["admin", "deposits", status],
-    queryFn: () => PayinOutAPI.deposits(status || undefined),
+    queryKey: ["admin", "deposits", status, page],
+    queryFn: () =>
+      PayinOutAPI.deposits({
+        status: status || undefined,
+        page,
+        page_size: pageSize,
+      }),
     // Poll so new pending deposits from users appear without a manual
     // refresh. 5 s is fast enough to feel live and slow enough to avoid
     // pummeling the API.
     refetchInterval: 5000,
+    placeholderData: (prev) => prev, // keep the table during page flips
   });
 
   // Drop a row from the pending list immediately on action. Without this the
   // row sits on screen until the next poll resolves and admins double-click
   // thinking it didn't register.
   function removeLocally(id: string) {
-    qc.setQueryData<any[]>(["admin", "deposits", status], (prev) =>
-      (prev ?? []).filter((r) => r.id !== id),
-    );
+    qc.setQueryData<any>(["admin", "deposits", status, page], (prev: any) => {
+      if (!prev) return prev;
+      return { ...prev, items: (prev.items ?? []).filter((r: any) => r.id !== id) };
+    });
   }
 
   async function approve(id: string) {
@@ -174,24 +191,71 @@ export function DepositsPanel() {
     },
   ];
 
+  const items = data?.items ?? [];
+  const meta = data?.meta;
+  const totalPages = meta?.total_pages ?? 1;
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <div className="text-xs text-muted-foreground">
-          {data?.length ?? 0} {status.toLowerCase() || "all"}
+          {meta?.total ?? 0} {status.toLowerCase() || "all"}
+          {meta?.total ? ` · page ${meta.page} of ${totalPages}` : ""}
         </div>
         <select
           value={status}
-          onChange={(e) => setStatus(e.target.value)}
+          onChange={(e) => changeStatus(e.target.value)}
           className="h-9 rounded-md border border-border bg-background px-3 text-sm"
         >
+          <option value="">All</option>
           <option value="PENDING">Pending</option>
           <option value="APPROVED">Approved</option>
           <option value="REJECTED">Rejected</option>
-          <option value="">All</option>
         </select>
       </div>
-      <DataTable columns={cols} rows={data} keyExtractor={(r) => r.id} loading={isFetching && !data} />
+      <DataTable columns={cols} rows={items} keyExtractor={(r) => r.id} loading={isFetching && !data} />
+
+      {/* Pagination — 15 rows per page (matches backend page_size).
+          Hidden when there's only one page so the panel stays clean. */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-end gap-2 text-xs">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page <= 1}
+            onClick={() => setPage(1)}
+          >
+            First
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page <= 1}
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+          >
+            Prev
+          </Button>
+          <span className="self-center text-muted-foreground">
+            {page} / {totalPages}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page >= totalPages}
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+          >
+            Next
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page >= totalPages}
+            onClick={() => setPage(totalPages)}
+          >
+            Last
+          </Button>
+        </div>
+      )}
 
       <Dialog open={!!previewUrl} onOpenChange={(v) => !v && setPreviewUrl(null)}>
         <DialogContent className="max-w-2xl">

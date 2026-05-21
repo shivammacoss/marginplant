@@ -16,14 +16,20 @@ export function RejectedPanel() {
   const [sub, setSub] = useState<SubTab>("deposits");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
-  const { data: deposits, isFetching: depLoading } = useQuery({
+  // The deposits + withdrawals endpoints are paginated and return
+  // `{ items, meta }` now. Rejected sub-tab fetches a large page (100)
+  // so the admin can scan everything in one screen without needing
+  // a pager here — rejected lists are typically short.
+  const { data: depositsResp, isFetching: depLoading } = useQuery({
     queryKey: ["admin", "deposits", "REJECTED"],
-    queryFn: () => PayinOutAPI.deposits("REJECTED"),
+    queryFn: () => PayinOutAPI.deposits({ status: "REJECTED", page: 1, page_size: 100 }),
   });
-  const { data: withdrawals, isFetching: wdLoading } = useQuery({
+  const { data: withdrawalsResp, isFetching: wdLoading } = useQuery({
     queryKey: ["admin", "withdrawals", "REJECTED"],
-    queryFn: () => PayinOutAPI.withdrawals("REJECTED"),
+    queryFn: () => PayinOutAPI.withdrawals({ status: "REJECTED", page: 1, page_size: 100 }),
   });
+  const deposits = depositsResp?.items ?? [];
+  const withdrawals = withdrawalsResp?.items ?? [];
 
   const depositCols: Column<any>[] = [
     { key: "created_at", header: "When", render: (r) => new Date(r.created_at).toLocaleString() },
@@ -82,7 +88,7 @@ export function RejectedPanel() {
               sub === t ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground"
             )}
           >
-            Rejected {t} ({(t === "deposits" ? deposits : withdrawals)?.length ?? 0})
+            Rejected {t} ({(t === "deposits" ? deposits : withdrawals).length})
           </button>
         ))}
       </div>
