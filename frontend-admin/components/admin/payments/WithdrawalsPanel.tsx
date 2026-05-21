@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Check, X } from "lucide-react";
+import { Check, Copy, X } from "lucide-react";
 import { PayinOutAPI } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,10 +16,66 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { formatINR } from "@/lib/utils";
+import { cn, formatINR } from "@/lib/utils";
 import { OwnerBadge } from "@/components/admin/OwnerBadge";
 import { useAdminAuthStore } from "@/stores/authStore";
 import { canEdit } from "@/lib/permissions";
+
+/**
+ * One bank/UPI value + an inline copy button. Used in the
+ * Withdrawals destination columns so admins can lift the holder /
+ * account / IFSC / UPI into their payout tool in one click. Empty
+ * values render as a muted "—" so the column stays visually aligned
+ * across rows.
+ */
+function CopyableField({
+  value,
+  label,
+  mono = true,
+  uppercase = false,
+}: {
+  value?: string | null;
+  label: string;
+  mono?: boolean;
+  uppercase?: boolean;
+}) {
+  if (!value) {
+    return <span className="text-xs text-muted-foreground/60">—</span>;
+  }
+  async function doCopy() {
+    try {
+      await navigator.clipboard.writeText(value!);
+      toast.success(`${label} copied`);
+    } catch {
+      // Clipboard API can fail on non-HTTPS / older browsers. Fall back
+      // to selecting the text so the operator can copy manually.
+      toast.error("Copy failed — long-press to select");
+    }
+  }
+  return (
+    <span className="inline-flex max-w-full items-center gap-1.5">
+      <span
+        className={cn(
+          "truncate text-xs",
+          mono && "font-mono",
+          uppercase && "uppercase",
+        )}
+        title={value}
+      >
+        {value}
+      </span>
+      <button
+        type="button"
+        onClick={doCopy}
+        aria-label={`Copy ${label}`}
+        title={`Copy ${label}`}
+        className="grid size-5 shrink-0 place-items-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+      >
+        <Copy className="size-3" />
+      </button>
+    </span>
+  );
+}
 
 export function WithdrawalsPanel() {
   const qc = useQueryClient();
@@ -80,69 +136,63 @@ export function WithdrawalsPanel() {
     },
     { key: "owner", header: "Owner", render: (r) => <OwnerBadge row={r} me={me} /> },
     { key: "amount", header: "Amount", align: "right", render: (r) => formatINR(r.amount) },
+    // ── Destination columns ─────────────────────────────────────
+    // The single "Destination" cell used to cram holder · bank · IFSC
+    // · UPI together, which was fine to read but painful to act on —
+    // every admin tier (super-admin / admin / broker / sub-broker)
+    // had to select each value and copy it by hand into their payout
+    // tool. Now each field gets its own column with a Copy button
+    // sitting inline next to the value. Empty fields render as "—"
+    // so the table stays visually aligned across rows. Bank rows show
+    // the holder / account / IFSC; UPI-only rows surface the VPA in
+    // the UPI column and leave the bank columns blank.
     {
-      key: "bank",
-      header: "Destination",
-      // Show FULL bank/UPI details so admins can copy them into the
-      // payout tool without bouncing into the user-detail page.
-      // Previous version masked the account as ••••<last 4> which
-      // forced the admin to click through for every approval.
-      render: (r) => {
-        const b = r.bank ?? {};
-        const isUpi = Boolean(b.upi_id);
-        const hasBank = Boolean(b.account_number);
-        if (!isUpi && !hasBank) return "—";
-        return (
-          <div className="flex flex-col gap-0.5 whitespace-normal break-all leading-tight">
-            <div className="flex items-center gap-2">
-              <span
-                className={
-                  isUpi
-                    ? "rounded bg-primary/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-primary"
-                    : "rounded bg-accent px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
-                }
-              >
-                {isUpi ? "UPI" : "Bank"}
-              </span>
-              <span className="font-mono text-xs">
-                {isUpi ? b.upi_id : b.account_number}
-              </span>
-              {isUpi && b.qr_url ? (
-                <a
-                  href={b.qr_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-[11px] text-primary underline"
-                >
-                  QR
-                </a>
-              ) : null}
-            </div>
-            {!isUpi && (b.name || b.ifsc || b.holder || b.branch) ? (
-              <div className="text-[11px] text-muted-foreground">
-                {[
-                  b.name,
-                  b.holder,
-                  b.ifsc,
-                  b.branch,
-                  b.account_type,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </div>
-            ) : null}
-            {isUpi && hasBank ? (
-              <div className="text-[11px] text-muted-foreground font-mono">
-                Bank: {b.account_number}
-                {b.ifsc ? ` · ${b.ifsc}` : ""}
-              </div>
-            ) : null}
-          </div>
-        );
-      },
+      key: "holder",
+      header: "Holder",
+      render: (r) => (
+        <CopyableField
+          value={(r.bank?.holder || r.bank?.name) ?? null}
+          label="Holder name"
+          mono={false}
+        />
+      ),
     },
-    { key: "remarks", header: "Remarks", render: (r) => r.remarks || "—" },
-    { key: "utr_number", header: "UTR", render: (r) => r.utr_number || "—" },
+    {
+      key: "account_number",
+      header: "Account no.",
+      render: (r) => (
+        <CopyableField
+          value={r.bank?.account_number ?? null}
+          label="Account number"
+        />
+      ),
+    },
+    {
+      key: "ifsc",
+      header: "IFSC",
+      render: (r) => (
+        <CopyableField value={r.bank?.ifsc ?? null} label="IFSC" uppercase />
+      ),
+    },
+    {
+      key: "upi_id",
+      header: "UPI",
+      render: (r) => (
+        <CopyableField value={r.bank?.upi_id ?? null} label="UPI ID" />
+      ),
+    },
+    {
+      key: "remarks",
+      header: "Remarks",
+      render: (r) => r.remarks || "—",
+    },
+    {
+      key: "utr_number",
+      header: "UTR",
+      render: (r) => (
+        <CopyableField value={r.utr_number ?? null} label="UTR" />
+      ),
+    },
     { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
     {
       key: "actions",
