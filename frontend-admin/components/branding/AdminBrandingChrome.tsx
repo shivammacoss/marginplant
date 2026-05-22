@@ -44,23 +44,54 @@ export function AdminBrandingChrome() {
     const icons = head.querySelectorAll<HTMLLinkElement>(
       'link[rel="icon"], link[rel="shortcut icon"], link[rel="apple-touch-icon"]',
     );
+    // CRITICAL: mutate href in place — DO NOT clone+replaceWith.
+    // Next.js renders these <link> nodes through React's metadata
+    // system; removing them out-of-tree leaves the reconciler with
+    // dangling refs and crashes the next navigation with
+    //   "Cannot read properties of null (reading 'removeChild')".
     icons.forEach((el) => {
       if (!el.dataset.brandingOriginal) {
         el.dataset.brandingOriginal = el.getAttribute("href") || "";
       }
       if (tenantLogo) {
-        el.setAttribute("href", tenantLogo);
+        if (el.getAttribute("href") !== tenantLogo) {
+          el.setAttribute("href", tenantLogo);
+        }
         el.setAttribute("data-branding", "1");
       } else {
         const original = el.dataset.brandingOriginal || "";
-        if (original) el.setAttribute("href", original);
-        delete el.dataset.branding;
+        if (original && el.getAttribute("href") !== original) {
+          el.setAttribute("href", original);
+        }
+        el.removeAttribute("data-branding");
       }
-      // Force the browser to pick up the new href instead of the
-      // SSR-cached one — same dance the user-frontend does.
-      const clone = el.cloneNode(true) as HTMLLinkElement;
-      el.replaceWith(clone);
     });
+    // Append a SINGLE branding-owned <link> at the end of <head> so
+    // browsers (which honour the LAST applicable icon) update the tab
+    // immediately. This node is outside the React tree and safe to
+    // mutate / remove without breaking reconciliation.
+    const OWN_ID = "branding-favicon-runtime";
+    const existing = head.querySelector<HTMLLinkElement>(`link#${OWN_ID}`);
+    if (tenantLogo) {
+      if (existing) {
+        if (existing.getAttribute("href") !== tenantLogo) {
+          existing.setAttribute("href", tenantLogo);
+        }
+      } else {
+        const link = document.createElement("link");
+        link.id = OWN_ID;
+        link.rel = "icon";
+        link.href = tenantLogo;
+        if (tenantLogo.endsWith(".svg")) link.type = "image/svg+xml";
+        else if (tenantLogo.endsWith(".png")) link.type = "image/png";
+        else if (tenantLogo.endsWith(".webp")) link.type = "image/webp";
+        else if (tenantLogo.endsWith(".jpg") || tenantLogo.endsWith(".jpeg"))
+          link.type = "image/jpeg";
+        head.appendChild(link);
+      }
+    } else if (existing) {
+      existing.remove();
+    }
   }, [tenantName, tenantLogo]);
 
   return null;

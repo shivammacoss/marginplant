@@ -159,40 +159,57 @@ function applyBrandingChrome(brand: Branding | null): void {
   const allIcons = head.querySelectorAll<HTMLLinkElement>(
     'link[rel="icon"], link[rel="shortcut icon"], link[rel="apple-touch-icon"]',
   );
+  // CRITICAL: do NOT remove/replace these <link> nodes — Next.js's
+  // metadata system owns them via React, and any out-of-tree mutation
+  // (cloneNode/replaceWith) leaves React's reconciler with a stale
+  // reference. The next render then crashes with
+  //   "Cannot read properties of null (reading 'removeChild')"
+  // bricking the page on every nav. We mutate `href` in place only —
+  // browsers DO pick up the swap on the next favicon read (tab focus,
+  // navigation, or manual refresh). For immediate visual swap we
+  // append a non-managed extra <link> below.
   allIcons.forEach((el) => {
     if (!el.dataset.brandingOriginal) {
       el.dataset.brandingOriginal = el.getAttribute("href") || "";
     }
     if (targetHref) {
-      el.setAttribute("href", targetHref);
+      if (el.getAttribute("href") !== targetHref) {
+        el.setAttribute("href", targetHref);
+      }
       el.setAttribute("data-branding", "1");
-      // Force the browser to pick up the new href instead of the
-      // SSR-cached one. Removing & re-adding the same node is the
-      // only reliable way across Chromium/Firefox/Safari.
-      const clone = el.cloneNode(true) as HTMLLinkElement;
-      el.replaceWith(clone);
     } else {
-      // Restore the platform default when branding is cleared.
       const original = el.dataset.brandingOriginal || "";
-      if (original) el.setAttribute("href", original);
-      delete el.dataset.branding;
-      const clone = el.cloneNode(true) as HTMLLinkElement;
-      el.replaceWith(clone);
+      if (original && el.getAttribute("href") !== original) {
+        el.setAttribute("href", original);
+      }
+      el.removeAttribute("data-branding");
     }
   });
-  // Edge case: SSR didn't inject any <link rel="icon"> (rare). In
-  // that case just append one so the tab still gets a branded icon.
-  if (targetHref && allIcons.length === 0) {
-    const link = document.createElement("link");
-    link.rel = "icon";
-    link.href = targetHref;
-    link.setAttribute("data-branding", "1");
-    if (targetHref.endsWith(".svg")) link.type = "image/svg+xml";
-    else if (targetHref.endsWith(".png")) link.type = "image/png";
-    else if (targetHref.endsWith(".webp")) link.type = "image/webp";
-    else if (targetHref.endsWith(".jpg") || targetHref.endsWith(".jpeg"))
-      link.type = "image/jpeg";
-    head.appendChild(link);
+  // Append a SINGLE extra branding-owned <link> at the end of <head>
+  // (browsers pick the last applicable icon). This one is fully
+  // outside the React tree (id-tagged) so we can safely add/remove it
+  // without breaking reconciliation. Reuse if already present.
+  const OWN_ID = "branding-favicon-runtime";
+  const existing = head.querySelector<HTMLLinkElement>(`link#${OWN_ID}`);
+  if (targetHref) {
+    if (existing) {
+      if (existing.getAttribute("href") !== targetHref) {
+        existing.setAttribute("href", targetHref);
+      }
+    } else {
+      const link = document.createElement("link");
+      link.id = OWN_ID;
+      link.rel = "icon";
+      link.href = targetHref;
+      if (targetHref.endsWith(".svg")) link.type = "image/svg+xml";
+      else if (targetHref.endsWith(".png")) link.type = "image/png";
+      else if (targetHref.endsWith(".webp")) link.type = "image/webp";
+      else if (targetHref.endsWith(".jpg") || targetHref.endsWith(".jpeg"))
+        link.type = "image/jpeg";
+      head.appendChild(link);
+    }
+  } else if (existing) {
+    existing.remove();
   }
 }
 
