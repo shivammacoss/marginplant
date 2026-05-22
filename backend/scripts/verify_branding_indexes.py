@@ -26,7 +26,7 @@ from app.models.user import User
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("verify_branding_indexes")
 
-EXPECTED_INDEX_NAME = "custom_domain_unique_sparse"
+EXPECTED_INDEX_NAME = "custom_domain_unique_partial"
 EXPECTED_FIELDS = {
     "brand_name",
     "logo_url",
@@ -74,16 +74,22 @@ async def main() -> int:
             )
         else:
             is_unique = bool(target.get("unique"))
-            is_sparse = bool(target.get("sparse"))
-            if not (is_unique and is_sparse):
+            # New index uses partialFilterExpression (correctly excludes
+            # null custom_domain values). Sparse=True was the original
+            # buggy choice — replaced because Mongo sparse only skips
+            # MISSING fields, not explicit nulls.
+            partial = target.get("partialFilterExpression")
+            if not is_unique or not partial:
                 failures.append(
                     f"Index `{EXPECTED_INDEX_NAME}` exists but unique="
-                    f"{is_unique}, sparse={is_sparse}; expected both True"
+                    f"{is_unique}, partialFilterExpression={partial}; "
+                    "expected unique=True with a partialFilterExpression"
                 )
             else:
                 logger.info(
-                    "[OK] Index `%s` is unique+sparse as expected",
+                    "[OK] Index `%s` is unique+partial(%s) as expected",
                     EXPECTED_INDEX_NAME,
+                    partial,
                 )
 
         # 3. Sanity log: how many existing rows have a custom_domain set
