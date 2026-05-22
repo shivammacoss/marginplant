@@ -17,10 +17,19 @@ The aggregate fields the dashboard cards lean on:
     SETTLEMENT_OUTSTANDING_BOOKED row in this window, so the user
     sees the SETTLEMENT total prominently even if the ledger spans
     multiple trades.
+
+Sanitisation: admin-internal transactions (REVERSAL of reopens,
+SETTLEMENT_OUTSTANDING_RECOVERY from reopen unwinds, manual ADJUSTMENT
+corrections) get their narrations stripped of internal terminology
+("Reopen", "admin user code", "STOP_OUT", etc.) and shown to the user
+as generic "Trade adjustment" rows so the user doesn't see when an
+admin has corrected a position. Symbol is preserved so the user can
+identify which instrument the row relates to.
 """
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -42,17 +51,85 @@ _LABELS: dict[TransactionType, str] = {
     TransactionType.BROKERAGE: "Brokerage",
     TransactionType.CHARGES: "Brokerage / charges",
     TransactionType.PNL: "Realised P&L",
-    TransactionType.ADJUSTMENT: "Admin adjustment",
+    TransactionType.ADJUSTMENT: "Adjustment",
     TransactionType.BONUS: "Bonus credit",
     TransactionType.PENALTY: "Penalty debit",
     TransactionType.PROMO: "Promo credit",
     TransactionType.INTER_USER: "Inter-user transfer",
-    TransactionType.REVERSAL: "Reversal",
+    # REVERSAL gets a neutral label on the user side. Internally a
+    # REVERSAL row is written when an admin reopens a closed position,
+    # but the user doesn't need to know that — to them it's just a
+    # trade-side adjustment that brings the ledger back in line.
+    TransactionType.REVERSAL: "Trade adjustment",
     TransactionType.PNL_SHARING_PAYOUT: "P&L sharing payout",
     TransactionType.PNL_SHARING_RECEIPT: "P&L sharing receipt",
     TransactionType.SETTLEMENT_OUTSTANDING_BOOKED: "Settlement booked",
     TransactionType.SETTLEMENT_OUTSTANDING_RECOVERY: "Settlement recovered",
 }
+
+
+# Words / patterns that leak internal admin actions into the user's
+# ledger. When any of these appears in a row's narration on a sensitive
+# transaction type (REVERSAL / ADJUSTMENT / SETTLEMENT_OUTSTANDING_*),
+# we strip the original narration and emit a generic replacement.
+_LEAK_PATTERNS = re.compile(
+    r"(reopen|stop[\s_-]?out|reopened by|admin |unwind|over-credit|"
+    r"double-count|counter-reversal|by ADM\d+|by SUP\d+|by BRK\d+|"
+    r"ADM\d+|SUP\d+|BRK\d+|closed by [A-Z_]+)",
+    re.IGNORECASE,
+)
+
+# Extracts an instrument symbol from a narration like
+# "Reopen DIVISLAB26MAYFUT — reverse cash portion only ..." or
+# "Realized loss on NIFTY26MAY23950CE close" — anything in CAPS with
+# digits, optionally ending in CE/PE/FUT. Used to preserve the
+# user-visible identifier when we strip the rest of the line.
+_SYMBOL_RE = re.compile(r"\b([A-Z]+\d[A-Z0-9]*(?:CE|PE|FUT)?)\b")
+
+
+def _sanitize_narration(t: WalletTransaction) -> str:
+    """Return a user-safe narration for the ledger row.
+
+    Most transaction types pass through unchanged — DEPOSIT, CHARGES,
+    PNL, SETTLEMENT_OUTSTANDING_BOOKED all carry information the user
+    legitimately needs. Only the admin-internal types get rewritten:
+
+      • REVERSAL — used both for SL/TP-bracket close reversals AND for
+        admin reopens. We can't distinguish them from the row alone,
+        so both get the generic "Trade adjustment" line.
+      • ADJUSTMENT — used for manual admin corrections (wallet credits,
+        bug fixes). Show as generic "Adjustment" unless it's a
+        user-facing deposit narration (which keeps DEPOSIT type).
+      • SETTLEMENT_OUTSTANDING_RECOVERY — written when settlement debt
+        clears either against a deposit OR via a reopen unwind. The
+        deposit-driven recovery is fine to surface; the reopen-driven
+        one leaks the admin action and gets scrubbed.
+    """
+    raw = t.narration or ""
+    ttype = t.transaction_type
+
+    if ttype not in (
+        TransactionType.REVERSAL,
+        TransactionType.ADJUSTMENT,
+        TransactionType.SETTLEMENT_OUTSTANDING_RECOVERY,
+    ):
+        return raw
+
+    if not _LEAK_PATTERNS.search(raw):
+        # No admin-action terminology in the narration; safe to keep.
+        return raw
+
+    # Pull the symbol so the user can still identify which instrument
+    # the adjustment relates to (otherwise the row looks orphan).
+    sym_match = _SYMBOL_RE.search(raw)
+    sym = sym_match.group(1) if sym_match else None
+
+    if ttype == TransactionType.REVERSAL:
+        return f"Trade adjustment — {sym}" if sym else "Trade adjustment"
+    if ttype == TransactionType.SETTLEMENT_OUTSTANDING_RECOVERY:
+        return "Settlement adjustment"
+    # ADJUSTMENT
+    return "Adjustment"
 
 
 @router.get("", response_model=APIResponse[dict])
@@ -91,6 +168,7 @@ async def ledger(
             total_settlement_booked += abs(d)
 
         label = _LABELS.get(t.transaction_type, t.transaction_type.value)
+        particulars = _sanitize_narration(t)
 
         out.append(
             {
@@ -99,7 +177,7 @@ async def ledger(
                 "type": t.transaction_type.value,
                 "label": label,
                 "is_settlement": is_settlement,
-                "particulars": t.narration,
+                "particulars": particulars,
                 "debit": -d if d < 0 else 0.0,
                 "credit": d if d > 0 else 0.0,
                 "balance": float(str(t.balance_after)),
