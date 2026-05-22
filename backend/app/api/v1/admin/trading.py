@@ -922,27 +922,127 @@ async def admin_reopen_position(
     from app.utils.time_utils import now_utc as _now_utc
 
     # ── 1) Wallet reversal of the realised P&L ──────────────────────
+    # When the original close booked into `settlement_outstanding`
+    # (because the user's wallet didn't have enough to cover the full
+    # loss — auto_settlement=ON flow in wallet_service.adjust), the
+    # original deduction was SPLIT: cash portion drained `available_
+    # balance`, shortfall went to `settlement_outstanding`. A naive
+    # reverse-the-full-realized restored ONLY the available leg and
+    # left the settlement debt hanging, double-counting the shortfall
+    # against the user. Operator-flagged 22-May: CL35171433 closed at
+    # ₹20,200 loss (₹12,617 cash + ₹7,583 settlement) → reopen credited
+    # full ₹20,200 to wallet but settlement stayed at ₹7,583 — user
+    # got the shortfall amount as a hidden second refund.
+    #
+    # Fix: look up the SETTLEMENT_OUTSTANDING_BOOKED transaction(s)
+    # that were written when this position's close path ran. Sum the
+    # booked amounts, reduce settlement_outstanding by that total,
+    # and reverse only the (realized - booked) portion back into
+    # available_balance.
     realized = _td(p.realized_pnl or 0)
     if realized != _Decimal("0"):
+        from app.models.transaction import WalletTransaction, TransactionStatus
+        from app.models.wallet import Wallet as _Wallet
+        from bson import Decimal128 as _Dec128
+
+        booked_total = _Decimal("0")
+        # Find SETTLEMENT_OUTSTANDING_BOOKED txns that match this
+        # position's close. The booking inherits reference_type="ORDER"
+        # (the close order id) — we don't have a direct Position link,
+        # so match by user + time window around closed_at + symbol in
+        # narration. Tolerant of small clock skew (±10s).
+        from datetime import timedelta as _td_delta
         try:
-            await _ws.adjust(
-                p.user_id,
-                -realized,
-                transaction_type=TransactionType.REVERSAL,
-                narration=(
-                    f"Reopen {p.instrument.symbol} — reverse realised P&L "
-                    f"(closed by {p.close_reason or 'unknown'}; reopened by "
-                    f"{admin.user_code})"
-                ),
-                reference_type="Position",
-                reference_id=str(p.id),
-                actor_id=admin.id,
-            )
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Wallet reversal failed; reopen aborted: {e}",
-            )
+            if p.closed_at is not None:
+                lo = p.closed_at - _td_delta(seconds=10)
+                hi = p.closed_at + _td_delta(seconds=10)
+                booked_rows = await WalletTransaction.find(
+                    WalletTransaction.user_id == p.user_id,
+                    WalletTransaction.transaction_type == TransactionType.SETTLEMENT_OUTSTANDING_BOOKED,
+                    WalletTransaction.status == TransactionStatus.COMPLETED,
+                    WalletTransaction.created_at >= lo,
+                    WalletTransaction.created_at <= hi,
+                ).to_list()
+                sym = p.instrument.symbol
+                for r in booked_rows:
+                    narr = (r.narration or "")
+                    if sym not in narr:
+                        continue
+                    # Stored amount is negative (debit-style for the user).
+                    # We add the magnitude back when computing the unwind.
+                    booked_total += abs(_td(r.amount or 0))
+        except Exception:
+            logger.exception("reopen_lookup_settlement_failed", extra={"pos_id": str(p.id)})
+            booked_total = _Decimal("0")
+
+        # Reduce settlement_outstanding first (atomic-ish — wallet save
+        # before the cash reversal so a mid-flow crash never doubles
+        # the user's available_balance).
+        if booked_total > _Decimal("0"):
+            try:
+                wallet_doc = await _ws.get_or_create(p.user_id)
+                cur_settle = _td(wallet_doc.settlement_outstanding or 0)
+                new_settle = max(_Decimal("0"), cur_settle - booked_total)
+                wallet_doc.settlement_outstanding = _Dec128(str(new_settle))
+                wallet_doc.version = (wallet_doc.version or 0) + 1
+                await wallet_doc.save()
+                # Audit-bearing ledger row so the trail explains why
+                # settlement_outstanding dropped without a deposit
+                # arriving. balance_before == balance_after — this
+                # transaction only touches the settlement field.
+                avail_str = str(wallet_doc.available_balance)
+                await WalletTransaction(
+                    user_id=p.user_id,
+                    transaction_type=TransactionType.SETTLEMENT_OUTSTANDING_RECOVERY,
+                    amount=_Dec128(str(booked_total)),
+                    balance_before=_Dec128(avail_str),
+                    balance_after=_Dec128(avail_str),
+                    reference_type="Position",
+                    reference_id=str(p.id),
+                    narration=(
+                        f"Reopen {p.instrument.symbol} — settlement unbooked "
+                        f"(₹{booked_total} was originally shortfall on the "
+                        f"closing leg; reversing back so the cash refund "
+                        f"doesn't double-credit the user)"
+                    ),
+                    status=TransactionStatus.COMPLETED,
+                    created_by=admin.id,
+                ).insert()
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Settlement-outstanding unwind failed; reopen aborted: {e}",
+                )
+
+        # Cash refund = realized − booked_to_settlement. For a profit-
+        # close `realized` is positive; -realized in `adjust` debits
+        # the wallet (correctly undoing the profit). For a loss-close
+        # `realized` is negative; -realized credits the wallet —
+        # capped to the cash that was actually deducted (the rest
+        # belonged to settlement which we just unwound above).
+        cash_refund = realized - booked_total if realized < 0 else realized
+        if cash_refund != _Decimal("0"):
+            try:
+                await _ws.adjust(
+                    p.user_id,
+                    -cash_refund,
+                    transaction_type=TransactionType.REVERSAL,
+                    narration=(
+                        f"Reopen {p.instrument.symbol} — reverse realised P&L "
+                        f"(closed by {p.close_reason or 'unknown'}; reopened by "
+                        f"{admin.user_code})"
+                        + (f" [cash portion ₹{abs(cash_refund)}; settlement portion ₹{booked_total} unwound separately]"
+                           if booked_total > _Decimal("0") else "")
+                    ),
+                    reference_type="Position",
+                    reference_id=str(p.id),
+                    actor_id=admin.id,
+                )
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Wallet reversal failed; reopen aborted: {e}",
+                )
 
     # ── 2) Restore the position to OPEN state ───────────────────────
     # Reconstruct quantity from the snapshot we took at open. If
