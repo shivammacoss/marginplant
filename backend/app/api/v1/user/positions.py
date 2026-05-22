@@ -706,6 +706,45 @@ async def list_active_trades(user: CurrentUser):
             ltp_by_token[tok] = 0.0
     usd_inr = market_data_service.get_usd_inr_rate()
 
+    # Batch-resolve effective overnight settings per unique
+    # (segment, product_type, symbol, action) so each Active-tab card can
+    # show the REAL carry-forward margin instead of the old `used × 1.4`
+    # heuristic. Operator-flagged 22-May: TCS card on Active tab read
+    # ₹1,127 (805.28 × 1.4) while the trade dialog correctly showed
+    # ₹5,752 from segment-settings — two different numbers for the same
+    # position. Resolver cache (5 min) makes repeat calls cheap even
+    # with dozens of positions.
+    ovn_settings_by_key: dict[tuple[str, str, str, str], dict] = {}
+    unique_keys = list({
+        (
+            p.instrument.segment,
+            str(p.product_type.value),
+            p.instrument.symbol,
+            "BUY" if p.quantity >= 0 else "SELL",
+        )
+        for p in open_positions
+    })
+    if unique_keys:
+        resolved_list = await asyncio.gather(
+            *[
+                netting_service.get_effective_settings(
+                    user.id,
+                    seg,
+                    action=action,
+                    option_type=None,
+                    product_type="NRML",
+                    symbol=sym,
+                )
+                for seg, _prod, sym, action in unique_keys
+            ],
+            return_exceptions=True,
+        )
+        for k, r in zip(unique_keys, resolved_list):
+            if isinstance(r, BaseException) or not isinstance(r, dict):
+                ovn_settings_by_key[k] = {}
+            else:
+                ovn_settings_by_key[k] = r.get("settings") or {}
+
     # ── FIFO matching ─────────────────────────────────────────────────
     # Without this, closing one BUY fill via the active-trades "Close"
     # button reduces the underlying position but the BUY trade record
@@ -807,17 +846,48 @@ async def list_active_trades(user: CurrentUser):
         # this trade's remaining qty. Without this the frontend's
         # `r.margin_used / r.margin` keys both fall through to 0 and
         # the Used / Holding columns render as "₹0.00" for every row.
-        # `holding_margin` is the carryforward (NRML) requirement —
-        # for MIS positions that's 1.4× of the locked intraday, for
-        # NRML (already overnight) it's the same as `used`.
         pos_total_qty = abs(float(p.quantity)) or 1.0
         pos_margin = float(str(p.margin_used or 0))
         trade_share = qty / pos_total_qty if pos_total_qty > 0 else 0.0
         used_margin_inr = round(pos_margin * trade_share, 2)
-        is_mis = str(p.product_type.value).upper() == "MIS"
-        holding_margin_inr = round(
-            used_margin_inr * (1.4 if is_mis else 1.0), 2
+
+        # `holding_margin` — true carry-forward requirement, NOT the old
+        # `intraday × 1.4` guess. Read the effective overnight settings
+        # for this user's pool (resolver cascades broker → admin →
+        # super-admin → global), then compute notional × pct ÷ leverage
+        # for this trade's slice. Same formula `order_validator` runs at
+        # order-placement time, so the per-fill Holding tile now agrees
+        # with the OrderPanel's "Carry-forward margin" preview the user
+        # saw before placing the trade.
+        sett_key = (
+            p.instrument.segment,
+            str(p.product_type.value),
+            p.instrument.symbol,
+            "BUY" if p.quantity >= 0 else "SELL",
         )
+        s = ovn_settings_by_key.get(sett_key) or {}
+        try:
+            lot_size = max(1, int(p.instrument.lot_size or 1))
+            trade_lots = qty / lot_size if lot_size > 0 else qty
+            mode = s.get("margin_calc_mode") or "times"
+            ovn_fixed = float(s.get("overnight_fixed_margin_per_lot") or 0)
+            if mode == "fixed" and ovn_fixed > 0:
+                holding_native = ovn_fixed * trade_lots
+            else:
+                trade_notional = qty * price
+                ovn_pct = float(s.get("overnight_margin_percentage") or 100.0) / 100.0
+                ovn_lev = float(s.get("overnight_leverage") or 1.0) or 1.0
+                holding_native = trade_notional * ovn_pct / ovn_lev
+            # USD → INR same as the order validator does. Skip for
+            # fixed mode where ₹/lot is already admin-entered in INR.
+            if is_usd and not (mode == "fixed" and ovn_fixed > 0):
+                holding_native *= fx
+            holding_margin_inr = round(holding_native, 2)
+        except Exception:
+            # Resolver hiccup — fall back to the locked intraday margin
+            # so the card never shows ₹0 / NaN, but DON'T multiply by
+            # 1.4 (the bug this commit is fixing).
+            holding_margin_inr = used_margin_inr
 
         rows.append({
             "id": str(t.id),
