@@ -122,6 +122,16 @@ class PositionOut(BaseModel):
     realized_pnl: str
     unrealized_pnl: str
     margin_used: str
+    # Carry-forward (overnight) margin requirement for THIS position,
+    # computed in `/positions/open` via the segment-settings cascade
+    # (notional ÷ overnight_leverage, or lots × overnight_fixed_margin
+    # in fixed mode). FastAPI's response_model filter strips any field
+    # that isn't declared here, even when the serializer dict has it —
+    # which is exactly what masked this for two days: backend computed
+    # holding=2882.10 for an OPT BUY but the response shipped without
+    # the field, so the user-card's `holdingMarginFor` fell back to
+    # `margin_used` and rendered USED == HOLDING. Declare it.
+    holding_margin: str | None = None
     stop_loss: str | None = None
     target: str | None = None
     status: str
@@ -140,6 +150,15 @@ class PositionOut(BaseModel):
     # column then renders ₹0.00 even for a charged trade. Same pattern as
     # `lots` / `lot_size` / `pnl_inr` above.
     charges: str | None = None
+    # USD-quoted segments (Infoway: crypto / forex / metals / energy)
+    # — these are populated in /positions/open's serialiser dict but
+    # were silently stripped by the response_model filter, so the
+    # mobile cards on those segments never showed the FX rate banner.
+    # Declaring them lets the frontend render "USD/INR @ 83.21" next to
+    # the row again.
+    currency_quote: str | None = None
+    open_usd_inr_rate: str | None = None
+    current_usd_inr_rate: str | None = None
 
 
 class HoldingOut(BaseModel):
