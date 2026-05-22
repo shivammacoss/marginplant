@@ -718,6 +718,17 @@ async def convert_intraday_to_carry(segment_set: frozenset[str] | set[str]) -> d
                         "placed_from": "OVERNIGHT_DISABLED_CLOSE",
                     },
                 )
+                # Same close_reason stamping as the "can't afford CF"
+                # branch below — the Closed-tab on the user side reads
+                # this to tell the user "Closed by Auto" instead of
+                # showing a blank chip.
+                try:
+                    refreshed = await Position.get(pos.id)
+                    if refreshed and refreshed.status == PositionStatus.CLOSED and not refreshed.close_reason:
+                        refreshed.close_reason = "AUTO"
+                        await refreshed.save()
+                except Exception:  # noqa: BLE001
+                    pass
                 force_closed += 1
             except Exception:  # noqa: BLE001
                 skipped += 1
@@ -804,6 +815,21 @@ async def convert_intraday_to_carry(segment_set: frozenset[str] | set[str]) -> d
                         "placed_from": "INTRADAY_ROLLOVER",
                     },
                 )
+                # Stamp `close_reason="AUTO"` on the position so the
+                # Closed-tab card on the user side renders "Closed by
+                # Auto" (the EOD-rollover lane) instead of "—". The
+                # matching engine's apply_fill doesn't write
+                # close_reason — risk_enforcer and the carry-forward
+                # rollover have to stamp it themselves. Operator
+                # 22-May: MAHADEV's TCS auto-close came up with a
+                # blank reason; this fixes that for future rollovers.
+                try:
+                    refreshed = await Position.get(pos.id)
+                    if refreshed and refreshed.status == PositionStatus.CLOSED and not refreshed.close_reason:
+                        refreshed.close_reason = "AUTO"
+                        await refreshed.save()
+                except Exception:  # noqa: BLE001
+                    pass
                 force_closed += 1
             except Exception:  # noqa: BLE001
                 skipped += 1
