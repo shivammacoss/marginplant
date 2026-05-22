@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, Minus, Plus } from "lucide-react";
+import { AlertTriangle, ChevronDown, Minus, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { OrderAPI, SegmentSettingsAPI, WalletAPI } from "@/lib/api";
@@ -277,8 +277,15 @@ export function OrderPanel({ instrument, ltp, bid, ask, fxRate }: Props) {
   const orderTypeApi: "MARKET" | "LIMIT" | "SL_M" =
     orderType === "SL-M" ? "SL_M" : (orderType as "MARKET" | "LIMIT");
 
-  const sellPrice = bid ?? ltp ?? 0;
-  const buyPrice = ask ?? ltp ?? 0;
+  // No LTP fallback — when the feed has no real bid/ask (illiquid options
+  // like deep-OTM GOLD150000CE, dead symbols), the side stays at 0 and the
+  // panel below renders "—" + disables that side of the trade. Falling
+  // back to LTP would show a fake price the user can't actually fill at.
+  // Position CLOSE paths still use LTP fallback — exits must always work.
+  const sellPrice = bid ?? 0;
+  const buyPrice = ask ?? 0;
+  const sidePriceMissing =
+    (side === "BUY" && buyPrice <= 0) || (side === "SELL" && sellPrice <= 0);
 
   // No currency prefix anywhere price is shown — display the bare
   // grouped number. Decimal count still varies by instrument so crypto
@@ -287,7 +294,8 @@ export function OrderPanel({ instrument, ltp, bid, ask, fxRate }: Props) {
   const priceCcy = "";
   const priceDecimals = isCrypto ? 2 : isForex ? 4 : 2;
   function fmtPrice(n: number) {
-    return `${priceCcy}${Number(n || 0).toFixed(priceDecimals)}`;
+    if (!n || n <= 0) return "—";
+    return `${priceCcy}${Number(n).toFixed(priceDecimals)}`;
   }
 
   // ── Limit-away hints ────────────────────────────────────────────
@@ -368,6 +376,17 @@ export function OrderPanel({ instrument, ltp, bid, ask, fxRate }: Props) {
   function submit() {
     if (!instrument) {
       toast.error("Instrument not loaded — try selecting it again");
+      return;
+    }
+    // ── No live quote on this side ─────────────────────────────────────
+    // Block the order outright when there's no real bid (for SELL) or ask
+    // (for BUY). Otherwise an illiquid option / dead feed would let the
+    // user "place" an order that the matching engine rejects, or worse,
+    // fills at a stale LTP that's nowhere near a real counter-party.
+    if (sidePriceMissing) {
+      toast.error(
+        `Cannot ${side === "BUY" ? "buy" : "sell"} — no live ${side === "BUY" ? "ask" : "bid"} price for this instrument. Try a different contract.`,
+      );
       return;
     }
     if (!lots || lots < minLot) {
@@ -1046,11 +1065,22 @@ export function OrderPanel({ instrument, ltp, bid, ask, fxRate }: Props) {
       </div>
 
       <div className="border-t border-border p-3">
+        {sidePriceMissing && (
+          <div className="mb-2 flex items-start gap-2 rounded-md border border-atm/40 bg-atm/10 px-2.5 py-1.5 text-[11px] text-atm">
+            <AlertTriangle className="mt-px size-3.5 shrink-0" />
+            <span>
+              No live {side === "BUY" ? "ask" : "bid"} price for this
+              instrument — illiquid or feed unavailable. Try a different
+              contract.
+            </span>
+          </div>
+        )}
         <Button
           type="button"
           variant={side === "BUY" ? "buy" : "sell"}
           className="h-11 w-full text-sm font-semibold"
           loading={submitting}
+          disabled={sidePriceMissing}
           onClick={submit}
         >
           {side} {fmtLots(lots)} {isCrypto || isForex ? "lots" : `lot${lots === 1 ? "" : "s"}`}

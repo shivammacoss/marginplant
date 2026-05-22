@@ -206,24 +206,34 @@ async def _zerodha_overlay(token: str, base_quote: dict[str, Any]) -> dict[str, 
         #   1. Explicit `live.bid` / `live.ask` (set by REST snapshot
         #      or MODE_FULL pushes)
         #   2. Top of Kite depth book (MODE_FULL ticks)
-        #   No synthesised fallback — when no real bid/ask is available
-        #   we collapse them to the LTP so the admin's segment spread
-        #   setting becomes the single source of bid/ask separation.
+        #   No synthesised fallback — when no real bid/ask is available,
+        #   leave the field at 0 so downstream code (order panel, limit-
+        #   away validator) can detect "no live quote" and refuse to
+        #   accept opening trades on illiquid contracts. The admin
+        #   segment-spread overlay that runs LATER in this chain still
+        #   gets to synthesise bid/ask from LTP ± half-spread for
+        #   segments with `spread_pips > 0` — only instruments with
+        #   neither real depth NOR an admin spread end up at 0.
+        #
+        # Operator-flagged 22-May: deep-OTM options like GOLD150000CE
+        # had no real depth and no admin spread, so bid/ask were quietly
+        # mirrored to the (stale) LTP and the order panel showed a
+        # "tradeable" price on contracts that physically can't fill.
+        # Trade would either reject mid-flight or fill at a junk price.
         live_bid = float(live.get("bid") or 0)
         live_ask = float(live.get("ask") or 0)
-        ltp_f = float(merged.get("ltp") or 0)
         if live_bid > 0:
             merged["bid"] = live_bid
         elif best_bid_from_depth and best_bid_from_depth > 0:
             merged["bid"] = best_bid_from_depth
         else:
-            merged["bid"] = ltp_f
+            merged["bid"] = 0.0
         if live_ask > 0:
             merged["ask"] = live_ask
         elif best_ask_from_depth and best_ask_from_depth > 0:
             merged["ask"] = best_ask_from_depth
         else:
-            merged["ask"] = ltp_f
+            merged["ask"] = 0.0
 
         if merged["prev_close"]:
             merged["change"] = round(merged["ltp"] - merged["prev_close"], 2)
@@ -260,14 +270,18 @@ async def _infoway_overlay(token: str, base_quote: dict[str, Any]) -> dict[str, 
             return base_quote
         merged = dict(base_quote)
         merged["ltp"] = ltp
-        # Real best-bid / best-ask from Infoway depth book — collapse to
-        # the LTP when no real bid/ask is pushed. Admin's segment spread
-        # setting is the single source of bid/ask separation, no
-        # synthesised micro-spread fallback.
+        # Real best-bid / best-ask from Infoway depth book. When the feed
+        # publishes no bid/ask (dead / illiquid symbol), leave the side at
+        # 0 instead of collapsing to LTP — the order panel reads a 0 here
+        # as "no live quote" and disables that side of the trade. The
+        # admin segment-spread overlay still runs AFTER this; segments
+        # with `spread_pips > 0` will synthesise bid/ask from LTP, so
+        # only symbols with neither real depth NOR an admin spread end
+        # up at 0.
         live_bid = float(live.get("bid") or 0)
         live_ask = float(live.get("ask") or 0)
-        merged["bid"] = live_bid if live_bid > 0 else ltp
-        merged["ask"] = live_ask if live_ask > 0 else ltp
+        merged["bid"] = live_bid if live_bid > 0 else 0.0
+        merged["ask"] = live_ask if live_ask > 0 else 0.0
         merged["volume"] = float(live.get("volume") or merged.get("volume") or 0)
         if live.get("close_24h"):
             merged["prev_close"] = float(live["close_24h"])
