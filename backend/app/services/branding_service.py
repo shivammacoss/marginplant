@@ -122,7 +122,16 @@ def normalize_user_code(raw: str | None) -> str | None:
 
 def to_branding_payload(admin: User) -> dict:
     """Public-safe branding fields for an admin (used by /by-code,
-    /by-domain, /me/branding). Hides any internal/PII data."""
+    /by-domain, /me/branding). Hides any internal/PII data.
+
+    `custom_domain_last_error` is included because the admin-side UI
+    needs it to render the FAILED panel inline without a second
+    /domain/status call. The string is operator-friendly (DNS error
+    messages, certbot stderr summaries) — not sensitive — so it's
+    safe to surface even on the public endpoints (they only return
+    it when status == FAILED, which is a transient state public
+    callers won't typically see anyway).
+    """
     return {
         "admin_id": str(admin.id),
         "user_code": admin.user_code,
@@ -130,6 +139,7 @@ def to_branding_payload(admin: User) -> dict:
         "logo_url": admin.logo_url,
         "custom_domain": admin.custom_domain,
         "custom_domain_status": admin.custom_domain_status,
+        "custom_domain_last_error": admin.custom_domain_last_error,
     }
 
 

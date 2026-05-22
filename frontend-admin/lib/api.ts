@@ -668,6 +668,10 @@ export type BrandingPayload = {
   logo_url: string | null;
   custom_domain: string | null;
   custom_domain_status: string | null;
+  // Surfaced by the admin /me endpoint so the UI can render the FAILED
+  // panel inline without a second /domain/status call. May be null at
+  // any other status.
+  custom_domain_last_error: string | null;
 };
 
 export type DomainStatus = {
