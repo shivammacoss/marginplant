@@ -1,7 +1,7 @@
 """Risk Management background enforcer.
 
-Runs every 1 s (see `risk_enforcer_loop` default). Implements the simplified
-spec:
+Runs every 250 ms (see `risk_enforcer_loop` default). Implements the
+simplified spec:
 
     stopOutWarningPercent  — notify when (-total_pnl) / balance × 100 ≥ this %.
                              "balance" = wallet.available + used_margin + credit_limit
@@ -651,27 +651,71 @@ async def enforce_once() -> int:
     return count
 
 
-async def risk_enforcer_loop(interval_sec: float = 1.0) -> None:
-    """Background loop launched from the FastAPI lifespan. 1 s cadence
-    — fast enough that an SL/TP bracket fires within the same second
-    the price crosses (vs the old 5 s gap which let LTP drift several
-    ticks past the trigger before the close booked). The per-tick
-    cost is tiny because `_enforce_for_user` already fans out the LTP
-    lookups in parallel and reads the wallet + risk-policy from Redis-
-    backed cache. Even bracket fires are idempotent because the
-    closed position is filtered out of the next sweep."""
+# Hard lower bound on inter-tick sleep. Even if a single tick somehow
+# takes longer than `interval_sec`, we still yield this much so we
+# never hot-spin and starve the event loop. 50 ms is short enough that
+# the 250 ms cadence is preserved when ticks run on time, but long
+# enough to keep the worker responsive to other coroutines if
+# something goes wrong (network blip on Mongo, Redis hiccup, etc).
+_MIN_TICK_GAP_SEC = 0.05
+
+
+async def risk_enforcer_loop(interval_sec: float = 0.25) -> None:
+    """Background loop launched from the FastAPI lifespan.
+
+    250 ms cadence — four sweeps per second — so an SL/TP bracket or
+    a stop-out threshold breach is caught within ~quarter of a second
+    of the price crossing it, instead of the old 5-s gap that let
+    LTP drift several ticks past the trigger before the close booked.
+
+    Per-tick cost is small by design:
+      • `enforce_once` issues ONE indexed Mongo `distinct` to find
+        users with open positions.
+      • `_enforce_for_user` parallelises every LTP lookup, and reads
+        wallet + risk policy from Redis-backed cache.
+      • `refresh_unrealized_pnl` is in-memory — no Mongo write per
+        tick. Saves only happen when something actually fires
+        (close, self-heal).
+      • Bracket fires are idempotent (closed positions filter out of
+        the next sweep) and the squareoff path uses an atomic Mongo
+        claim to dedup across workers / leader handoffs.
+
+    Drift-corrected sleep: we measure how long the tick took and
+    sleep for the REMAINDER of the interval, not a fixed slice. So
+    an 80-ms tick is followed by a 170-ms sleep — keeping the real
+    cadence locked at `interval_sec` regardless of load, instead of
+    compounding to 330 ms per tick the way a fixed sleep would.
+
+    Overrun warning: if a tick exceeds the interval we log it once
+    at WARNING (`risk_enforcer_tick_overrun`). That's the operator
+    signal to either bump the interval or scale workers — we still
+    complete the tick (no skip), but the user is told the risk loop
+    is falling behind so they can act on it.
+    """
     global _running
     if _running:
         return
     _running = True
     logger.info("risk_enforcer_started", extra={"interval_sec": interval_sec})
     try:
+        loop = asyncio.get_event_loop()
         while _running:
+            t0 = loop.time()
             try:
                 await enforce_once()
             except Exception:
                 logger.exception("risk_enforcer_tick_failed")
-            await asyncio.sleep(interval_sec)
+            elapsed = loop.time() - t0
+            if elapsed > interval_sec:
+                logger.warning(
+                    "risk_enforcer_tick_overrun",
+                    extra={
+                        "elapsed_sec": round(elapsed, 3),
+                        "interval_sec": interval_sec,
+                    },
+                )
+            sleep_for = max(_MIN_TICK_GAP_SEC, interval_sec - elapsed)
+            await asyncio.sleep(sleep_for)
     finally:
         _running = False
         logger.info("risk_enforcer_stopped")

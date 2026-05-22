@@ -240,15 +240,23 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     )
     setattr(app, "_pending_order_task", pending_task)
 
-    # Risk enforcer: every 5 s checks every user with open positions for
-    # margin-call / stop-out / ledger-balance breaches and acts on them
-    # (notify or auto-squareoff). Without this, the Risk Management
-    # settings on the admin page do nothing automatically.
+    # Risk enforcer: every 250 ms checks every user with open positions
+    # for margin-call / stop-out / ledger-balance breaches and acts on
+    # them (notify or auto-squareoff). 4 sweeps/sec means an SL/TP
+    # bracket or a stop-out threshold breach is acted on within a
+    # quarter-second of the price crossing — vs the previous 5-s gap
+    # that let live LTP drift several ticks past the trigger before
+    # the close booked. The loop itself is drift-corrected (sleeps
+    # for the remainder of the interval, not a fixed slice) and
+    # logs `risk_enforcer_tick_overrun` if a tick can't finish in
+    # 250 ms — that's the operator signal to scale workers or bump
+    # the interval. Without this loop the Risk Management settings on
+    # the admin page do nothing automatically.
     from app.services.risk_enforcer import risk_enforcer_loop
     risk_task: _asyncio.Task = _asyncio.create_task(
         _supervise(
             "risk_enforcer",
-            _leader_only("risk_enforcer", risk_enforcer_loop, interval_sec=5.0),
+            _leader_only("risk_enforcer", risk_enforcer_loop, interval_sec=0.25),
         )
     )
     setattr(app, "_risk_enforcer_task", risk_task)
