@@ -3,6 +3,7 @@
 import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { BrandLogo } from "@/components/layout/BrandLogo";
+import { useBranding } from "@/lib/branding-context";
 
 // Marketing-split layout is wrapped in a Suspense boundary so the inner
 // component can read `useSearchParams()` (Next.js 14 requires this). The
@@ -20,6 +21,11 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
 
 function AuthLayoutInner({ children }: { children: React.ReactNode }) {
   const searchParams = useSearchParams();
+  const { branding } = useBranding();
+  // Wordmark used in the mobile-only header + footer. Falls back to the
+  // platform default ("MarginPlant Broker") when no tenant branding has
+  // resolved — preserves byte-identical UX for non-branded visitors.
+  const tenantName = (branding?.brand_name ?? "").trim();
   // Admin "Login as user" pops a new tab carrying both tokens in the
   // URL — when that's the case the marketing-split layout (the left
   // "Trade Indian markets" panel + the form column) was flashing for
@@ -53,7 +59,7 @@ function AuthLayoutInner({ children }: { children: React.ReactNode }) {
             </p>
           </div>
           <div className="text-sm text-muted-foreground">
-            © {new Date().getFullYear()} MarginPlant Broker · All rights reserved
+            © {new Date().getFullYear()} {tenantName || "MarginPlant Broker"} · All rights reserved
           </div>
         </div>
         <div className="flex flex-col items-center justify-start p-6 pt-10 lg:justify-center lg:pt-6">
@@ -72,8 +78,14 @@ function AuthLayoutInner({ children }: { children: React.ReactNode }) {
               <BrandLogo href={null} size="lg" iconOnly />
             </div>
             <span className="text-lg font-semibold tracking-tight">
-              <span className="text-primary">MarginPlant</span>
-              <span className="text-foreground"> Broker</span>
+              {tenantName ? (
+                <span className="text-foreground">{tenantName}</span>
+              ) : (
+                <>
+                  <span className="text-primary">MarginPlant</span>
+                  <span className="text-foreground"> Broker</span>
+                </>
+              )}
             </span>
             <p className="max-w-xs text-xs text-muted-foreground">
               Trade Indian markets — fast, fair, focused.
