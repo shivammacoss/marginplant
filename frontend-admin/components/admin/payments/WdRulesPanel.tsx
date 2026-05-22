@@ -127,34 +127,29 @@ function WdRuleCard({
     setForm((f) => ({ ...f, allowed_days: next }));
   }
 
-  function setTimeWindow(start: string, end: string) {
-    setForm((f) => ({ ...f, allowed_times: [{ start, end }] }));
-  }
-
   async function save() {
     setSaving(true);
     try {
-      // Send only what the admin actually filled — blanks → null
-      // (clears this tier's override on that field so the cascade kicks
-      // back in). The backend coerces sparse payloads correctly.
-      const payload: Record<string, any> = {};
-      const moneyFields = [
-        "min_amount",
-        "max_amount",
-        "daily_limit",
-        "charges_flat",
-        "auto_approve_under",
-      ] as const;
-      for (const f of moneyFields) {
-        const v = form[f];
-        if (v === "" || v === null) payload[f] = null;
-        else payload[f] = String(v);
-      }
-      if (form.charges_percent === null) payload.charges_percent = null;
-      else payload.charges_percent = Number(form.charges_percent);
-      payload.mandatory_remark = form.mandatory_remark;
-      payload.allowed_days = form.allowed_days;
-      payload.allowed_times = form.allowed_times;
+      // Operator 22-May trimmed the UI to just Min / Max / Allowed days /
+      // Mandatory remark — daily limit / auto-approve / charges / time
+      // window are now ALWAYS sent as `null` so they explicitly clear
+      // at this tier. That keeps the cascade clean even if a previous
+      // version of this form (or the global seed) had them set.
+      const payload: Record<string, any> = {
+        min_amount: form.min_amount === "" || form.min_amount === null ? null : String(form.min_amount),
+        max_amount: form.max_amount === "" || form.max_amount === null ? null : String(form.max_amount),
+        mandatory_remark: form.mandatory_remark,
+        allowed_days: form.allowed_days,
+        // Always null — operator-removed fields. Sending null clears any
+        // historical override at this tier; the validator then skips
+        // those checks entirely (it treats 0 daily_limit and empty
+        // allowed_times as "no restriction").
+        daily_limit: null,
+        auto_approve_under: null,
+        charges_flat: null,
+        charges_percent: null,
+        allowed_times: null,
+      };
 
       await PayinOutAPI.updateWdRule(rule.rule_type, payload);
       toast.success("Saved");
@@ -169,8 +164,6 @@ function WdRuleCard({
   const effActiveDays: number[] =
     rule.effective.allowed_days ?? [0, 1, 2, 3, 4, 5, 6];
   const formActiveDays: number[] = form.allowed_days ?? effActiveDays;
-  const effTime = rule.effective.allowed_times?.[0] ?? { start: "09:00", end: "21:00" };
-  const formTime = form.allowed_times?.[0] ?? null;
 
   return (
     <Card>
@@ -194,43 +187,6 @@ function WdRuleCard({
             value={form.max_amount}
             hint={inheritHint(rule, "max_amount", `₹${rule.effective.max_amount ?? 0}`)}
             onChange={(v) => setForm((f) => ({ ...f, max_amount: v }))}
-          />
-          <RuleInput
-            label="Daily limit (₹)"
-            value={form.daily_limit}
-            hint={inheritHint(rule, "daily_limit", `₹${rule.effective.daily_limit ?? 0}`)}
-            onChange={(v) => setForm((f) => ({ ...f, daily_limit: v }))}
-          />
-          <RuleInput
-            label="Auto-approve under (₹)"
-            value={form.auto_approve_under}
-            hint={inheritHint(
-              rule,
-              "auto_approve_under",
-              `₹${rule.effective.auto_approve_under ?? 0}`,
-            )}
-            onChange={(v) => setForm((f) => ({ ...f, auto_approve_under: v }))}
-          />
-          <RuleInput
-            label="Flat charge (₹)"
-            value={form.charges_flat}
-            hint={inheritHint(rule, "charges_flat", `₹${rule.effective.charges_flat ?? 0}`)}
-            onChange={(v) => setForm((f) => ({ ...f, charges_flat: v }))}
-          />
-          <RuleInput
-            label="Charge %"
-            value={form.charges_percent === null ? null : String(form.charges_percent)}
-            hint={inheritHint(
-              rule,
-              "charges_percent",
-              `${rule.effective.charges_percent ?? 0}%`,
-            )}
-            onChange={(v) =>
-              setForm((f) => ({
-                ...f,
-                charges_percent: v === null || v === "" ? null : Number(v),
-              }))
-            }
           />
         </div>
 
@@ -269,39 +225,6 @@ function WdRuleCard({
             {form.allowed_days === null
               ? `Inheriting from ${rule.sources.allowed_days || "default"} — currently ${formatDays(effActiveDays)}`
               : `Will save: ${formatDays(formActiveDays)}`}
-          </p>
-        </div>
-
-        <div className="space-y-1.5">
-          <Label className="text-xs">Allowed time window (IST)</Label>
-          <div className="flex flex-wrap items-center gap-2">
-            <Input
-              type="time"
-              value={formTime?.start ?? effTime.start}
-              onChange={(e) => setTimeWindow(e.target.value, formTime?.end ?? effTime.end)}
-              className="h-8 w-28 text-xs"
-            />
-            <span className="text-muted-foreground">→</span>
-            <Input
-              type="time"
-              value={formTime?.end ?? effTime.end}
-              onChange={(e) => setTimeWindow(formTime?.start ?? effTime.start, e.target.value)}
-              className="h-8 w-28 text-xs"
-            />
-            {formTime !== null && (
-              <button
-                type="button"
-                onClick={() => setForm((f) => ({ ...f, allowed_times: null }))}
-                className="text-[11px] text-muted-foreground hover:underline"
-              >
-                Reset to inherit
-              </button>
-            )}
-          </div>
-          <p className="text-[10px] text-muted-foreground">
-            {formTime === null
-              ? `Inheriting from ${rule.sources.allowed_times || "default"} — currently ${effTime.start}–${effTime.end}`
-              : `Will save: ${formTime.start}–${formTime.end}`}
           </p>
         </div>
 

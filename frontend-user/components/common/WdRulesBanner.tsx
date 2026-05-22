@@ -42,12 +42,6 @@ export function WdRulesBanner({ kind, className }: Props) {
   const daysLabel = isAllDays
     ? "All days"
     : rule.allowed_days!.map((d) => WEEKDAYS[d]).filter(Boolean).join(", ");
-  const timeLabel =
-    !rule.allowed_times || rule.allowed_times.length === 0
-      ? "Anytime"
-      : rule.allowed_times
-          .map((w) => `${w.start}–${w.end}`)
-          .join(", ") + " IST";
 
   return (
     <div
@@ -62,19 +56,10 @@ export function WdRulesBanner({ kind, className }: Props) {
           {kind === "deposit" ? "Deposit rules" : "Withdrawal rules"}
         </span>
       </div>
-      <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
         <RuleRow label="Min amount" value={formatINR(rule.min_amount)} />
         <RuleRow label="Max amount" value={formatINR(rule.max_amount)} />
-        <RuleRow label="Daily limit" value={formatINR(rule.daily_limit)} />
-        <RuleRow
-          label="Charges"
-          value={
-            (rule.charges_percent ? `${rule.charges_percent}% ` : "") +
-              (Number(rule.charges_flat) > 0 ? `+ ${formatINR(rule.charges_flat)}` : "") || "None"
-          }
-        />
         <RuleRow label="Allowed days" value={daysLabel} wide />
-        <RuleRow label="Time window" value={timeLabel} wide />
       </div>
       {rule.mandatory_remark && (
         <p className="mt-2 text-[11px] font-medium text-amber-500">
