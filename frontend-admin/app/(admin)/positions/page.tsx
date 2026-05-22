@@ -113,8 +113,14 @@ function fmtOpenedAt(v: string | Date | null | undefined): string {
 /** Human-readable duration between two timestamps. Used by the Closed
  *  Trades tab's "Holding Time" column so admins can spot positions that
  *  were squared off in seconds (likely a misclick) vs ones held for
- *  hours/days. Granularity adapts to magnitude: seconds → "<1m",
- *  minutes → "Xm", under a day → "Xh Ym", longer → "Xd Yh". */
+ *  hours/days. Granularity is PRECISE down to the second so a "0s"
+ *  misclick and a "47s" panic-close are visibly different — operator
+ *  flagged 22-May that "<1m" collapsed too many useful states into one
+ *  bucket. Format ladder:
+ *    under 1 min → "Xs"
+ *    under 1 hr  → "Xm Ys"   (or "Xm" when Y == 0)
+ *    under 1 day → "Xh Ym"   (or "Xh" when Y == 0)
+ *    anything else → "Xd Yh" (or "Xd" when Y == 0) */
 function fmtHoldingTime(
   opened: string | Date | null | undefined,
   closed: string | Date | null | undefined,
@@ -124,9 +130,13 @@ function fmtHoldingTime(
   if (!a || !b) return "—";
   const ms = b.getTime() - a.getTime();
   if (ms < 0) return "—";
-  if (ms < 60_000) return "<1m";
-  const totalMin = Math.floor(ms / 60_000);
-  if (totalMin < 60) return `${totalMin}m`;
+  const totalSec = Math.floor(ms / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const totalMin = Math.floor(totalSec / 60);
+  const secPart = totalSec % 60;
+  if (totalMin < 60) {
+    return secPart > 0 ? `${totalMin}m ${secPart}s` : `${totalMin}m`;
+  }
   const totalHr = Math.floor(totalMin / 60);
   const minPart = totalMin % 60;
   if (totalHr < 24) return minPart > 0 ? `${totalHr}h ${minPart}m` : `${totalHr}h`;
