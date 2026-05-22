@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { XCircle, X as XIcon } from "lucide-react";
+import { Search, XCircle, X as XIcon } from "lucide-react";
 import { TradingAPI, UsersAPI } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -74,6 +74,18 @@ function AdminOrdersInner() {
     if (isValidTab(queryTab)) setTab(queryTab);
   }, [queryTab]);
 
+  // Search box lives at the page level (not inside a single tab) so the
+  // operator keeps their query when flipping between Pending / Executed
+  // / Rejected / SL-TP — "esme sare section me" from the 22-May ask.
+  // Input is debounced by 300 ms before being sent to the API so each
+  // keystroke doesn't fire its own request.
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  useEffect(() => {
+    const id = setTimeout(() => setSearchQuery(searchInput.trim()), 300);
+    return () => clearTimeout(id);
+  }, [searchInput]);
+
   const { data: scopedUser } = useQuery({
     queryKey: ["admin", "user", queryUserId],
     queryFn: () => UsersAPI.detail(queryUserId!),
@@ -104,48 +116,83 @@ function AdminOrdersInner() {
         </div>
       )}
 
-      <div className="inline-flex flex-wrap rounded-md border border-border bg-muted/30 p-1 text-sm">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setTab(t.id)}
-            className={cn(
-              "rounded px-3 py-1.5 transition-colors",
-              tab === t.id ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground"
-            )}
-          >
-            {t.label}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="inline-flex flex-wrap rounded-md border border-border bg-muted/30 p-1 text-sm">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setTab(t.id)}
+              className={cn(
+                "rounded px-3 py-1.5 transition-colors",
+                tab === t.id ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="relative flex-1 min-w-[220px] max-w-md">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <input
+            type="text"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Search by user name, code, or symbol…"
+            className="h-9 w-full rounded-md border border-border bg-muted/20 pl-8 pr-8 text-sm outline-none placeholder:text-muted-foreground focus:border-primary"
+          />
+          {searchInput && (
+            <button
+              type="button"
+              onClick={() => setSearchInput("")}
+              aria-label="Clear search"
+              className="absolute right-2 top-1/2 grid size-5 -translate-y-1/2 place-items-center rounded text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+            >
+              <XIcon className="size-3" />
+            </button>
+          )}
+        </div>
       </div>
 
-      <OrdersTable tab={tab} userId={queryUserId} />
+      <OrdersTable tab={tab} userId={queryUserId} search={searchQuery} />
     </div>
   );
 }
 
-function OrdersTable({ tab, userId }: { tab: Tab; userId?: string | null }) {
+function OrdersTable({
+  tab,
+  userId,
+  search,
+}: {
+  tab: Tab;
+  userId?: string | null;
+  search?: string;
+}) {
   const qc = useQueryClient();
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
 
   useEffect(() => {
     setPage(1);
-  }, [tab, userId]);
+  }, [tab, userId, search]);
 
   const apiParams = useMemo<Record<string, any>>(() => {
     const base: Record<string, any> = {
       page,
       page_size: pageSize,
       user_id: userId || undefined,
+      // Backend ignores `q` shorter than 2 chars; omit entirely so the
+      // query-key stays stable across empty-search renders and React
+      // Query doesn't refetch on every initial keystroke.
+      q: search && search.length >= 2 ? search : undefined,
     };
     if (tab === "pending") base.statuses = "PENDING,OPEN,PARTIAL";
     else if (tab === "executed") base.status = "EXECUTED";
     else if (tab === "rejected") base.status = "REJECTED";
     else if (tab === "sltp") base.sl_tp = true;
     return base;
-  }, [tab, userId, page, pageSize]);
+  }, [tab, userId, search, page, pageSize]);
 
   const { data, isFetching } = useQuery({
     queryKey: ["admin", "orders", apiParams],

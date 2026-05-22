@@ -86,6 +86,7 @@ async def list_orders(
     statuses: str | None = None,
     sl_tp: bool = False,
     user_id: str | None = None,
+    q: str | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     _: None = Depends(require_perm("trading_view", "read")),
@@ -104,7 +105,43 @@ async def list_orders(
                       hai"). The shape is normalised to look like an
                       order row so the same DataTable renders both.
       • `user_id`   — scope to one user (used by user-detail deep links).
+      • `q`         — free-text search across user full_name, user_code,
+                      and instrument symbol (case-insensitive). Powers
+                      the Orders monitor's search box so the operator
+                      can find rows across every tab without picking a
+                      user first. Resolves matching user_ids in one
+                      lookup, then applies an `$or` against user_id +
+                      symbol so a query like "AJAY" matches both his
+                      orders AND any order on instrument "AJAY...".
     """
+    # Resolve free-text search to a list of matching user_ids + a
+    # symbol regex so both the orders branch and the SL/TP positions
+    # branch can splice the same `$or` filter into their queries.
+    # Skipped when the operator passed `user_id` directly (a deep-link
+    # from the user-detail page already pins the scope) or when `q` is
+    # too short to be useful (< 2 chars would match almost everything
+    # and just hammer Mongo with a regex scan).
+    search_user_ids: list[PydanticObjectId] | None = None
+    search_symbol_regex: dict[str, Any] | None = None
+    if q and len(q.strip()) >= 2 and not user_id:
+        needle = re.escape(q.strip())
+        regex = {"$regex": needle, "$options": "i"}
+        # Scope the user search to the admin's visible set so a
+        # sub-admin's search can't leak rows from other brokers'
+        # books. `scoped_user_ids` returns None for unrestricted
+        # super-admins.
+        scope_ids = await scoped_user_ids(admin)
+        u_filter: dict[str, Any] = {
+            "$or": [
+                {"full_name": regex},
+                {"user_code": regex},
+            ]
+        }
+        if scope_ids is not None:
+            u_filter["_id"] = {"$in": scope_ids}
+        matched = await User.find(u_filter).to_list()
+        search_user_ids = [m.id for m in matched]
+        search_symbol_regex = regex
     # SL/TP tab — sourced from POSITIONS (not orders). User-side SL/TP is
     # set on the Position document via the per-position edit endpoint
     # AFTER the entry fills, so it never lives on an Order row. Filtering
@@ -113,12 +150,21 @@ async def list_orders(
     # empty for this operator's flow. Operator-flagged 21-May:
     # "SL/TP ka data nahi aa raha".
     if sl_tp:
+        # The status + SL/TP `$or` is the structural filter; the
+        # free-text search adds a SECOND `$or` for user/symbol matches.
+        # Mongo `$and`-merges multiple top-level `$or` clauses, so we
+        # wrap both inside one `$and` to keep them composable instead
+        # of one clobbering the other.
+        pq_and: list[dict[str, Any]] = [
+            {
+                "$or": [
+                    {"stop_loss": {"$ne": None}},
+                    {"target": {"$ne": None}},
+                ]
+            }
+        ]
         pq: dict[str, Any] = {
             "status": PositionStatus.OPEN.value,
-            "$or": [
-                {"stop_loss": {"$ne": None}},
-                {"target": {"$ne": None}},
-            ],
         }
         if user_id:
             await assert_user_in_scope(admin, user_id)
@@ -134,6 +180,21 @@ async def list_orders(
                         }
                     )
                 pq["user_id"] = {"$in": scope}
+        # Free-text search splice: match user_id ∈ matched_users OR
+        # the position's symbol matches the regex. When `q` is set but
+        # nothing matched on either axis, we still leave the empty
+        # user_id list in so the resulting `$in: []` returns zero rows
+        # (correct — no matches found).
+        if search_user_ids is not None and search_symbol_regex is not None:
+            pq_and.append(
+                {
+                    "$or": [
+                        {"user_id": {"$in": search_user_ids}},
+                        {"instrument.symbol": search_symbol_regex},
+                    ]
+                }
+            )
+        pq["$and"] = pq_and
         pos_total = await Position.find(pq).count()
         pos_rows = (
             await Position.find(pq)
@@ -202,16 +263,20 @@ async def list_orders(
             }
         )
 
-    q: dict[str, Any] = {}
+    # Local mongo query dict — renamed from `q` to `query` because the
+    # endpoint now also accepts `q` as the URL search parameter (see
+    # signature above). Without the rename the new parameter would
+    # shadow this dict and break every subsequent reference.
+    query: dict[str, Any] = {}
     if status:
-        q["status"] = status
+        query["status"] = status
     elif statuses:
         status_list = [s.strip() for s in statuses.split(",") if s.strip()]
         if status_list:
-            q["status"] = {"$in": status_list}
+            query["status"] = {"$in": status_list}
     if user_id:
         await assert_user_in_scope(admin, user_id)
-        q["user_id"] = PydanticObjectId(user_id)
+        query["user_id"] = PydanticObjectId(user_id)
     else:
         scope = await scoped_user_ids(admin)
         if scope is not None:
@@ -222,9 +287,21 @@ async def list_orders(
                         "meta": {"page": page, "page_size": page_size, "total": 0, "total_pages": 0},
                     }
                 )
-            q["user_id"] = {"$in": scope}
-    total = await Order.find(q).count()
-    rows = await Order.find(q).sort("-created_at").skip((page - 1) * page_size).limit(page_size).to_list()
+            query["user_id"] = {"$in": scope}
+    # Free-text search splice — match user_id ∈ matched_users OR
+    # `instrument.symbol` matches the regex. Keeps any existing
+    # `user_id`/`status` filters intact via top-level merge: Mongo
+    # implicitly `$and`s sibling keys, so the search `$or` narrows the
+    # result without clobbering scope/status filters set above. Empty
+    # `search_user_ids` is fine — `$in: []` matches nothing, and the
+    # symbol regex still gets a chance to match.
+    if search_user_ids is not None and search_symbol_regex is not None:
+        query["$or"] = [
+            {"user_id": {"$in": search_user_ids}},
+            {"instrument.symbol": search_symbol_regex},
+        ]
+    total = await Order.find(query).count()
+    rows = await Order.find(query).sort("-created_at").skip((page - 1) * page_size).limit(page_size).to_list()
 
     user_ids = list({r.user_id for r in rows})
     users = await User.find({"_id": {"$in": user_ids}}).to_list() if user_ids else []
