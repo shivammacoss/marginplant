@@ -1,7 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import { WS_URL } from "@/lib/constants";
+
+/**
+ * Per-WS-connection cap on live token subscriptions. Mirrors the backend
+ * `WS_MAX_SUBSCRIPTIONS_PER_CONN` (app/core/config.py). When the caller
+ * passes more than this many tokens we trim to the first N, toast the
+ * user, and never put the over-flow on the wire — the server would
+ * reject the whole batch anyway and the user wouldn't see any quote
+ * stream until they manually trimmed. The pre-trim keeps the first 70
+ * streaming so the panel is usable while the user prunes the watchlist.
+ */
+const MAX_SUBSCRIPTIONS = 70;
 
 export type MarketQuote = {
   token: string;
@@ -33,6 +45,9 @@ export function useMarketStream(tokens: string[]): Map<string, MarketQuote> {
   const [quotes, setQuotes] = useState<Map<string, MarketQuote>>(new Map());
   const wsRef = useRef<WebSocket | null>(null);
   const subscribedRef = useRef<Set<string>>(new Set());
+  // Last requested-list length we saw, so we only toast on the EDGE —
+  // re-renders that pass the same over-limit list don't spam the user.
+  const lastRequestedLenRef = useRef(0);
   const tokensKey = tokens.join(",");
 
   // One-shot WS lifecycle — open on mount, close on unmount, reconnect on close.
@@ -143,6 +158,16 @@ export function useMarketStream(tokens: string[]): Map<string, MarketQuote> {
         }
         if ((msg?.type === "tick" || msg?.type === "snapshot") && Array.isArray(msg.payload)) {
           applyTicks(msg.payload);
+        } else if (msg?.type === "error" && msg?.code === "subscription_limit") {
+          // Safety net — the pre-trim below should keep us off this
+          // path, but if a race ever sends an over-limit batch (e.g.
+          // tokens prop grew mid-flight) the server rejects and we
+          // surface the same toast as the client-side cap.
+          toast.error(
+            msg.message ||
+              `Subscription limit reached (${MAX_SUBSCRIPTIONS}). Unsubscribe some symbols before adding new ones.`,
+            { duration: 5000 },
+          );
         }
       };
 
@@ -182,7 +207,25 @@ export function useMarketStream(tokens: string[]): Map<string, MarketQuote> {
   // for symbols we no longer care about.
   useEffect(() => {
     const ws = wsRef.current;
-    const next = new Set(tokens.filter(Boolean));
+    const requested = tokens.filter(Boolean);
+    // Pre-trim to the per-WS cap. We keep the FIRST N tokens (callers
+    // pass watchlist order so the user's most-recently-arranged items
+    // win) and drop the rest. The dropped tokens never hit the wire —
+    // the backend would reject the whole batch otherwise.
+    const trimmed = requested.slice(0, MAX_SUBSCRIPTIONS);
+    const droppedCount = requested.length - trimmed.length;
+    if (droppedCount > 0 && requested.length > lastRequestedLenRef.current) {
+      // Only toast when the requested list GREW past the cap, so a
+      // steady-state over-limit watchlist toasts once on initial mount
+      // and once per additional add — not on every unrelated re-render.
+      toast.error(
+        `Subscription limit reached (${MAX_SUBSCRIPTIONS}). ${droppedCount} symbol${droppedCount > 1 ? "s" : ""} will not stream — remove some from your watchlist to add new ones.`,
+        { duration: 5000 },
+      );
+    }
+    lastRequestedLenRef.current = requested.length;
+
+    const next = new Set(trimmed);
     const prev = subscribedRef.current;
     const toAdd = [...next].filter((t) => !prev.has(t));
     const toRemove = [...prev].filter((t) => !next.has(t));

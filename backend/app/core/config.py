@@ -53,6 +53,17 @@ class Settings(BaseSettings):
     # so users on shared NAT exits / corporate proxies aren't penalised;
     # set to 0 to disable the limiter entirely.
     WS_MAX_CONNECTIONS_PER_IP: int = 100
+    # Per-connection cap on instrument-token subscriptions on the
+    # `/ws/marketdata` socket. Each subscribed token costs one slot in
+    # the in-process ``MarketTickHub`` fanout map and one entry in the
+    # upstream Zerodha / Infoway ticker — a power-user holding 200+
+    # symbols in one watchlist would otherwise multiply tick-publish
+    # work across the whole worker pool. 70 fits a typical user's full
+    # watchlist + the option-chain expansion they have open at once,
+    # with headroom; bigger requests get rejected with an explicit
+    # `subscription_limit` error frame so the frontend can prompt the
+    # user to unsubscribe something first.
+    WS_MAX_SUBSCRIPTIONS_PER_CONN: int = 70
 
     # ── JWT ──────────────────────────────────────────────────────────
     # Refresh-token TTL widened from 7 → 30 days so the mobile app keeps

@@ -119,6 +119,34 @@ async def market_ws(ws: WebSocket) -> None:
                 # them). Already-subscribed tokens are skipped to keep
                 # the hub map free of duplicate add() noise.
                 new_tokens = [tok for tok in tokens if tok not in subscribed]
+                # Per-connection subscription cap — refuse the whole
+                # batch when accepting it would push the socket past
+                # `WS_MAX_SUBSCRIPTIONS_PER_CONN`. Partial-accept would
+                # leave the client wondering which symbols streamed and
+                # which silently dropped; a clean reject + explicit
+                # `subscription_limit` error frame lets the frontend
+                # toast the user with an actionable "unsubscribe
+                # something first" message. Already-subscribed tokens
+                # in the batch are free — they don't count against the
+                # quota.
+                cap = settings.WS_MAX_SUBSCRIPTIONS_PER_CONN
+                if cap > 0 and len(subscribed) + len(new_tokens) > cap:
+                    await safe_send_text(
+                        ws,
+                        json.dumps({
+                            "type": "error",
+                            "code": "subscription_limit",
+                            "limit": cap,
+                            "current": len(subscribed),
+                            "attempted": len(new_tokens),
+                            "message": (
+                                f"Subscription limit reached "
+                                f"({len(subscribed)}/{cap} active). "
+                                f"Unsubscribe some symbols before adding new ones."
+                            ),
+                        }),
+                    )
+                    continue
                 subscribed.update(tokens)
                 for tok in new_tokens:
                     market_tick_hub.add(tok, ws)
