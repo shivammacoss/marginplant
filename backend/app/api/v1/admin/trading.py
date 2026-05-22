@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from datetime import datetime
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from beanie import PydanticObjectId
 from bson import Decimal128
@@ -732,13 +735,63 @@ async def admin_edit_position(
         v = payload["close_reason"]
         p.close_reason = str(v) if v else None
 
-    # Recompute margin_used at the new entry so the wallet view stays consistent.
+    # Recompute margin_used at the new entry using the SAME formula the
+    # order validator runs at order time — fixed-per-lot vs notional × pct
+    # ÷ leverage, USD→INR conversion for Infoway segments. The earlier
+    # version of this block was `|qty| × avg_price` (the raw notional),
+    # which ignored leverage entirely. The downstream
+    # `recompute_used_margin` then mirrored that bogus notional into
+    # wallet.used_margin and DEBITED the delta from available_balance —
+    # so a 500× leverage NFO_FUTURE edit drained the wallet by ~7× the
+    # real margin requirement. Operator-flagged 22-May: RAMAN
+    # (CL99184090) BHARTIARTL edit zapped his wallet to -₹3.66 L
+    # (200 × 1892.70 = ₹3,78,540 locked instead of ₹757).
     if "avg_price" in payload or "quantity" in payload:
         try:
-            ref_price = float(str(p.avg_price))
-            p.margin_used = Decimal128(str(round(abs(p.quantity) * ref_price, 2)))
+            from app.services.netting_service import get_effective_settings
+            from app.services.market_data_service import (
+                get_usd_inr_rate as _get_usd_inr_rate,
+                is_usd_quoted_segment as _is_usd_quoted_segment,
+            )
+            from app.utils.decimal_utils import (
+                quantize_money as _quantize_money,
+                to_decimal as _to_decimal,
+            )
+
+            ref_price = _to_decimal(p.avg_price)
+            qty_abs = _to_decimal(abs(p.quantity))
+            lot_size = max(1, int(getattr(p.instrument, "lot_size", 1) or 1))
+            lots = qty_abs / _to_decimal(lot_size)
+            action = "BUY" if p.quantity >= 0 else "SELL"
+            resolved = await get_effective_settings(
+                p.user_id,
+                p.instrument.segment,
+                action=action,
+                option_type=None,
+                product_type=p.product_type.value,
+                symbol=p.instrument.symbol,
+            )
+            s = (resolved or {}).get("settings") or {}
+            fixed_per_lot = _to_decimal(s.get("fixed_margin_per_lot") or 0)
+            if (s.get("margin_calc_mode") == "fixed") and fixed_per_lot > 0:
+                new_margin = lots * fixed_per_lot
+            else:
+                margin_pct = _to_decimal(s.get("margin_percentage") or 100.0) / _to_decimal(100)
+                leverage = _to_decimal(s.get("leverage") or 1.0) or _to_decimal(1)
+                new_margin = qty_abs * ref_price * margin_pct / leverage
+            # USD-quoted segments (Infoway: forex / crypto / metals) lock
+            # in INR. Skip for fixed mode where the admin-entered ₹/lot
+            # is already in INR.
+            if _is_usd_quoted_segment(p.segment_type) or _is_usd_quoted_segment(p.instrument.segment):
+                if not ((s.get("margin_calc_mode") == "fixed") and fixed_per_lot > 0):
+                    new_margin = new_margin * _to_decimal(_get_usd_inr_rate())
+            p.margin_used = Decimal128(str(_quantize_money(new_margin)))
         except Exception:
-            pass
+            # Resolver failure should NEVER fall back to the notional
+            # formula — that's the bug we're fixing. Leave margin_used
+            # at its existing value so the wallet isn't drained on a
+            # transient resolver error.
+            logger.exception("admin_edit_position_margin_recompute_failed", extra={"pos_id": str(p.id)})
 
     await p.save()
 
