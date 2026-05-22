@@ -68,8 +68,11 @@ def _document_models() -> list[type["Document"]]:
     )
     from app.models.trade import Trade
     from app.models.transaction import (
+        BrokerWdRule,
         DepositRequest,
         SettlementRequest,
+        SubAdminWdRule,
+        SuperAdminWdRule,
         WalletTransaction,
         WdRule,
         WithdrawalRequest,
@@ -104,6 +107,9 @@ def _document_models() -> list[type["Document"]]:
         WithdrawalRequest,
         SettlementRequest,
         WdRule,
+        SuperAdminWdRule,
+        SubAdminWdRule,
+        BrokerWdRule,
         CompanyBankAccount,
         UserBankAccount,
         BrokeragePlan,

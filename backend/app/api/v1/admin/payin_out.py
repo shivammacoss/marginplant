@@ -782,48 +782,225 @@ async def delete_bank(
 
 
 # ── W/D rules ───────────────────────────────────────────────────────
-@router.get("/wd-rules", response_model=APIResponse[list])
-async def list_wd_rules(admin: CurrentAdmin):
-    rows = await WdRule.find_all().to_list()
-    return APIResponse(
-        data=[
-            {
-                "id": str(r.id),
-                "rule_type": r.rule_type,
-                "min_amount": str(r.min_amount),
-                "max_amount": str(r.max_amount),
-                "daily_limit": str(r.daily_limit),
-                "allowed_times": [w.model_dump() for w in r.allowed_times],
-                "charges_flat": str(r.charges_flat),
-                "charges_percent": r.charges_percent,
-                "auto_approve_under": str(r.auto_approve_under),
-                "mandatory_remark": r.mandatory_remark,
-            }
-            for r in rows
-        ]
+#
+# Tier-aware: each caller reads / writes THEIR OWN tier's override row.
+#   role = SUPER_ADMIN  → SuperAdminWdRule (their own pool)
+#   role = ADMIN        → SubAdminWdRule (their own pool)
+#   role = BROKER       → BrokerWdRule (their own pool)
+#
+# Super-admin can ALSO edit the platform-global WdRule via the explicit
+# `?tier=global` query param — keeps the historical "edit base default"
+# affordance for the lone super-admin user.
+#
+# GET returns BOTH (a) the caller's own override row (sparse — None
+# means inherit) AND (b) the resolved effective values via the cascade.
+# The frontend uses (a) for the form inputs and (b) for "currently
+# applied" hints. Operator spec: "super admin apne user, admin apne
+# user, broker apne user — har tier free".
+
+
+def _admin_tier(admin) -> tuple[str, PydanticObjectId]:
+    """Map the caller's role to (tier_name, owner_id) for the WdRule
+    cascade. Raises a 400 on roles that don't own end users (DEALER /
+    MASTER etc.) so the UI knows to hide the rule editor for them."""
+    role = getattr(admin.role, "value", str(admin.role))
+    if role == "SUPER_ADMIN":
+        return ("super_admin", admin.id)
+    if role == "ADMIN":
+        return ("admin", admin.id)
+    if role == "BROKER":
+        return ("broker", admin.id)
+    raise HTTPException(
+        status_code=403,
+        detail=f"Role {role} does not have its own user pool — rule editor not applicable",
     )
 
 
-@router.put("/wd-rules/{rule_type}", response_model=APIResponse[dict])
-async def update_wd_rule(rule_type: str, payload: dict, admin: SuperAdmin):
-    r = await WdRule.find_one(WdRule.rule_type == rule_type)
-    if r is None:
-        raise HTTPException(status_code=404, detail="Rule not found")
-    from bson import Decimal128
+@router.get("/wd-rules", response_model=APIResponse[dict])
+async def list_wd_rules(admin: CurrentAdmin):
+    """Returns the caller's own tier override (for the form) PLUS the
+    fully-resolved effective values (for "currently applied" hints).
 
-    if "min_amount" in payload:
-        r.min_amount = Decimal128(str(payload["min_amount"]))
-    if "max_amount" in payload:
-        r.max_amount = Decimal128(str(payload["max_amount"]))
-    if "daily_limit" in payload:
-        r.daily_limit = Decimal128(str(payload["daily_limit"]))
-    if "charges_flat" in payload:
-        r.charges_flat = Decimal128(str(payload["charges_flat"]))
-    if "charges_percent" in payload:
-        r.charges_percent = float(payload["charges_percent"])
-    if "auto_approve_under" in payload:
-        r.auto_approve_under = Decimal128(str(payload["auto_approve_under"]))
-    if "mandatory_remark" in payload:
-        r.mandatory_remark = bool(payload["mandatory_remark"])
-    await r.save()
-    return APIResponse(data={"ok": True})
+    Shape:
+        {
+          "tier": "admin",
+          "owner_id": "...",
+          "rules": [
+            {
+              "rule_type": "DEPOSIT",
+              "own":       {field: value-or-null, ...},   ← form starts here
+              "effective": {field: resolved-value, ...},  ← currently-applied
+              "sources":   {field: "broker|admin|super_admin|global", ...}
+            },
+            {"rule_type": "WITHDRAWAL", ...}
+          ]
+        }
+    """
+    from app.services import wd_rules_service
+    from app.models.transaction import (
+        BrokerWdRule as _BrokerWdRule,
+        SubAdminWdRule as _SubAdminWdRule,
+        SuperAdminWdRule as _SuperAdminWdRule,
+    )
+
+    tier, owner_id = _admin_tier(admin)
+
+    def _serialize_own(row) -> dict[str, Any]:
+        if row is None:
+            return {f: None for f in wd_rules_service._RULE_FIELDS}
+        d: dict[str, Any] = {}
+        for f in wd_rules_service._RULE_FIELDS:
+            v = getattr(row, f, None)
+            if v is None:
+                d[f] = None
+            elif f == "allowed_days":
+                d[f] = list(v) if v else None
+            elif f == "allowed_times":
+                d[f] = [w.model_dump() for w in v] if v else None
+            elif f == "charges_percent":
+                d[f] = float(v)
+            elif f == "mandatory_remark":
+                d[f] = bool(v)
+            else:
+                d[f] = str(v)
+        return d
+
+    def _serialize_effective(values: dict[str, Any]) -> dict[str, Any]:
+        d: dict[str, Any] = {}
+        for f, v in values.items():
+            if v is None:
+                d[f] = None
+            elif f == "allowed_days":
+                d[f] = list(v) if v else None
+            elif f == "allowed_times":
+                d[f] = [
+                    w.model_dump() if hasattr(w, "model_dump") else dict(w)
+                    for w in v
+                ] if v else None
+            elif f == "charges_percent":
+                d[f] = float(v)
+            elif f == "mandatory_remark":
+                d[f] = bool(v)
+            else:
+                d[f] = str(v)
+        return d
+
+    results: list[dict[str, Any]] = []
+    for rule_type in ("DEPOSIT", "WITHDRAWAL"):
+        # Caller's own tier override row (may not exist yet).
+        own_row = None
+        if tier == "super_admin":
+            own_row = await _SuperAdminWdRule.find_one(
+                _SuperAdminWdRule.super_admin_id == owner_id,
+                _SuperAdminWdRule.rule_type == rule_type,
+            )
+        elif tier == "admin":
+            own_row = await _SubAdminWdRule.find_one(
+                _SubAdminWdRule.sub_admin_id == owner_id,
+                _SubAdminWdRule.rule_type == rule_type,
+            )
+        elif tier == "broker":
+            own_row = await _BrokerWdRule.find_one(
+                _BrokerWdRule.broker_id == owner_id,
+                _BrokerWdRule.rule_type == rule_type,
+            )
+
+        # Effective view — pick ANY user the caller owns and resolve
+        # against them. For super-admin / fresh admin with no users yet,
+        # resolve against the caller's own id (acts as a no-user-pool
+        # probe — returns the cascade as if a hypothetical user under
+        # this admin asked for the effective rule).
+        from app.models.user import User as _User
+        scope_user = None
+        if tier == "admin":
+            scope_user = await _User.find_one(_User.assigned_admin_id == owner_id)
+        elif tier == "broker":
+            scope_user = await _User.find_one({"broker_ancestry": owner_id})
+        # super_admin: no scoping needed — global fallback drives the
+        # value if no broker / admin / super-admin override is set.
+
+        # If no representative user exists, just use a synthetic-ish
+        # cascade by passing the admin's own id; the resolver will fall
+        # through all tiers cleanly with the admin's broker/admin
+        # ancestry empty.
+        probe_id = scope_user.id if scope_user is not None else owner_id
+
+        with_sources = await wd_rules_service.get_effective_rule_with_sources(
+            probe_id, rule_type
+        )
+
+        results.append({
+            "rule_type": rule_type,
+            "own": _serialize_own(own_row),
+            "effective": _serialize_effective(with_sources["values"]),
+            "sources": with_sources["sources"],
+        })
+
+    return APIResponse(data={
+        "tier": tier,
+        "owner_id": str(owner_id),
+        "rules": results,
+    })
+
+
+@router.put("/wd-rules/{rule_type}", response_model=APIResponse[dict])
+async def update_wd_rule(
+    rule_type: str,
+    payload: dict,
+    admin: CurrentAdmin,
+    tier: str | None = None,
+):
+    """Save the caller's tier-specific override for `rule_type`.
+
+    Body is sparse — only the fields the admin wants to set / clear.
+    Sending `null` for a field explicitly REMOVES the override at this
+    tier (so the field starts inheriting from the layer below). Sending
+    a value SETS it.
+
+    Super-admin can pass `?tier=global` to edit the platform default
+    instead of their own super-admin override row.
+    """
+    if rule_type not in ("DEPOSIT", "WITHDRAWAL"):
+        raise HTTPException(status_code=400, detail="rule_type must be DEPOSIT or WITHDRAWAL")
+
+    # Resolve target tier + owner_id.
+    role = getattr(admin.role, "value", str(admin.role))
+    if tier == "global":
+        if role != "SUPER_ADMIN":
+            raise HTTPException(
+                status_code=403,
+                detail="Only super-admin can edit the platform-global rule",
+            )
+        target_tier = "global"
+        owner_id: PydanticObjectId | None = None
+    else:
+        target_tier, owner_id = _admin_tier(admin)
+
+    from app.services import wd_rules_service
+    from app.models.audit_log import AuditAction
+    from app.services.audit_service import log_event
+
+    try:
+        result = await wd_rules_service.upsert_for_tier(
+            rule_type=rule_type,
+            tier=target_tier,
+            owner_id=owner_id,
+            payload=payload,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    await log_event(
+        action=AuditAction.SETTING_CHANGE,
+        entity_type="WdRule",
+        entity_id=None,
+        actor_id=admin.id,
+        target_user_id=None,
+        metadata={
+            "tier": target_tier,
+            "rule_type": rule_type,
+            "owner_id": str(owner_id) if owner_id else None,
+            "payload": {k: (str(v) if v is not None else None) for k, v in payload.items()},
+        },
+    )
+    return APIResponse(data={"ok": True, "tier": target_tier, "rule_type": rule_type})

@@ -38,6 +38,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { UpiQR, buildUpiUri } from "@/components/common/UpiQR";
+import { WdRulesBanner } from "@/components/common/WdRulesBanner";
 import { cn, formatINR, pnlColor } from "@/lib/utils";
 import {
   buildMailtoUrl,
@@ -501,6 +502,12 @@ export default function WalletPage() {
             </div>
           </DialogHeader>
 
+          {/* Rules banner — admin-configured min / max / daily limit / day +
+              time window. Resolves through the tier cascade so the user
+              sees the same rules the server validator will enforce on
+              submit. */}
+          <WdRulesBanner kind="deposit" className="mb-2" />
+
           {/* Step indicator */}
           <div className="grid gap-4 md:grid-cols-2">
             {/* ─ Left: payment method ─────────────────── */}
@@ -708,6 +715,9 @@ export default function WalletPage() {
               Enter your UPI ID or bank details. Admin approves before payout.
             </DialogDescription>
           </DialogHeader>
+          {/* Rules banner — withdraw is the more-restricted side
+              (day + time window + mandatory-remark typically matter). */}
+          <WdRulesBanner kind="withdrawal" className="mb-2" />
           <div className="space-y-3">
             <Field label="Amount (₹)">
               <Input

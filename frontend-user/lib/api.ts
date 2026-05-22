@@ -205,6 +205,21 @@ export const KycAPI = {
   },
 };
 
+// Shape returned by `WalletAPI.wdRules`. Both rules carry the same set of
+// fields — backend serialises Decimal128 amounts as strings, weekday list
+// as 0=Mon..6=Sun ints, time windows as ISO HH:MM strings.
+export interface WdRule {
+  min_amount: string | null;
+  max_amount: string | null;
+  daily_limit: string | null;
+  allowed_days: number[] | null;
+  allowed_times: { start: string; end: string }[] | null;
+  charges_flat: string | null;
+  charges_percent: number;
+  auto_approve_under: string | null;
+  mandatory_remark: boolean;
+}
+
 export const WalletAPI = {
   summary: () => unwrap<any>(api.get("/user/wallet/summary")),
   transactions: (limit = 100, skip = 0) =>
@@ -214,6 +229,15 @@ export const WalletAPI = {
   myDeposits: () => unwrap<any[]>(api.get("/user/wallet/deposits")),
   createWithdrawal: (body: any) => unwrap<any>(api.post("/user/wallet/withdrawals", body)),
   myWithdrawals: () => unwrap<any[]>(api.get("/user/wallet/withdrawals")),
+  // Effective deposit + withdrawal rules for this user — already resolved
+  // through the broker → admin → super-admin → global cascade by the
+  // backend. Used by the deposit/withdraw dialogs to render the inline
+  // info banner ("min ₹100, ₹10k daily, Mon–Fri 10:00–18:00 IST").
+  wdRules: () =>
+    unwrap<{
+      deposit: WdRule;
+      withdrawal: WdRule;
+    }>(api.get("/user/wallet/wd-rules")),
   myBankAccounts: () => unwrap<any[]>(api.get("/user/wallet/bank-accounts")),
   addBankAccount: (body: any) => unwrap<any>(api.post("/user/wallet/bank-accounts", body)),
   uploadScreenshot: (file: File) => {

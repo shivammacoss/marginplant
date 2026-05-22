@@ -246,11 +246,24 @@ class AllowedTimeWindow(BaseModel):
 
 
 class WdRule(TimestampMixin):
+    """Platform-global deposit / withdrawal rule. One row per `rule_type`.
+
+    Per-tier overrides (`SuperAdminWdRule` / `SubAdminWdRule` / `BrokerWdRule`)
+    layer on top of this — same cascade pattern as the netting/segment
+    settings. The resolver in `services/wd_rules_service.py` merges all
+    relevant tiers so a user's effective rule reflects their owner's
+    pool's overrides.
+    """
+
     rule_type: Indexed(str, unique=True)  # type: ignore[valid-type] # one row each
     min_amount: Money = Field(default_factory=_zero)
     max_amount: Money = Field(default_factory=lambda: Decimal128("10000000"))
     daily_limit: Money = Field(default_factory=lambda: Decimal128("1000000"))
 
+    # Weekday gate — 0=Monday … 6=Sunday. Empty list also accepted = "no
+    # day restriction" (treat as all 7 days allowed). Most brokers restrict
+    # WITHDRAWAL to working days only (0..4); DEPOSIT typically stays 0..6.
+    allowed_days: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6])
     allowed_times: list[AllowedTimeWindow] = Field(default_factory=lambda: [AllowedTimeWindow()])
     charges_flat: Money = Field(default_factory=_zero)
     charges_percent: float = 0.0
@@ -260,3 +273,79 @@ class WdRule(TimestampMixin):
     class Settings:
         name = "wd_rules"
         indexes = [IndexModel([("rule_type", ASCENDING)], unique=True)]
+
+
+# ── Per-tier override layers ─────────────────────────────────────────
+#
+# Each tier override is a SPARSE document: every editable field is
+# Optional. A None means "inherit from the tier below". This mirrors the
+# `NettingSegment` ↔ `Sub/Super/BrokerSegmentOverride` shape so the same
+# admin mental model carries over to deposit / withdrawal rules.
+#
+# Resolution order (most specific first):
+#     BrokerWdRule (broker pool)
+#  →  SubAdminWdRule (admin pool)
+#  →  SuperAdminWdRule (super-admin pool)
+#  →  WdRule (platform global)
+#
+# A user's `assigned_admin_id` + `broker_ancestry` decide which tier
+# pools are visible to the resolver — that's the same logic the netting
+# resolver already runs, so we re-use the user-doc fields here.
+
+
+class _WdRuleOverrideBase(TimestampMixin):
+    """Common shape — every override row has these fields nullable so
+    admins can set only the fields they want to override."""
+
+    rule_type: str  # "DEPOSIT" or "WITHDRAWAL"
+    min_amount: Money | None = None
+    max_amount: Money | None = None
+    daily_limit: Money | None = None
+    allowed_days: list[int] | None = None
+    allowed_times: list[AllowedTimeWindow] | None = None
+    charges_flat: Money | None = None
+    charges_percent: float | None = None
+    auto_approve_under: Money | None = None
+    mandatory_remark: bool | None = None
+
+
+class SuperAdminWdRule(_WdRuleOverrideBase):
+    super_admin_id: PydanticObjectId
+
+    class Settings:
+        name = "super_admin_wd_rules"
+        indexes = [
+            IndexModel(
+                [("super_admin_id", ASCENDING), ("rule_type", ASCENDING)],
+                unique=True,
+                name="super_admin_wd_rule_unique",
+            ),
+        ]
+
+
+class SubAdminWdRule(_WdRuleOverrideBase):
+    sub_admin_id: PydanticObjectId
+
+    class Settings:
+        name = "sub_admin_wd_rules"
+        indexes = [
+            IndexModel(
+                [("sub_admin_id", ASCENDING), ("rule_type", ASCENDING)],
+                unique=True,
+                name="sub_admin_wd_rule_unique",
+            ),
+        ]
+
+
+class BrokerWdRule(_WdRuleOverrideBase):
+    broker_id: PydanticObjectId
+
+    class Settings:
+        name = "broker_wd_rules"
+        indexes = [
+            IndexModel(
+                [("broker_id", ASCENDING), ("rule_type", ASCENDING)],
+                unique=True,
+                name="broker_wd_rule_unique",
+            ),
+        ]

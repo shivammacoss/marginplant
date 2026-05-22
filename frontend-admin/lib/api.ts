@@ -284,8 +284,30 @@ export const PayinOutAPI = {
   createBank: (body: any) => unwrap<any>(api.post("/admin/bank-accounts", body)),
   updateBank: (id: string, body: any) => unwrap<any>(api.put(`/admin/bank-accounts/${id}`, body)),
   deleteBank: (id: string) => unwrap<any>(api.delete(`/admin/bank-accounts/${id}`)),
-  wdRules: () => unwrap<any[]>(api.get("/admin/wd-rules")),
-  updateWdRule: (rule_type: string, body: any) => unwrap<any>(api.put(`/admin/wd-rules/${rule_type}`, body)),
+  // Tier-aware: returns the caller's OWN tier override (sparse) plus the
+  // fully-resolved effective values + per-field source labels. See the
+  // backend `GET /admin/wd-rules` docstring for the response shape.
+  wdRules: () =>
+    unwrap<{
+      tier: "super_admin" | "admin" | "broker";
+      owner_id: string;
+      rules: Array<{
+        rule_type: "DEPOSIT" | "WITHDRAWAL";
+        own: Record<string, any>;
+        effective: Record<string, any>;
+        sources: Record<string, string>;
+      }>;
+    }>(api.get("/admin/wd-rules")),
+  // Sparse PATCH — fields omitted stay as-is, fields sent as `null`
+  // explicitly clear the override at this tier (so the field starts
+  // inheriting from the layer below). `tier=global` is honoured only
+  // when the caller is super-admin.
+  updateWdRule: (rule_type: string, body: any, tier?: "global") =>
+    unwrap<any>(
+      api.put(`/admin/wd-rules/${rule_type}`, body, {
+        params: tier ? { tier } : undefined,
+      }),
+    ),
 };
 
 export const InstrumentAdminAPI = {

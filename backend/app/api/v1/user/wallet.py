@@ -171,6 +171,20 @@ async def company_banks(user: CurrentUser):
 
 @router.post("/deposits", response_model=APIResponse[dict])
 async def create_deposit(payload: DepositCreate, user: CurrentUser):
+    # Enforce the effective deposit rule for this user — min/max/daily
+    # limit/day/time window/mandatory-remark. Tier cascade is resolved
+    # inside the service (broker → admin → super-admin → global). Raises
+    # OrderRejectedError with a stable code on violation; AppError handler
+    # converts that to 400 + machine-readable error envelope.
+    from app.services import wd_rules_service
+
+    await wd_rules_service.validate_request(
+        user_id=user.id,
+        rule_type="DEPOSIT",
+        amount=float(payload.amount),
+        user_remark=payload.user_remark,
+    )
+
     # `deposit_requests` has a unique index on `idempotency_key`; passing
     # null on every request collides on the 2nd insert. Always generate a
     # UUID so multiple deposits per user work, and the field still acts
@@ -253,6 +267,18 @@ async def my_deposits(user: CurrentUser):
 
 @router.post("/withdrawals", response_model=APIResponse[dict])
 async def create_withdrawal(payload: WithdrawalCreate, user: CurrentUser):
+    # Enforce the effective withdrawal rule (same cascade as deposits).
+    # Mandatory_remark + day/time window matter more here in practice —
+    # most brokers gate withdrawals to working days + a daytime window.
+    from app.services import wd_rules_service
+
+    await wd_rules_service.validate_request(
+        user_id=user.id,
+        rule_type="WITHDRAWAL",
+        amount=float(payload.amount),
+        user_remark=payload.remarks,
+    )
+
     b = payload.bank or {}
     upi_id = (b.get("upi_id") or "").strip()
     account_number = (b.get("account_number") or "").strip()
@@ -351,6 +377,46 @@ async def my_withdrawals(user: CurrentUser):
             for r in rows
         ]
     )
+
+
+@router.get("/wd-rules", response_model=APIResponse[dict])
+async def my_wd_rules(user: CurrentUser):
+    """Effective deposit + withdrawal rules for the calling user — resolved
+    through the tier cascade (broker pool → admin pool → super-admin pool →
+    global). Used by the user-side wallet UI to render the inline rules
+    banner ("min ₹100, ₹10k daily, Mon–Fri 10–18 IST") so the user knows
+    exactly what's allowed before they submit a request.
+
+    Returns both rules in one payload to save a round trip — the wallet
+    page typically renders the deposit info card and withdrawal info card
+    side by side. Fields that the cascade left unset are still populated
+    via the platform-global default, so the UI never has to handle nulls.
+    """
+    from app.services import wd_rules_service
+
+    def _ser(values: dict) -> dict:
+        out: dict = {}
+        for k, v in values.items():
+            if v is None:
+                out[k] = None
+            elif k == "allowed_days":
+                out[k] = list(v) if v else None
+            elif k == "allowed_times":
+                out[k] = [
+                    w.model_dump() if hasattr(w, "model_dump") else dict(w)
+                    for w in v
+                ] if v else None
+            elif k == "charges_percent":
+                out[k] = float(v)
+            elif k == "mandatory_remark":
+                out[k] = bool(v)
+            else:
+                out[k] = str(v)
+        return out
+
+    dep = await wd_rules_service.get_effective_rule(user.id, "DEPOSIT")
+    wd = await wd_rules_service.get_effective_rule(user.id, "WITHDRAWAL")
+    return APIResponse(data={"deposit": _ser(dep), "withdrawal": _ser(wd)})
 
 
 @router.get("/bank-accounts", response_model=APIResponse[list])
