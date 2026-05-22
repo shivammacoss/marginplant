@@ -10,7 +10,16 @@ export const api = axios.create({
   timeout: 30_000,
 });
 
-let refreshPromise: Promise<string | null> | null = null;
+// Refresh dedup state. `inFlight` is per-tab; `withRefreshLock` adds a
+// cross-tab exclusive lock on top of it so two tabs never hit the
+// backend's rotating /refresh endpoint with the same (now-single-use)
+// refresh token.
+let inFlightRefresh: Promise<string | null> | null = null;
+const REFRESH_LOCK = "mp.user.auth.refresh";
+// Refresh proactively when the access token has < this many seconds left.
+// 120 s is enough headroom for a slow mobile request to land on the
+// backend before the JWT actually expires.
+const REFRESH_MARGIN_SEC = 120;
 
 function getAccessToken(): string | null {
   if (typeof window === "undefined") return null;
@@ -44,13 +53,58 @@ export function clearTokens() {
   window.localStorage.removeItem("nb.auth");
 }
 
-api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
-  const token = getAccessToken();
-  if (token && config.headers) {
-    config.headers.Authorization = `Bearer ${token}`;
+// ── JWT exp decoding (no verification — we only read the public
+//    payload to know when to proactively rotate). Returns the unix
+//    timestamp in seconds, or null if the token is malformed or has no
+//    `exp` claim. Pure client-side; the server is the actual
+//    authority on validity.
+function jwtExpSec(token: string | null): number | null {
+  if (!token || typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    // Base64url → base64 → bytes → utf-8.
+    const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+    const json = typeof atob === "function" ? atob(padded) : "";
+    const obj = JSON.parse(json);
+    return typeof obj?.exp === "number" ? obj.exp : null;
+  } catch {
+    return null;
   }
-  return config;
-});
+}
+function isExpiringSoon(token: string | null, marginSec = REFRESH_MARGIN_SEC): boolean {
+  const exp = jwtExpSec(token);
+  if (exp == null) return false;
+  return exp * 1000 - Date.now() < marginSec * 1000;
+}
+function isExpired(token: string | null): boolean {
+  const exp = jwtExpSec(token);
+  if (exp == null) return false;
+  return exp * 1000 <= Date.now();
+}
+
+// Cross-tab exclusive lock. The Web Locks API is the canonical way to
+// serialise critical sections across all tabs of an origin — a single
+// holder at any moment, queueing for the rest. This prevents the
+// "morning logout" race where dashboard + option-chain tabs woke up
+// after midnight, both hit a 24-h-stale access token, both fired
+// /refresh with the same refresh token, the backend rotated the jti
+// for whichever request landed first, and the second one got a 401
+// (jti gone) → clearTokens() → bounce to /login. With this lock only
+// one tab actually calls /refresh; the others wait, then re-read
+// localStorage and inherit the freshly-minted pair without a network
+// round trip. Falls back to a same-tab promise on the (rare) browsers
+// that don't expose `navigator.locks`.
+async function withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
+  if (
+    typeof navigator !== "undefined" &&
+    typeof (navigator as any).locks?.request === "function"
+  ) {
+    return (navigator as any).locks.request(REFRESH_LOCK, fn);
+  }
+  return fn();
+}
 
 /**
  * Try to mint a fresh access token from the stored refresh token.
@@ -68,7 +122,7 @@ api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
  *                    /login, which is the "PWA bar bar logout" the user
  *                    reported even with a 30-day refresh TTL.
  */
-async function refreshAccessToken(): Promise<
+async function callRefreshEndpoint(): Promise<
   { kind: "ok"; access: string } | { kind: "auth_failed" | "transient" }
 > {
   const refresh = getRefreshToken();
@@ -100,6 +154,54 @@ async function refreshAccessToken(): Promise<
   }
 }
 
+/**
+ * The single entry point every code path uses to obtain a fresh
+ * access token. Deduplicates within a tab via `inFlightRefresh`,
+ * across tabs via `withRefreshLock`, and short-circuits if some
+ * other tab already wrote a fresh token to localStorage while we
+ * were queued behind the lock. Returns `null` only on auth_failed
+ * (i.e. the user is genuinely signed out); transient failures
+ * preserve the refresh token and surface as `null` too — the caller
+ * decides whether to redirect (response interceptor only redirects
+ * when the refresh token is GONE, not just on a single failed call).
+ */
+export async function ensureFreshAccessToken(): Promise<string | null> {
+  inFlightRefresh ||= (async () => {
+    try {
+      return await withRefreshLock(async () => {
+        // Re-check after acquiring the lock — a sibling tab may have
+        // refreshed while we were queued. If the current token is
+        // valid for at least a few seconds, reuse it instead of
+        // burning a one-shot refresh token.
+        const current = getAccessToken();
+        if (current && !isExpiringSoon(current, 30)) return current;
+        const r = await callRefreshEndpoint();
+        return r.kind === "ok" ? r.access : null;
+      });
+    } finally {
+      inFlightRefresh = null;
+    }
+  })();
+  return inFlightRefresh;
+}
+
+api.interceptors.request.use(async (config: InternalAxiosRequestConfig) => {
+  let token = getAccessToken();
+  // Proactive refresh: if the access token will expire within the
+  // next REFRESH_MARGIN_SEC seconds, rotate it BEFORE this request
+  // leaves the client. Eliminates the 401-storm that hits when six
+  // dashboard widgets all mount simultaneously the morning after a
+  // 24-h-old login.
+  if (token && getRefreshToken() && isExpiringSoon(token)) {
+    const fresh = await ensureFreshAccessToken();
+    if (fresh) token = fresh;
+  }
+  if (token && config.headers) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
 api.interceptors.response.use(
   (resp) => resp,
   async (error: AxiosError<ApiErrorResponse>) => {
@@ -107,19 +209,13 @@ api.interceptors.response.use(
     const status = error.response?.status;
     if (status === 401 && original && !original._retry) {
       original._retry = true;
-      refreshPromise ||= (async () => {
-        const r = await refreshAccessToken();
-        return r.kind === "ok" ? r.access : null;
-      })().finally(() => {
-        refreshPromise = null;
-      });
-      const newToken = await refreshPromise;
+      const newToken = await ensureFreshAccessToken();
       if (newToken) {
         original.headers = { ...(original.headers || {}), Authorization: `Bearer ${newToken}` };
         return api.request(original);
       }
       // Only redirect to /login when we KNOW the refresh was rejected
-      // (auth_failed → tokens already cleared inside refreshAccessToken).
+      // (auth_failed → tokens already cleared inside callRefreshEndpoint).
       // For transient failures the tokens are still around — let the next
       // call retry naturally; the user keeps their session.
       const stillHaveRefresh = typeof window !== "undefined" && !!getRefreshToken();
@@ -134,6 +230,10 @@ api.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+// Re-export for callers that still want the old name.
+export const refreshAccessToken = ensureFreshAccessToken;
+export { jwtExpSec, isExpired, isExpiringSoon };
 
 export class ApiError extends Error {
   code: string;

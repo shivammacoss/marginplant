@@ -10,7 +10,10 @@ export const api = axios.create({
   timeout: 30_000,
 });
 
-let refreshPromise: Promise<string | null> | null = null;
+// Refresh dedup state. Per-tab promise + cross-tab Web Locks below.
+let inFlightRefresh: Promise<string | null> | null = null;
+const REFRESH_LOCK = "mp.admin.auth.refresh";
+const REFRESH_MARGIN_SEC = 120;
 
 function getAccessToken() {
   return typeof window !== "undefined" ? window.localStorage.getItem(STORAGE_KEYS.accessToken) : null;
@@ -29,14 +32,48 @@ export function clearTokens() {
   window.localStorage.removeItem(STORAGE_KEYS.user);
 }
 
-api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
-  if (config.headers) {
-    if (ADMIN_API_KEY) config.headers["X-Admin-Api-Key"] = ADMIN_API_KEY;
-    const tok = getAccessToken();
-    if (tok) config.headers.Authorization = `Bearer ${tok}`;
+// ── JWT exp decoder — read-only, no signature check. Used solely to
+//    decide whether to rotate the access token *before* sending the
+//    next request, so the dashboard never sees a 401 storm on cold
+//    open after a 24-h-stale login.
+function jwtExpSec(token: string | null): number | null {
+  if (!token || typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+    const json = typeof atob === "function" ? atob(padded) : "";
+    const obj = JSON.parse(json);
+    return typeof obj?.exp === "number" ? obj.exp : null;
+  } catch {
+    return null;
   }
-  return config;
-});
+}
+function isExpiringSoon(token: string | null, marginSec = REFRESH_MARGIN_SEC): boolean {
+  const exp = jwtExpSec(token);
+  if (exp == null) return false;
+  return exp * 1000 - Date.now() < marginSec * 1000;
+}
+function isExpired(token: string | null): boolean {
+  const exp = jwtExpSec(token);
+  if (exp == null) return false;
+  return exp * 1000 <= Date.now();
+}
+
+// Cross-tab exclusive lock: only one admin tab runs the rotating
+// /refresh endpoint at a time. Other tabs queue, then re-read
+// localStorage and inherit the new pair without burning their own
+// refresh token. Prevents the morning-logout race the user reported.
+async function withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
+  if (
+    typeof navigator !== "undefined" &&
+    typeof (navigator as any).locks?.request === "function"
+  ) {
+    return (navigator as any).locks.request(REFRESH_LOCK, fn);
+  }
+  return fn();
+}
 
 /**
  * Three-state refresh outcome — see the user-side api.ts for the full
@@ -45,7 +82,7 @@ api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
  * only an explicit 401/403 from the /refresh endpoint counts as a
  * sign-out signal.
  */
-async function refreshAccessToken(): Promise<
+async function callRefreshEndpoint(): Promise<
   { kind: "ok"; access: string } | { kind: "auth_failed" | "transient" }
 > {
   const refresh = getRefreshToken();
@@ -73,6 +110,42 @@ async function refreshAccessToken(): Promise<
   }
 }
 
+/**
+ * Single entry point for getting a fresh admin access token. Dedups
+ * within the tab via inFlightRefresh, across tabs via withRefreshLock,
+ * and short-circuits if a sibling tab already wrote a fresh pair to
+ * localStorage while we were queued.
+ */
+export async function ensureFreshAccessToken(): Promise<string | null> {
+  inFlightRefresh ||= (async () => {
+    try {
+      return await withRefreshLock(async () => {
+        const current = getAccessToken();
+        if (current && !isExpiringSoon(current, 30)) return current;
+        const r = await callRefreshEndpoint();
+        return r.kind === "ok" ? r.access : null;
+      });
+    } finally {
+      inFlightRefresh = null;
+    }
+  })();
+  return inFlightRefresh;
+}
+
+api.interceptors.request.use(async (config: InternalAxiosRequestConfig) => {
+  if (!config.headers) return config;
+  if (ADMIN_API_KEY) config.headers["X-Admin-Api-Key"] = ADMIN_API_KEY;
+  let tok = getAccessToken();
+  // Proactive rotation — catches the access token before it expires
+  // so the rest of the dashboard never sees a 401 cascade.
+  if (tok && getRefreshToken() && isExpiringSoon(tok)) {
+    const fresh = await ensureFreshAccessToken();
+    if (fresh) tok = fresh;
+  }
+  if (tok) config.headers.Authorization = `Bearer ${tok}`;
+  return config;
+});
+
 api.interceptors.response.use(
   (resp) => resp,
   async (error: AxiosError) => {
@@ -80,13 +153,7 @@ api.interceptors.response.use(
     const status = error.response?.status;
     if (status === 401 && original && !original._retry) {
       original._retry = true;
-      refreshPromise ||= (async () => {
-        const r = await refreshAccessToken();
-        return r.kind === "ok" ? r.access : null;
-      })().finally(() => {
-        refreshPromise = null;
-      });
-      const newToken = await refreshPromise;
+      const newToken = await ensureFreshAccessToken();
       if (newToken) {
         original.headers = { ...(original.headers || {}), Authorization: `Bearer ${newToken}` };
         return api.request(original);
@@ -107,6 +174,10 @@ api.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+// Re-export under the old name so existing imports keep working.
+export const refreshAccessToken = ensureFreshAccessToken;
+export { jwtExpSec, isExpired, isExpiringSoon };
 
 export class ApiError extends Error {
   code: string;

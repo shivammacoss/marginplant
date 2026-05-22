@@ -3,6 +3,8 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAdminAuthStore } from "@/stores/authStore";
+import { ensureFreshAccessToken, isExpiringSoon } from "@/lib/api";
+import { STORAGE_KEYS } from "@/lib/constants";
 import { AdminSidebar } from "@/components/layout/AdminSidebar";
 import { AdminTopBar } from "@/components/layout/AdminTopBar";
 import { AdminPrefetcher } from "@/components/layout/AdminPrefetcher";
@@ -26,6 +28,27 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     if (hydrated && admin) void refreshMe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated]);
+
+  // Preflight + resume-from-background access-token rotation. Mirrors
+  // the user-side dashboard hook so admins who leave the tab open
+  // overnight don't get the 401-storm-then-redirect-to-login dance
+  // when they come back the next morning.
+  useEffect(() => {
+    if (!hydrated || !admin) return;
+    const refreshIfNeeded = () => {
+      const tok =
+        typeof window !== "undefined"
+          ? window.localStorage.getItem(STORAGE_KEYS.accessToken)
+          : null;
+      if (!tok || isExpiringSoon(tok)) void ensureFreshAccessToken();
+    };
+    refreshIfNeeded();
+    const onVis = () => {
+      if (document.visibilityState === "visible") refreshIfNeeded();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [hydrated, admin]);
 
   if (!hydrated) {
     return <div className="grid h-screen place-items-center text-sm text-muted-foreground">Loading…</div>;
