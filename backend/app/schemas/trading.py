@@ -134,6 +134,15 @@ class PositionOut(BaseModel):
     holding_margin: str | None = None
     stop_loss: str | None = None
     target: str | None = None
+    # Snapshot of SL/TP at close time — present only on CLOSED rows.
+    # The Closed-tab card on the user side reads these so the user
+    # can still see "trade had SL ₹X / TP ₹Y" even though the live
+    # stop_loss / target fields were wiped at close to keep future
+    # reopens clean. Same response-model-stripping rule that bit
+    # holding_margin: declared here explicitly so FastAPI doesn't drop
+    # them on serialisation.
+    close_stop_loss: str | None = None
+    close_target: str | None = None
     status: str
     opened_at: str | None = None
     closed_at: str | None = None

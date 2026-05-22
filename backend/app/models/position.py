@@ -68,6 +68,16 @@ class Position(TimestampMixin):
     stop_loss: Money | None = None
     target: Money | None = None
 
+    # Snapshot of stop_loss / target at the moment the position closed.
+    # apply_fill clears the live `stop_loss` / `target` to 0 on full close
+    # so a future reopen on the same instrument doesn't inherit stale
+    # brackets; we copy them HERE first so the Closed tab can still show
+    # "Trade had SL ₹X, TP ₹Y" even after the live fields are wiped.
+    # Operator-flagged 22-May: "close trade me bhi user ko save SL/TP
+    # dikhe — kitna laga tha pata chale".
+    close_stop_loss: Money | None = None
+    close_target: Money | None = None
+
     # FX rates frozen at trade open / close — used to convert USD-quoted
     # P&L (crypto, forex, currency-derivatives) into INR for the wallet.
     # ``None`` for INR-native instruments (NSE / BSE / MCX / NFO / BFO).

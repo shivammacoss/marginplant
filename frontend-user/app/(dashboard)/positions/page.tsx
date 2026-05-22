@@ -784,6 +784,58 @@ export default function PositionsPage() {
       ),
     },
     {
+      // Snapshot of SL set on the position at close-time. The live
+      // `stop_loss` / `target` fields are wiped on full close to keep
+      // future reopens clean, so the backend preserves the values in
+      // `close_stop_loss` / `close_target` for display here. The Active
+      // tab tints SL red — keep that same convention so users get a
+      // consistent SL=red, TP=green colour code across tabs.
+      key: "close_stop_loss",
+      header: "SL",
+      align: "right",
+      render: (r) => {
+        const sl = r.close_stop_loss ?? r.stop_loss;
+        if (!sl || Number(sl) === 0) {
+          return <span className="text-muted-foreground/60">—</span>;
+        }
+        const hit = String(r.close_reason ?? "").toUpperCase() === "SL_HIT";
+        return (
+          <span
+            className={cn(
+              "font-tabular text-sell tabular-nums",
+              hit && "rounded bg-sell/15 px-1.5 py-0.5 font-semibold",
+            )}
+            title={hit ? "Trade closed by SL hit" : "SL was set on this trade"}
+          >
+            {fmtFeedPrice(sl, r.currency_quote, r.segment_type, r.exchange)}
+          </span>
+        );
+      },
+    },
+    {
+      key: "close_target",
+      header: "TP",
+      align: "right",
+      render: (r) => {
+        const tp = r.close_target ?? r.target;
+        if (!tp || Number(tp) === 0) {
+          return <span className="text-muted-foreground/60">—</span>;
+        }
+        const hit = String(r.close_reason ?? "").toUpperCase() === "TP_HIT";
+        return (
+          <span
+            className={cn(
+              "font-tabular text-buy tabular-nums",
+              hit && "rounded bg-buy/15 px-1.5 py-0.5 font-semibold",
+            )}
+            title={hit ? "Trade closed by Target hit" : "Target was set on this trade"}
+          >
+            {fmtFeedPrice(tp, r.currency_quote, r.segment_type, r.exchange)}
+          </span>
+        );
+      },
+    },
+    {
       key: "opened_at",
       header: "Open Time",
       render: (r) => (
@@ -1613,6 +1665,59 @@ function ClosedMobileCard({ row: r }: { row: any }) {
           {timeOnly(r.opened_at)} → {timeOnly(r.closed_at)}
         </span>
       </div>
+
+      {/* Snapshot of SL/TP the user had set on this position at close
+          time. Hidden when both are unset — most casual users don't
+          attach brackets and the row stays cleaner. When EITHER was
+          set the tile renders both values (the unset side reads "—")
+          so the user always sees both legs side by side for easy
+          comparison against the actual close price. The leg that
+          fired (matching close_reason) gets a colour-filled chip
+          treatment so it pops out as "the one that closed the trade". */}
+      {(() => {
+        const sl = r.close_stop_loss ?? r.stop_loss;
+        const tp = r.close_target ?? r.target;
+        const hasSL = sl && Number(sl) > 0;
+        const hasTP = tp && Number(tp) > 0;
+        if (!hasSL && !hasTP) return null;
+        const reason = String(r.close_reason ?? "").toUpperCase();
+        const slHit = reason === "SL_HIT";
+        const tpHit = reason === "TP_HIT";
+        return (
+          <div className="mt-2 grid grid-cols-2 gap-1.5">
+            <div
+              className={cn(
+                "rounded-md border border-border bg-muted/20 px-2.5 py-1.5",
+                slHit && "border-sell/40 bg-sell/10",
+              )}
+            >
+              <div className="text-[9px] uppercase tracking-wider text-muted-foreground">
+                {slHit ? "SL · HIT" : "SL"}
+              </div>
+              <div className={cn("font-tabular text-sm font-semibold tabular-nums", hasSL ? "text-sell" : "text-muted-foreground/60")}>
+                {hasSL
+                  ? fmtFeedPrice(sl, r.currency_quote, r.segment_type, r.exchange)
+                  : "—"}
+              </div>
+            </div>
+            <div
+              className={cn(
+                "rounded-md border border-border bg-muted/20 px-2.5 py-1.5",
+                tpHit && "border-buy/40 bg-buy/10",
+              )}
+            >
+              <div className="text-[9px] uppercase tracking-wider text-muted-foreground">
+                {tpHit ? "TP · HIT" : "TP"}
+              </div>
+              <div className={cn("font-tabular text-sm font-semibold tabular-nums", hasTP ? "text-buy" : "text-muted-foreground/60")}>
+                {hasTP
+                  ? fmtFeedPrice(tp, r.currency_quote, r.segment_type, r.exchange)
+                  : "—"}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Closed-reason chip when present (SL/TP/stop-out flag). Kept in a
           separate line so the main card stays clean for the common

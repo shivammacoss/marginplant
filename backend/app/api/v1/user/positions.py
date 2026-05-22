@@ -213,6 +213,12 @@ def _pos(p: Position) -> dict:
         "current_usd_inr_rate": f"{current_rate:.4f}" if is_usd else None,
         "stop_loss": str(p.stop_loss) if p.stop_loss is not None else None,
         "target": str(p.target) if p.target is not None else None,
+        # Snapshot of SL/TP captured at close-time. apply_fill wipes
+        # `stop_loss` / `target` on full close so they don't leak into
+        # reopens, but the user-facing Closed tab wants to surface
+        # "Trade had SL ₹X, TP ₹Y" — these copies hold that info.
+        "close_stop_loss": str(p.close_stop_loss) if getattr(p, "close_stop_loss", None) is not None else None,
+        "close_target": str(p.close_target) if getattr(p, "close_target", None) is not None else None,
         "status": p.status.value,
         "opened_at": p.opened_at.isoformat() if p.opened_at else None,
         "closed_at": p.closed_at.isoformat() if p.closed_at else None,

@@ -143,6 +143,16 @@ async def apply_fill(
                 if pos.open_usd_inr_rate is not None and pos.close_usd_inr_rate is None:
                     pos.close_usd_inr_rate = Decimal128(str(round(get_usd_inr_rate(), 4)))
                 new_margin_used = to_decimal(0)
+                # Snapshot the live SL / TP BEFORE we clear them, so the
+                # Closed-tab card on the user side can still surface
+                # "Trade had SL ₹X, TP ₹Y" — even though the live fields
+                # are about to be wiped to keep reopens clean. Operator's
+                # 22-May spec: user ko close trade me bhi visible rahe
+                # ki SL/TP kitna laga tha.
+                if pos.stop_loss is not None and pos.close_stop_loss is None:
+                    pos.close_stop_loss = pos.stop_loss
+                if pos.target is not None and pos.close_target is None:
+                    pos.close_target = pos.target
                 # Position is closing — clear any SL/TP that were on it so a
                 # later re-open on the same instrument doesn't inherit stale
                 # brackets from a long-gone direction. `apply_brackets` stays
