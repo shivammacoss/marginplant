@@ -746,99 +746,123 @@ async def list_active_trades(user: CurrentUser):
                 ovn_settings_by_key[k] = r.get("settings") or {}
 
     # ── Per-position FIFO matching ───────────────────────────────────
-    # The old logic grouped every fill by `(token, product_type)` and ran
-    # one combined FIFO per group. That works for the simplest case (one
-    # OPEN position per group, no history) but produced phantom Active
-    # rows in two real-world scenarios the operator hit on 22-May:
+    # Driven by `opening_quantity` on each Position doc instead of
+    # `opened_at` boundaries. The previous time-window approach broke
+    # on positions whose `opened_at` had been touched by an admin edit
+    # or reopened by hand — the window filter then excluded ALL the
+    # original opening trades and Active showed 0 rows for OPEN
+    # positions with non-zero qty (operator-flagged 22-May verify
+    # script: MAHADEV's 10 positions all came back window_trades=0).
     #
-    #   1. Many historical cycles on the same instrument. A user with
-    #      20+ open/close cycles on CRUDEOIL ended up with 21+ same-
-    #      side fills competing against the entire `opposite_total` from
-    #      every previous cycle's closing legs. FIFO consumption no
-    #      longer matched what was actually held in the current cycle.
+    # New approach is fully data-driven:
     #
-    #   2. Two OPEN positions for the same (token, product_type) — a
-    #      data anomaly that can occur after an admin position edit /
-    #      reopen race. The previous code kept only one position in
-    #      `pos_by_token`, so the second position's fills were
-    #      attributed to the wrong row.
+    #   1. Walk positions from NEWEST (by opened_at) to OLDEST. Each
+    #      position "claims" the most recent same-side fills whose
+    #      cumulative quantity matches its own `opening_quantity`.
+    #      Claimed trades are removed from the pool so older positions
+    #      don't accidentally inherit recent fills.
     #
-    # New approach: partition trades into per-position time windows
-    # using `opened_at` as the cycle boundary. For a (token, product)
-    # group with positions P1 (opened T1) and P2 (opened T2 > T1):
-    #   * Trades in [T1, T2) belong to P1.
-    #   * Trades in [T2, ∞)  belong to P2.
-    # Within each window we then run the same FIFO consumption (oldest
-    # same-side first, eaten by opposite-side totals) — but now the
-    # window only contains THIS cycle's fills, so the math matches the
-    # position's actual lots.
+    #   2. Each position ALSO claims opposite-side fills equal to
+    #      `opening_quantity − |quantity|` — that's the qty the
+    #      position has closed since open. These are the closing legs
+    #      that need to be FIFO-consumed against the claimed same-side
+    #      fills.
+    #
+    #   3. Within each position's claimed set, apply FIFO: opposite
+    #      qty eats oldest-first same-side, dropping fully-consumed
+    #      trades and keeping the leftover on partially-consumed
+    #      trades. What survives are the Active rows.
+    #
+    # Robust to:
+    #   • opened_at drift (admin edits, reopen, legacy data)
+    #   • Multiple OPEN positions for same (token, product_type)
+    #   • Long historical cycles — older closed cycles' trades go
+    #     unclaimed and silently drop out.
     from collections import defaultdict
     from datetime import datetime as _datetime
 
-    # Group OPEN positions per (token, product_type) and sort by
-    # opened_at ascending. Most users only have ONE position per group,
-    # but the partitioning logic naturally handles N positions.
-    positions_by_key: dict[tuple[str, str], list[Position]] = defaultdict(list)
-    for p in open_positions:
-        positions_by_key[(p.instrument.token, str(p.product_type.value))].append(p)
-    for plist in positions_by_key.values():
-        plist.sort(key=lambda pp: pp.opened_at or _datetime.min)
-
-    # trade_id → owning Position (used by the row builder below to
-    # render per-row position attribution + look up the right margin /
-    # SL / TP). Trades that fall outside ALL position windows are
-    # ignored (belong to a closed cycle, not Active).
+    # trade_id → owning Position (used by the row builder below).
     trade_owner: dict[str, Position] = {}
-
-    # Build per-position bucket: same-side fills + opposite-side total,
-    # restricted to the position's own time window.
-    same_side_by_pos: dict[str, list[Any]] = defaultdict(list)
-    opposite_total_by_pos: dict[str, float] = defaultdict(float)
-
-    for t in trades:
-        t_key = (t.instrument.token, str(t.product_type.value))
-        ps = positions_by_key.get(t_key)
-        if not ps:
-            # Token-only fallback for legacy product_type drift (see
-            # comment on pos_by_token above). Match against the single
-            # token-keyed position if any.
-            fallback = pos_by_token.get(t.instrument.token)
-            if fallback is None:
-                continue
-            ps = [fallback]
-        t_at = t.executed_at or _datetime.min
-        # Find which position's window this trade belongs to. A trade
-        # at t_at belongs to position i if
-        #     ps[i].opened_at <= t_at < (ps[i+1].opened_at or +∞)
-        target_pos: Position | None = None
-        for i, pp in enumerate(ps):
-            start = pp.opened_at or _datetime.min
-            end = ps[i + 1].opened_at if i + 1 < len(ps) else None
-            if t_at < start:
-                continue
-            if end is not None and t_at >= end:
-                continue
-            target_pos = pp
-            break
-        # Trade before any open cycle — it belonged to a closed
-        # position that no longer exists in `open_positions`. Drop it.
-        if target_pos is None:
-            continue
-        trade_owner[str(t.id)] = target_pos
-        is_long = target_pos.quantity > 0
-        is_buy = t.action == OrderAction.BUY
-        if is_long == is_buy:
-            same_side_by_pos[str(target_pos.id)].append(t)
-        else:
-            opposite_total_by_pos[str(target_pos.id)] += t.quantity
-
-    # FIFO consume per-position: oldest same-side eaten first.
+    # trade_id → leftover qty after FIFO. Trades not in this map were
+    # fully consumed and don't appear as Active rows.
     remaining_qty: dict[str, float] = {}
-    for pid, side_trades in same_side_by_pos.items():
-        side_trades.sort(key=lambda tr: tr.executed_at or _datetime.min)
-        to_consume = opposite_total_by_pos.get(pid, 0.0)
-        for tr in side_trades:
-            tq = tr.quantity
+    # Trade IDs claimed by any position — newer positions consume the
+    # most recent fills first, so by the time an older position scans
+    # the pool, those trades are gone.
+    claimed: set[str] = set()
+
+    # Newest first so the freshly-opened position grabs the recent
+    # fills. Falls back to position id for stable ordering when
+    # opened_at is identical (e.g. two positions opened in the same
+    # millisecond — admin scripts, batch reopens).
+    positions_newest_first = sorted(
+        open_positions,
+        key=lambda pp: (pp.opened_at or _datetime.min, str(pp.id)),
+        reverse=True,
+    )
+
+    for p in positions_newest_first:
+        if p.quantity == 0:
+            continue
+        is_long = p.quantity > 0
+        target_open = abs(float(p.opening_quantity or 0)) or abs(float(p.quantity))
+        target_close = max(0.0, target_open - abs(float(p.quantity)))
+
+        # Trades for this (token, product_type) that haven't been
+        # claimed by a newer position yet.
+        pool: list[Any] = []
+        for t in trades:
+            if t.instrument.token != p.instrument.token:
+                continue
+            if str(t.product_type.value) != str(p.product_type.value):
+                continue
+            if str(t.id) in claimed:
+                continue
+            pool.append(t)
+        if not pool:
+            continue
+
+        # Newest first so the most recent fills are attributed to this
+        # position. Partition into same-side / opposite-side.
+        pool.sort(key=lambda tr: tr.executed_at or _datetime.min, reverse=True)
+        same_side: list[Any] = []
+        opposite_side: list[Any] = []
+        for t in pool:
+            is_buy = t.action == OrderAction.BUY
+            if (is_long and is_buy) or ((not is_long) and (not is_buy)):
+                same_side.append(t)
+            else:
+                opposite_side.append(t)
+
+        # Claim same-side fills totaling target_open.
+        claimed_same: list[Any] = []
+        accum = 0.0
+        for t in same_side:
+            if accum >= target_open:
+                break
+            claimed_same.append(t)
+            trade_owner[str(t.id)] = p
+            claimed.add(str(t.id))
+            accum += float(t.quantity)
+
+        # Claim opposite-side fills totaling target_close (how much
+        # has been closed against this position so far). Older
+        # positions can't see these any more — they belonged here.
+        opposite_consumed = 0.0
+        for t in opposite_side:
+            if opposite_consumed >= target_close:
+                break
+            claimed.add(str(t.id))
+            opposite_consumed += float(t.quantity)
+
+        # FIFO: oldest claimed same-side eaten by opposite_consumed
+        # (capped at target_close since extra opposite would mean the
+        # position is already fully closed or flipped, which isn't an
+        # OPEN row's reality).
+        claimed_same.sort(key=lambda tr: tr.executed_at or _datetime.min)
+        to_consume = min(opposite_consumed, target_close)
+        for tr in claimed_same:
+            tq = float(tr.quantity)
             if to_consume <= 0:
                 remaining_qty[str(tr.id)] = tq
                 continue
