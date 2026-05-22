@@ -283,7 +283,12 @@ function AuditLogsInner() {
     {
       key: "metadata",
       header: "Detail",
-      className: "max-w-[360px]",
+      // Fixed width + override the DataTable's default `whitespace-nowrap`
+      // so the inner truncate actually clips instead of forcing the cell
+      // wider into the IP column. The bullets line gets per-line truncate;
+      // the user can hover for the full title attribute and click "Raw"
+      // for the unabbreviated JSON.
+      className: "w-[320px] min-w-[320px] max-w-[320px] whitespace-normal align-top",
       render: (r) => <AuditDetailCell row={r} />,
     },
     {
@@ -568,9 +573,12 @@ function AuditDetailCell({ row }: { row: any }) {
 
   if (showRaw) {
     return (
-      <div className="space-y-1">
-        <code className="block max-w-[340px] truncate text-[10px]" title={JSON.stringify(m)}>
-          {JSON.stringify(m)}
+      <div className="w-full max-w-[300px] space-y-1 overflow-hidden">
+        <code
+          className="block whitespace-pre-wrap break-all rounded bg-muted/40 p-1.5 text-[10px]"
+          title={JSON.stringify(m, null, 2)}
+        >
+          {JSON.stringify(m, null, 2)}
         </code>
         <button
           type="button"
@@ -584,13 +592,19 @@ function AuditDetailCell({ row }: { row: any }) {
   }
 
   const { summary, bullets } = fmtAuditMetadata(row);
+  const bulletText = bullets.join(" · ");
 
   return (
-    <div className="space-y-0.5">
-      <div className="text-xs font-medium text-foreground">{summary}</div>
+    <div className="w-full max-w-[300px] space-y-0.5 overflow-hidden">
+      <div className="truncate text-xs font-medium text-foreground" title={summary}>
+        {summary}
+      </div>
       {bullets.length > 0 && (
-        <div className="text-[11px] text-muted-foreground">
-          {bullets.join(" · ")}
+        <div
+          className="truncate text-[11px] text-muted-foreground"
+          title={bulletText}
+        >
+          {bulletText}
         </div>
       )}
       <button
