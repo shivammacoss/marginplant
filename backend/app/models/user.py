@@ -233,6 +233,20 @@ class User(TimestampMixin):
     # `is_reducing` exemption).
     auto_settlement: bool = True
 
+    # Per-admin support WhatsApp number, shown to that admin's downstream
+    # users on the "Add funds → Support" button and any other Contact-
+    # support affordance in the apk/user web. Cascade resolution: when a
+    # user requests their support number, we walk up the parent_id chain
+    # (CLIENT → DEALER/MASTER/BROKER → ADMIN → SUPER_ADMIN) and return
+    # the first non-empty value. Falls back to the global
+    # `platform.support_whatsapp` PlatformSetting if nothing is set
+    # anywhere in the chain. Only meaningful for admin-tier roles
+    # (SUPER_ADMIN / ADMIN / BROKER); CLIENT rows leave this NULL.
+    # Stored as a free-form string so country code + spacing + the
+    # leading `+` survive round-trips — the apk's `buildWhatsappUrl`
+    # strips non-digits before composing the wa.me link.
+    support_whatsapp: str | None = None
+
     class Settings:
         name = "users"
         use_state_management = True

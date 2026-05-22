@@ -1,23 +1,36 @@
-"""Public support contact endpoint.
+"""Per-user support contact endpoint — resolves the caller's effective
+WhatsApp + email via the admin hierarchy.
 
-Exposes the admin-managed `platform.support_whatsapp` + `platform.support_email`
-PlatformSetting rows so the user app (APK + web) can render a "Contact
-support" affordance with the current values. No auth required — these
-are public contact details that any signed-in user can read; locking
-them down behind admin would just mean every render in the user app
-re-derives them, which is wasteful for a string that changes maybe
-once a quarter.
+WhatsApp resolution walks UP from the calling user (CLIENT / DEALER /
+MASTER / BROKER → ADMIN → SUPER_ADMIN) following `parent_id`, returning
+the FIRST non-empty `User.support_whatsapp` it finds. This lets every
+admin tier override their downstream pool's support contact without
+admin needing to "broadcast" a new number — the user app's apk
+transparently picks up whichever ancestor's value is set.
 
-Defaults to empty strings when the seed row has never been overridden —
-the frontend then hides the buttons rather than rendering "tel://" with
-no number.
+If nobody in the chain has a number set, falls back to the platform-
+wide `platform.support_whatsapp` PlatformSetting row (managed by the
+super-admin via the Platform Settings page). This guarantees the apk
+always has SOMETHING to show when the platform is correctly seeded —
+the original behaviour before the per-admin override was added.
+
+Email continues to read straight from PlatformSetting — only WhatsApp
+goes through the cascade, since email branding is meant to stay
+platform-wide.
+
+Authenticated: the cascade needs to know whose parent chain to walk.
+Anonymous reads used to be allowed (it was a single global row); that
+shape no longer works once cascade is in play.
 """
 
 from __future__ import annotations
 
+from beanie import PydanticObjectId
 from fastapi import APIRouter
 
+from app.core.dependencies import CurrentUser
 from app.models.platform_setting import PlatformSetting
+from app.models.user import User
 from app.schemas.common import APIResponse
 
 router = APIRouter(prefix="/support", tags=["user-support"])
@@ -31,13 +44,51 @@ async def _read_setting(key: str) -> str:
     return str(val).strip()
 
 
+async def _resolve_whatsapp_for_user(user: User) -> str:
+    """Walk UP the parent_id chain from `user`, returning the first
+    non-empty `support_whatsapp` found. Stops at the first hit OR when
+    the chain ends (parent_id == None). Self is included so an
+    admin-tier user checking the apk against their own login still sees
+    their own number.
+
+    Capped at 8 hops as a defensive guard against a corrupted parent
+    chain (cycle, dangling reference) — the longest realistic chain
+    is CLIENT → DEALER → MASTER → BROKER → SUB_BROKER → ADMIN →
+    SUPER_ADMIN which is 7 nodes; 8 leaves headroom for one extra
+    intermediate without ever falling into an infinite walk.
+    """
+    cur: User | None = user
+    seen: set[PydanticObjectId] = set()
+    hops = 0
+    while cur is not None and hops < 8:
+        if cur.id in seen:
+            break
+        seen.add(cur.id)
+        val = (cur.support_whatsapp or "").strip()
+        if val:
+            return val
+        if cur.parent_id is None:
+            break
+        cur = await User.get(cur.parent_id)
+        hops += 1
+    return ""
+
+
 @router.get("", response_model=APIResponse[dict])
-async def get_support_contacts():
-    """Returns the admin-configured WhatsApp number + email for customer
-    support. Both default to empty strings when unset — the UI is
-    expected to hide the corresponding action button in that case so
-    the user never sees a half-broken "Contact support" affordance."""
-    whatsapp = await _read_setting("platform.support_whatsapp")
+async def get_support_contacts(user: CurrentUser):
+    """Returns the effective WhatsApp + email for THIS user. WhatsApp
+    walks the admin hierarchy; email is the global PlatformSetting row.
+    Both default to empty strings when unset — the UI hides the
+    corresponding action button in that case so the user never sees a
+    half-broken "Contact support" affordance."""
+    whatsapp = await _resolve_whatsapp_for_user(user)
+    if not whatsapp:
+        # Last-resort fallback: super-admin set a global WhatsApp via
+        # the Platform Settings page (this was the only mechanism
+        # before per-admin overrides existed). Keeps existing
+        # deployments working even when no User row has been updated
+        # yet through the new admin Support page.
+        whatsapp = await _read_setting("platform.support_whatsapp")
     email = await _read_setting("platform.support_email")
     return APIResponse(
         data={

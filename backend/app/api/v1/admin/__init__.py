@@ -19,6 +19,7 @@ from app.api.v1.admin import (
     reports,
     risk,
     settings,
+    support,
     trading,
     users,
     zerodha,
@@ -44,3 +45,4 @@ router.include_router(management.router)
 router.include_router(brokers.router)
 router.include_router(pnl_sharing.router)
 router.include_router(notifications.router)
+router.include_router(support.router)

@@ -14,6 +14,7 @@ import {
   Home,
   ListChecks,
   ListOrdered,
+  MessageCircle,
   Plug,
   ShieldCheck,
   Users,
@@ -108,6 +109,13 @@ const groups: { title: string; items: NavItem[] }[] = [
       { href: "/settings/platform", label: "Platform settings", icon: Cog, superOnly: true },
       { href: "/holidays", label: "Holiday calendar", icon: Calendar, superOnly: true },
       { href: "/backup", label: "Backup & EOD", icon: DatabaseBackup, superOnly: true },
+      // Per-admin support WhatsApp — visible to EVERY admin tier
+      // (super-admin / admin / broker / sub-broker) so each can
+      // configure their own number for their downstream pool. Cascade
+      // resolution on the user side means a broker leaving this blank
+      // inherits their parent admin's number; a fully unconfigured
+      // chain falls back to platform default.
+      { href: "/support", label: "Support", icon: MessageCircle },
       // Audit log visible to every tier — backend scopes the result
       // set to the caller's pool (super-admin sees all, admin sees
       // their own + downstream brokers + clients, broker sees their

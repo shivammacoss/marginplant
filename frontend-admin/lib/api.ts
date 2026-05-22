@@ -427,6 +427,12 @@ export const NotificationsAPI = {
     unwrap<{ marked: number }>(api.post("/admin/notifications/mark-all-read")),
 };
 
+export const SupportAPI = {
+  get: () => unwrap<{ whatsapp: string; role: string }>(api.get("/admin/support")),
+  set: (whatsapp: string) =>
+    unwrap<{ whatsapp: string; role: string }>(api.put("/admin/support", { whatsapp })),
+};
+
 export const LedgerAdminAPI = {
   list: (params?: any) => unwrap<{ items: any[]; meta: any }>(api.get("/admin/ledger", { params })),
   manualEntry: (body: any) => unwrap<any>(api.post("/admin/ledger/manual-entry", body)),
