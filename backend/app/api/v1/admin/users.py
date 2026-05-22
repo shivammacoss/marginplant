@@ -861,13 +861,24 @@ async def live_trade_stats(user_id: str, admin: CurrentAdmin):
             stored_lot = max(1, int(p.instrument.lot_size or 1))
             abs_qty = abs(qty)
             notional = avg * abs_qty
-            if mode == "fixed" and float(s.get("fixed_margin_per_lot") or 0) > 0:
+            # CF (carry-forward) margin MUST read the overnight_* triple,
+            # NOT the product-aware `leverage` / `margin_percentage` /
+            # `fixed_margin_per_lot`. In Times mode the resolver keeps
+            # the product-aware fields on the INTRADAY value (the
+            # "symmetric-Times patch" in netting_service), so reading
+            # them here returned the intraday number — operator-flagged
+            # 22-May: NIFTY26MAYFUT MIS 65-qty showed CF Total ₹3,096
+            # (= intraday at 500×) when it should have been ₹25,802 (=
+            # notional ÷ overnight=60). Same bug family the position
+            # serializer + intraday-to-carry rollover already fixed.
+            ovn_fixed = float(s.get("overnight_fixed_margin_per_lot") or 0)
+            if mode == "fixed" and ovn_fixed > 0:
                 lots = abs_qty / stored_lot
-                nrml_margin = float(s.get("fixed_margin_per_lot")) * lots
+                nrml_margin = ovn_fixed * lots
             else:
-                pct = float(s.get("margin_percentage") or 100.0) / 100.0
-                lev = float(s.get("leverage") or 1.0) or 1.0
-                nrml_margin = (notional * pct) / lev
+                ovn_pct = float(s.get("overnight_margin_percentage") or 100.0) / 100.0
+                ovn_lev = float(s.get("overnight_leverage") or 1.0) or 1.0
+                nrml_margin = (notional * ovn_pct) / ovn_lev
                 if _is_usd(p):
                     nrml_margin *= usd_inr
             cf_total_eod += nrml_margin
