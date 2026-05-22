@@ -283,8 +283,8 @@ function AuditLogsInner() {
     {
       key: "metadata",
       header: "Detail",
-      className: "max-w-[300px] truncate",
-      render: (r) => <code className="text-[10px]">{JSON.stringify(r.metadata)}</code>,
+      className: "max-w-[360px]",
+      render: (r) => <AuditDetailCell row={r} />,
     },
     {
       key: "ip_address",
@@ -461,6 +461,145 @@ function AuditLogsInner() {
           </Button>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Human-readable Detail cell ───────────────────────────────────────
+//
+// Operator 22-May: the Audit Logs page showed metadata as raw JSON —
+// `{"symbol":"CRUDEOIL26JUNFUT","action":"BUY","ord...` — hard to scan
+// at a glance. This renders the same data as plain English, grouped by
+// the action type the row represents. Falls back to the JSON view via
+// "Raw" toggle so nothing is hidden — admins can always pop the raw
+// dict for fields the formatter doesn't know about.
+
+const ACTION_LABELS: Record<string, string> = {
+  ORDER_PLACE: "New order",
+  ORDER_CANCEL: "Order cancelled",
+  ORDER_MODIFY: "Order modified",
+  SQUAREOFF: "Position squared off",
+  SQUAREOFF_FORCE: "Force squareoff",
+  POSITION_EDIT: "Position edited",
+  POSITION_REOPEN: "Position reopened",
+  POSITION_DELETE: "Position deleted",
+  UPDATE: "Updated",
+  WALLET_ADJUST: "Wallet adjusted",
+  SETTING_CHANGE: "Setting changed",
+  BLOCK: "User blocked",
+  UNBLOCK: "User unblocked",
+  IMPERSONATE: "Impersonated user",
+  LOGIN: "Logged in",
+  LOGOUT: "Logged out",
+  LOGIN_FAILED: "Failed login",
+  CREATE: "Created",
+  DELETE: "Deleted",
+  APPROVE: "Approved",
+  REJECT: "Rejected",
+};
+
+// `kind` discriminator on Position UPDATE rows — sub-actions live here.
+const KIND_LABELS: Record<string, string> = {
+  INTRADAY_TO_CARRY_CONVERSION: "MIS → NRML carry-forward",
+};
+
+function fmtMoney(v: any): string {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v ?? "");
+  return "₹" + n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function fmtAuditMetadata(row: any): { summary: string; bullets: string[] } {
+  const m = row.metadata ?? {};
+  const action = String(row.action ?? "");
+  const bullets: string[] = [];
+  let summary = ACTION_LABELS[action] ?? action;
+
+  // Position UPDATE rows discriminate via `kind`
+  if (action === "UPDATE" && m.kind && KIND_LABELS[m.kind]) {
+    summary = KIND_LABELS[m.kind];
+  }
+
+  // Symbol always on top if present
+  if (m.symbol) bullets.push(`Symbol: ${m.symbol}`);
+
+  // Order-shape fields
+  if (m.action) bullets.push(`Side: ${m.action}`);
+  if (m.order_type) bullets.push(`Type: ${m.order_type}`);
+  if (m.product_type) bullets.push(`Product: ${m.product_type}`);
+  if (m.quantity != null) bullets.push(`Qty: ${m.quantity}`);
+  if (m.price != null && m.price !== "0") bullets.push(`Price: ${fmtMoney(m.price)}`);
+
+  // Squareoff shape
+  if (m.closed_lots != null) bullets.push(`Closed lots: ${m.closed_lots}`);
+  if (m.closed_qty != null) bullets.push(`Closed qty: ${m.closed_qty}`);
+
+  // Intraday→carry conversion shape
+  if (m.old_margin != null) bullets.push(`Old margin: ${fmtMoney(m.old_margin)}`);
+  if (m.new_margin != null) bullets.push(`New margin: ${fmtMoney(m.new_margin)}`);
+  if (m.delta != null) bullets.push(`Margin Δ: ${fmtMoney(m.delta)}`);
+
+  // Reopen shape
+  if (m.reversed_realized_pnl != null) bullets.push(`Reversed P&L: ${fmtMoney(m.reversed_realized_pnl)}`);
+  if (m.restored_quantity != null) bullets.push(`Restored qty: ${m.restored_quantity}`);
+
+  // Wallet adjust shape
+  if (m.amount != null && m.type) bullets.push(`Amount: ${fmtMoney(m.amount)} (${m.type})`);
+
+  // Impersonate / role
+  if (m.as_role) bullets.push(`As role: ${m.as_role}`);
+
+  // Settings changes
+  if (m.tier) bullets.push(`Tier: ${m.tier}`);
+  if (m.rule_type) bullets.push(`Rule: ${m.rule_type}`);
+  if (m.kind && !KIND_LABELS[m.kind]) bullets.push(`Kind: ${m.kind}`);
+
+  return { summary, bullets };
+}
+
+function AuditDetailCell({ row }: { row: any }) {
+  const m = row.metadata ?? {};
+  const [showRaw, setShowRaw] = useState(false);
+
+  const hasMeta = m && Object.keys(m).length > 0;
+  if (!hasMeta) {
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
+
+  if (showRaw) {
+    return (
+      <div className="space-y-1">
+        <code className="block max-w-[340px] truncate text-[10px]" title={JSON.stringify(m)}>
+          {JSON.stringify(m)}
+        </code>
+        <button
+          type="button"
+          onClick={() => setShowRaw(false)}
+          className="text-[10px] text-primary hover:underline"
+        >
+          Hide raw
+        </button>
+      </div>
+    );
+  }
+
+  const { summary, bullets } = fmtAuditMetadata(row);
+
+  return (
+    <div className="space-y-0.5">
+      <div className="text-xs font-medium text-foreground">{summary}</div>
+      {bullets.length > 0 && (
+        <div className="text-[11px] text-muted-foreground">
+          {bullets.join(" · ")}
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={() => setShowRaw(true)}
+        className="text-[10px] text-muted-foreground/70 hover:text-primary hover:underline"
+      >
+        Raw
+      </button>
     </div>
   );
 }
