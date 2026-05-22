@@ -138,30 +138,62 @@ function applyBrandingChrome(brand: Branding | null): void {
   if (document.title !== baseTitle) {
     document.title = baseTitle;
   }
-  // Favicon swap. We replace ALL <link rel="icon"> tags with a single
-  // dynamic one when a branded logo is present, and restore the
-  // original /icon.svg when branding is null.
+  // Favicon swap. Next.js (app/icon.svg) bakes a <link rel="icon">
+  // into SSR output that the browser reads BEFORE our React code
+  // runs — so just appending a new link doesn't visibly change the
+  // tab icon (browser keeps using the SSR one). To actually replace
+  // it we:
+  //   1. Stash the original <link rel="icon"> hrefs ONCE on a
+  //      data-attribute we can read back later (so non-branded
+  //      visitors / branding-cleared sessions get the platform
+  //      icon back instead of a 404).
+  //   2. When a tenant logo is present → rewrite EVERY existing
+  //      icon link's href to the tenant URL (and tag it as ours).
+  //   3. When branding clears → restore the original href from
+  //      the stash.
   const head = document.head;
   if (!head) return;
-  const existing = head.querySelectorAll<HTMLLinkElement>(
-    'link[rel~="icon"][data-branding="1"]',
-  );
-  existing.forEach((el) => el.remove());
   const targetHref = brand?.logo_url
     ? `${API_URL}${brand.logo_url}`
     : null;
-  if (!targetHref) return;
-  const link = document.createElement("link");
-  link.rel = "icon";
-  link.href = targetHref;
-  link.setAttribute("data-branding", "1");
-  // Hint browsers about the type when we can.
-  if (targetHref.endsWith(".svg")) link.type = "image/svg+xml";
-  else if (targetHref.endsWith(".png")) link.type = "image/png";
-  else if (targetHref.endsWith(".webp")) link.type = "image/webp";
-  else if (targetHref.endsWith(".jpg") || targetHref.endsWith(".jpeg"))
-    link.type = "image/jpeg";
-  head.appendChild(link);
+  const allIcons = head.querySelectorAll<HTMLLinkElement>(
+    'link[rel="icon"], link[rel="shortcut icon"], link[rel="apple-touch-icon"]',
+  );
+  allIcons.forEach((el) => {
+    if (!el.dataset.brandingOriginal) {
+      el.dataset.brandingOriginal = el.getAttribute("href") || "";
+    }
+    if (targetHref) {
+      el.setAttribute("href", targetHref);
+      el.setAttribute("data-branding", "1");
+      // Force the browser to pick up the new href instead of the
+      // SSR-cached one. Removing & re-adding the same node is the
+      // only reliable way across Chromium/Firefox/Safari.
+      const clone = el.cloneNode(true) as HTMLLinkElement;
+      el.replaceWith(clone);
+    } else {
+      // Restore the platform default when branding is cleared.
+      const original = el.dataset.brandingOriginal || "";
+      if (original) el.setAttribute("href", original);
+      delete el.dataset.branding;
+      const clone = el.cloneNode(true) as HTMLLinkElement;
+      el.replaceWith(clone);
+    }
+  });
+  // Edge case: SSR didn't inject any <link rel="icon"> (rare). In
+  // that case just append one so the tab still gets a branded icon.
+  if (targetHref && allIcons.length === 0) {
+    const link = document.createElement("link");
+    link.rel = "icon";
+    link.href = targetHref;
+    link.setAttribute("data-branding", "1");
+    if (targetHref.endsWith(".svg")) link.type = "image/svg+xml";
+    else if (targetHref.endsWith(".png")) link.type = "image/png";
+    else if (targetHref.endsWith(".webp")) link.type = "image/webp";
+    else if (targetHref.endsWith(".jpg") || targetHref.endsWith(".jpeg"))
+      link.type = "image/jpeg";
+    head.appendChild(link);
+  }
 }
 
 export function BrandingProvider({ children }: { children: ReactNode }) {
