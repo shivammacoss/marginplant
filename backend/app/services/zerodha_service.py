@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -110,6 +111,20 @@ class ZerodhaService:
 
         # Reverse lookup: token → ticker index
         self._token_to_ws: dict[int, int] = {}
+        # LRU eviction support — when MAX_TOKENS_PER_WS × MAX_WS_CONNECTIONS
+        # cap is hit, the oldest entries here are evicted to make room for
+        # new subscriptions. Every subscribe_tokens_on_demand call refreshes
+        # the timestamp for every token in the request so an actively-viewed
+        # leg keeps moving back to the top. Without this, the pool fills
+        # over the day with stale tokens from closed positions / dismissed
+        # option-chain dialogs and the option-chain picker silently shows
+        # blank prices for any NEW strike beyond the cap — operator-flagged
+        # 22-May: "kuch strike ka data nahi aa raha".
+        self._token_last_used: dict[int, float] = {}
+        # Tokens we MUST keep subscribed regardless of LRU age — admin-pinned
+        # instruments, anything with an open position, etc. Populated by
+        # callers via mark_token_protected / unmark_token_protected.
+        self._token_protected: set[int] = set()
 
         # Symbol lookup for tick callbacks
         self._symbol_by_token: dict[int, dict[str, str]] = {}
@@ -1451,6 +1466,14 @@ class ZerodhaService:
         if symbols:
             self._symbol_by_token.update(symbols)
 
+        # LRU-touch: refresh "last used" for every token in the request,
+        # whether already subscribed or new. Keeps actively-viewed strikes
+        # safe from eviction even when the same user reloads the option
+        # chain repeatedly.
+        now_ts = time.time()
+        for t in tokens:
+            self._token_last_used[t] = now_ts
+
         new_tokens = [t for t in tokens if t not in self._token_to_ws]
 
         # ── Persist to the admin's subscription list ─────────────────
@@ -1521,17 +1544,58 @@ class ZerodhaService:
                         logger.exception("zerodha_spawn_ws_failed")
                         break
         elif need_new_ws and pool_full:
-            # Kite caps us at 1 WS — log loudly so the operator knows
-            # tokens beyond the first 3000 won't get live ticks until
-            # they're rotated through the existing connection.
-            logger.warning(
-                "zerodha_ws_pool_capped",
-                extra={
-                    "pool_size": len(self._tickers),
-                    "max": self.MAX_WS_CONNECTIONS,
-                    "tokens_dropped": len(new_tokens) - total_capacity,
-                },
-            )
+            # Pool is at its hard cap (Kite gives us at most 1 WS per API
+            # key; running more triggers the 1006 / RSV3 cascade documented
+            # at the top of this class). Instead of silently dropping the
+            # new subscriptions — which was the operator-flagged 22-May bug
+            # where new option-chain strikes showed blank prices because
+            # they'd been quietly dropped on the floor — evict the
+            # least-recently-used tokens to make room.
+            #
+            # `_token_last_used` is refreshed every time the picker /
+            # market-watch / position panel re-subscribes a token, so
+            # eviction lands on legs nobody is actively viewing. Protected
+            # tokens (admin-pinned, open positions) are never evicted.
+            shortfall = len(new_tokens) - total_capacity
+            if shortfall > 0:
+                evict_candidates = sorted(
+                    (
+                        (ts, tok)
+                        for tok, ts in self._token_last_used.items()
+                        if tok in self._token_to_ws
+                        and tok not in self._token_protected
+                        and tok not in set(tokens)
+                    ),
+                    key=lambda x: x[0],
+                )
+                to_evict = [tok for _, tok in evict_candidates[:shortfall]]
+                if to_evict:
+                    try:
+                        self._ws_unsubscribe(to_evict)
+                        for tok in to_evict:
+                            self._token_last_used.pop(tok, None)
+                        logger.info(
+                            "zerodha_ws_lru_evicted",
+                            extra={
+                                "evicted": len(to_evict),
+                                "for_new": len(new_tokens),
+                                "protected_skipped": sum(1 for t in self._token_to_ws if t in self._token_protected),
+                            },
+                        )
+                    except Exception:
+                        logger.exception("zerodha_ws_lru_eviction_failed")
+                # Anything we couldn't evict (e.g. all tokens are
+                # protected) still falls off — surface that loudly.
+                still_short = shortfall - len(to_evict)
+                if still_short > 0:
+                    logger.warning(
+                        "zerodha_ws_pool_capped",
+                        extra={
+                            "pool_size": len(self._tickers),
+                            "max": self.MAX_WS_CONNECTIONS,
+                            "tokens_dropped": still_short,
+                        },
+                    )
 
         self._ws_subscribe(new_tokens)
 
@@ -1545,6 +1609,18 @@ class ZerodhaService:
             },
         )
         return len(new_tokens)
+
+    def mark_tokens_protected(self, tokens: list[int]) -> None:
+        """Mark tokens as exempt from LRU eviction. Use for instruments
+        that MUST keep ticking regardless of UI activity — open positions
+        (risk_enforcer reads LTPs), admin-pinned watchlists, etc."""
+        for t in tokens:
+            self._token_protected.add(int(t))
+
+    def unmark_tokens_protected(self, tokens: list[int]) -> None:
+        """Drop LRU-exemption for tokens — e.g. a position closes."""
+        for t in tokens:
+            self._token_protected.discard(int(t))
 
     async def unsubscribe_tokens_on_demand(self, tokens: list[int]) -> int:
         """Public async counterpart to subscribe_tokens_on_demand. Removes
@@ -1583,6 +1659,10 @@ class ZerodhaService:
         with self._ticker_lock:
             for token in tokens:
                 ws_idx = self._token_to_ws.pop(token, None)
+                # LRU bookkeeping — evicted token shouldn't keep its
+                # timestamp slot, otherwise it accumulates over time and
+                # the eviction candidate list grows unbounded.
+                self._token_last_used.pop(token, None)
                 if ws_idx is not None and ws_idx < len(self._tickers):
                     entry = self._tickers[ws_idx]
                     entry["tokens"].discard(token)
@@ -1602,6 +1682,7 @@ class ZerodhaService:
                     pass
             self._tickers.clear()
             self._token_to_ws.clear()
+            self._token_last_used.clear()
             self._ticker = None
 
     async def connect_ws(self, *, force: bool = True) -> None:
