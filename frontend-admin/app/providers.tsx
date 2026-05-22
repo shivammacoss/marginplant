@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider, keepPreviousData } from "@tanstack/re
 import { useState } from "react";
 import { ThemeProvider, useTheme } from "next-themes";
 import { Toaster } from "sonner";
+import { AdminBrandingChrome } from "@/components/branding/AdminBrandingChrome";
 
 function ThemedToaster() {
   const { resolvedTheme } = useTheme();
@@ -60,6 +61,9 @@ export function Providers({ children }: { children: React.ReactNode }) {
       disableTransitionOnChange
     >
       <QueryClientProvider client={client}>
+        {/* Tenant chrome (tab title + favicon) for ADMIN/BROKER. Renders
+            null; pure side-effects keyed off the auth store. */}
+        <AdminBrandingChrome />
         {children}
         <ThemedToaster />
       </QueryClientProvider>
