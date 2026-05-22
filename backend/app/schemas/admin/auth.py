@@ -42,6 +42,15 @@ class AdminUserOut(BaseModel):
     # broker (i.e., they're a sub-broker). Frontend swaps the role chip
     # to "SUB-BROKER" when present.
     assigned_broker_id: str | None = None
+    # White-label branding (only meaningful for role == "ADMIN"; null for
+    # SUPER_ADMIN and BROKER). Frontend's <BrandLogo> uses these to
+    # replace the platform brand in the sidebar when the admin has
+    # configured their own. Both fields are populated only when
+    # `BRANDING_ENABLED=true` on the backend AND the admin has actually
+    # saved them — otherwise they stay null and the sidebar falls back
+    # to the platform default.
+    brand_name: str | None = None
+    logo_url: str | None = None
 
 
 AdminTokenPair.model_rebuild()

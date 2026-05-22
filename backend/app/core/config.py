@@ -179,6 +179,19 @@ class Settings(BaseSettings):
     MUHURAT_OPEN_TIME: str = "18:15"
     MUHURAT_CLOSE_TIME: str = "19:15"
 
+    # ── White-label branding ─────────────────────────────────────────
+    # Master kill-switch for the white-label branding subsystem. When
+    # False (default), the new schema fields on User exist but no code
+    # path reads/writes them, the `/api/v1/branding/*` endpoints (added
+    # in Phase 2) return 503, and the frontend BrandingProvider falls
+    # back to default platform branding. Flip to True only after Phase
+    # 1 is observed clean for ≥ 24h. Keeps prod 0-second reversible.
+    BRANDING_ENABLED: bool = False
+    # Public IPv4 the platform answers on — admins point their custom
+    # domain's A records here for DNS verification (Phase 4). Empty
+    # default keeps the verify endpoint a no-op when unset.
+    PLATFORM_PUBLIC_IP: str = ""
+
     # ─────────────────────────────────────────────────────────────────
     @field_validator("MONGODB_URL")
     @classmethod

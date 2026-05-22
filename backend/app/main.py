@@ -21,6 +21,7 @@ from pathlib import Path
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from app import __version__
+from app.api.v1 import branding as branding_public
 from app.api.v1.admin import router as admin_router
 from app.api.v1.user import router as user_router
 from app.api.ws import router as ws_router
@@ -141,6 +142,40 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # mutates user balances. Functions to call manually if needed:
     #   • wallet_service.clamp_negative_balances_to_settlement()
     #   • wallet_service.recompute_realized_pnl_for_all()
+
+    # White-label branding: drop the obsolete `custom_domain_unique_sparse`
+    # index left over from the very first Phase-1 deploy. The original
+    # design used `sparse=True`, but MongoDB sparse indexes only skip
+    # MISSING fields — they STILL index `null` values, and Beanie always
+    # serializes the optional `custom_domain: None` default into the
+    # document, so the unique constraint collapsed to "at most one user
+    # row with custom_domain=null" → every second user insert hit
+    # E11000 → 500 on /admin/management/sub-admins, /auth/register, etc.
+    # The replacement `custom_domain_unique_partial` index uses
+    # `partialFilterExpression={custom_domain: {$type: "string"}}` which
+    # correctly indexes only rows that have a real string value.
+    # Beanie creates the new index but never drops the old one — this
+    # heal handles the swap. Idempotent: NamespaceNotFound (collection
+    # missing) and IndexNotFound (already dropped) are both no-ops.
+    try:
+        from app.core.database import get_db
+
+        _coll = get_db()["users"]
+        try:
+            await _coll.drop_index("custom_domain_unique_sparse")
+            logger.info("startup_dropped_obsolete_sparse_index name=custom_domain_unique_sparse")
+        except Exception as _exc:
+            # `IndexNotFound` (code 27) and `NamespaceNotFound` (code 26)
+            # both mean "nothing to clean up" — expected on every boot
+            # after the first one. Anything else is logged but never
+            # halts startup (worst case: the next sub-admin create
+            # fails with E11000 and the operator runs the manual
+            # `db.users.dropIndex` from DEPLOY_BRANDING.md).
+            msg = str(_exc).lower()
+            if "indexnotfound" not in msg and "ns not found" not in msg and "index not found" not in msg:
+                logger.warning("startup_drop_obsolete_sparse_index_failed err=%s", _exc)
+    except Exception:
+        logger.exception("startup_branding_index_cleanup_failed_continuing")
 
     # Settings snapshot backfill: walks every existing ADMIN and BROKER
     # and ensures their tier-specific override table has one row per
@@ -517,6 +552,70 @@ app = FastAPI(
 )
 
 # ── Middleware (order matters: outer-first below) ─────────────────────
+# Branding CORS middleware: lets requests from active admin
+# custom_domain origins through (the regular CORSMiddleware below
+# can't see DB rows, so it would 403 a request from broker_a.com
+# even when broker_a.com is a legitimate, READY-status tenant).
+# Cached in-process for 60 s — refreshed lazily on the first request
+# after the TTL expires. Idempotent and tolerant of DB outages
+# (falls back to "no extra origins" when the lookup fails).
+@app.middleware("http")
+async def branding_cors_middleware(request: Request, call_next):
+    origin = request.headers.get("origin")
+    if not origin:
+        return await call_next(request)
+    # Only act when the origin is NOT already in the static allow-list.
+    if origin in settings.cors_allowed_origins:
+        return await call_next(request)
+    if not settings.BRANDING_ENABLED:
+        return await call_next(request)
+
+    try:
+        from app.services.branding_service import all_active_custom_domains
+    except Exception:  # pragma: no cover
+        return await call_next(request)
+
+    # Tiny in-process cache so we don't hit Mongo on every request.
+    now = asyncio.get_event_loop().time()
+    cache = getattr(app.state, "_branding_cors_cache", None)
+    if cache is None or (now - cache["at"]) > 60.0:
+        try:
+            domains = await all_active_custom_domains()
+        except Exception:  # pragma: no cover
+            domains = []
+        # Each admin's domain is allowed via both apex and www, http+https.
+        allowed_set: set[str] = set()
+        for d in domains:
+            allowed_set.add(f"https://{d}")
+            allowed_set.add(f"https://www.{d}")
+            allowed_set.add(f"http://{d}")
+            allowed_set.add(f"http://www.{d}")
+        cache = {"at": now, "set": allowed_set}
+        app.state._branding_cors_cache = cache
+
+    if origin not in cache["set"]:
+        return await call_next(request)
+
+    # Preflight: respond directly so we control headers and method.
+    if request.method == "OPTIONS":
+        from starlette.responses import Response as _R
+
+        resp = _R(status_code=204)
+    else:
+        resp = await call_next(request)
+    resp.headers["Access-Control-Allow-Origin"] = origin
+    resp.headers["Access-Control-Allow-Credentials"] = "true"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = (
+        request.headers.get("access-control-request-headers")
+        or "Authorization, Content-Type, X-Request-Id, X-Admin-Api-Key"
+    )
+    resp.headers["Access-Control-Expose-Headers"] = "X-Request-Id"
+    resp.headers["Access-Control-Max-Age"] = "3600"
+    resp.headers["Vary"] = "Origin"
+    return resp
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_allowed_origins,
@@ -566,14 +665,21 @@ register_exception_handlers(app)
 Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 
-# ── Static uploads (deposit screenshots etc.) ────────────────────────
+# ── Static uploads (deposit screenshots etc., admin logos) ───────────
 _uploads_dir = Path("uploads")
 _uploads_dir.mkdir(parents=True, exist_ok=True)
+# Logos sub-dir — created here so a fresh prod deploy can serve
+# /uploads/logos/* immediately even before the first admin uploads
+# (StaticFiles doesn't auto-create missing sub-directories).
+(_uploads_dir / "logos").mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=str(_uploads_dir)), name="uploads")
 
 # ── Routers ──────────────────────────────────────────────────────────
 app.include_router(user_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
+# Public (no-auth) branding lookups live alongside /user and /admin
+# at the v1 root so the path is /api/v1/branding/by-code/...
+app.include_router(branding_public.router, prefix="/api/v1")
 app.include_router(ws_router)
 
 

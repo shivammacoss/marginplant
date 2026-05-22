@@ -30,7 +30,7 @@ from app.schemas.auth import (
     TwoFASetupResponse,
 )
 from app.schemas.common import APIResponse, OkResponse
-from app.services import auth_service, user_service
+from app.services import auth_service, branding_service, user_service
 from app.services.audit_service import log_event
 from app.utils.otp import issue_otp, verify_otp
 
@@ -51,12 +51,25 @@ def _client_ip(request: Request) -> str:
     dependencies=[rate_limit("auth")],
 )
 async def register(payload: RegisterRequest, request: Request):
+    # White-label attribution. Resolves the requesting host (custom
+    # domain) and/or `referral_code` (admin's user_code) to an admin
+    # owner. When BRANDING_ENABLED is False or neither matches, this
+    # returns ``(None, "PLATFORM")`` — exactly the pre-rollout default,
+    # so existing self-register flows are byte-identical.
+    request_host = (request.headers.get("host") or "").split(":", 1)[0].lower()
+    assigned_admin_id, signup_origin = await branding_service.resolve_signup_attribution(
+        request_host=request_host,
+        referral_code=payload.referral_code,
+    )
+
     user = await user_service.create_user(
         email=payload.email,
         mobile=payload.mobile,
         password=payload.password,
         full_name=payload.full_name,
         status=UserStatus.ACTIVE,  # for self-register; admin flow can set PENDING
+        assigned_admin_id=assigned_admin_id,
+        signup_origin=signup_origin,
     )
     await log_event(
         action=AuditAction.CREATE,

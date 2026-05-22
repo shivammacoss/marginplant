@@ -656,3 +656,63 @@ export const SettingsAPI = {
   runBackup: () => unwrap<any>(api.post("/admin/backup/run")),
   eodReset: () => unwrap<any>(api.post("/admin/backup/eod-reset")),
 };
+
+// White-label branding — admin self-service (logo, brand name, custom
+// domain + auto-SSL). Every endpoint 503s when the backend feature
+// flag `BRANDING_ENABLED` is off, so the UI gracefully shows
+// "feature not enabled" rather than crashing.
+export type BrandingPayload = {
+  admin_id: string;
+  user_code: string;
+  brand_name: string | null;
+  logo_url: string | null;
+  custom_domain: string | null;
+  custom_domain_status: string | null;
+};
+
+export type DomainStatus = {
+  custom_domain: string | null;
+  custom_domain_status: string | null;
+  custom_domain_last_error: string | null;
+  custom_domain_verified_at: string | null;
+};
+
+export type DnsRecordCheck = {
+  current: string[];
+  ok: boolean;
+  error: string | null;
+};
+export type DnsPreview = {
+  expected_ip: string | null;
+  apex: DnsRecordCheck;
+  www: DnsRecordCheck;
+};
+
+export const BrandingAPI = {
+  me: () => unwrap<BrandingPayload>(api.get("/admin/branding/me")),
+  update: (body: {
+    brand_name?: string | null;
+    custom_domain?: string | null;
+    clear_custom_domain?: boolean;
+  }) => unwrap<BrandingPayload>(api.put("/admin/branding", body)),
+  uploadLogo: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return unwrap<BrandingPayload>(
+      api.post("/admin/branding/logo", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      }),
+    );
+  },
+  verifyDomain: () =>
+    unwrap<DomainStatus>(api.post("/admin/branding/domain/verify")),
+  domainStatus: () =>
+    unwrap<DomainStatus>(api.get("/admin/branding/domain/status")),
+  // Side-by-side current-vs-expected DNS record preview. The admin UI
+  // calls this on Step 2 (and after a Refresh button) so the user sees
+  // exactly which records they need to change at the registrar.
+  dnsPreview: () =>
+    unwrap<DnsPreview>(api.get("/admin/branding/domain/dns-preview")),
+  disconnectDomain: () =>
+    unwrap<BrandingPayload>(api.post("/admin/branding/domain/disconnect")),
+};

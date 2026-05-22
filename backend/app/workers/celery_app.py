@@ -16,7 +16,9 @@ celery_app = Celery(
     "setupfx",
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND,
-    include=[],  # populated as later phases ship task modules
+    include=[
+        "app.workers.branding_tasks",  # white-label SSL provisioning
+    ],
 )
 
 celery_app.conf.update(

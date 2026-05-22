@@ -1,9 +1,10 @@
 "use client";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { ThemeProvider, useTheme } from "next-themes";
 import { Toaster } from "sonner";
+import { BrandingProvider } from "@/lib/branding-context";
 
 function ThemedToaster() {
   const { resolvedTheme } = useTheme();
@@ -64,7 +65,16 @@ export function Providers({ children }: { children: React.ReactNode }) {
       disableTransitionOnChange
     >
       <QueryClientProvider client={client}>
-        {children}
+        {/* BrandingProvider uses `useSearchParams` (for `?ref=`),
+            which Next 14 requires to live inside a <Suspense> when
+            used at the root layout. The fallback is just the raw
+            children — branding is applied imperatively via
+            document.title / favicon swap, so unmounted children
+            still render unbranded for one tick before the effect
+            runs. That's identical to today's behaviour. */}
+        <Suspense fallback={children}>
+          <BrandingProvider>{children}</BrandingProvider>
+        </Suspense>
         <ThemedToaster />
       </QueryClientProvider>
     </ThemeProvider>

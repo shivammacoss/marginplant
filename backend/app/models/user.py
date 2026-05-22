@@ -247,6 +247,47 @@ class User(TimestampMixin):
     # strips non-digits before composing the wa.me link.
     support_whatsapp: str | None = None
 
+    # ── White-label branding (Phase 1: schema-only, gated by
+    # `settings.BRANDING_ENABLED`). All optional, default `None`, so
+    # existing 10k user rows behave exactly as today on read. Only
+    # meaningful when role == ADMIN, except `signup_origin` which is
+    # stamped on every newly-registered user post-rollout. None for any
+    # legacy user is treated as "PLATFORM" by the resolution logic, so
+    # zero backfill is needed.
+    #
+    # Why these fields can ship invisibly:
+    #   * Pydantic/Beanie auto-fills missing keys with `None` on read.
+    #   * The unique index on `custom_domain` below is *sparse* — rows
+    #     with `None` are simply not indexed, so the existing 10k rows
+    #     contribute zero index entries and zero write overhead.
+    #   * No code path consumes these fields until BRANDING_ENABLED
+    #     flips on (Phase 2+) and the public `/branding/*` endpoints
+    #     ship.
+    brand_name: str | None = None
+    logo_url: str | None = None  # "/uploads/logos/logo-<admin_id>-<ts>.png"
+
+    # Custom domain (sparse-unique — see Settings.indexes). Stored
+    # lowercased, no scheme: "mybroker.com".
+    custom_domain: str | None = None
+
+    # Lifecycle state machine for `custom_domain` provisioning.
+    #   PENDING_DNS  → admin saved domain, hasn't verified yet
+    #   DNS_VERIFIED → backend confirmed A records point to platform IP
+    #   PROVISIONING → certbot Celery task running
+    #   READY        → cert installed, nginx reloaded — domain live
+    #   FAILED       → cert issuance failed (last_error populated)
+    custom_domain_status: str | None = None
+    custom_domain_last_error: str | None = None
+    custom_domain_verified_at: datetime | None = None
+
+    # How this user originally signed up — drives the post-login
+    # cross-origin redirect gate. `None` ≡ "PLATFORM" (the default for
+    # every existing legacy user, hence no backfill).
+    #   PLATFORM         : signed up at marginplant.com/register (or pre-rollout)
+    #   BRANDED_REFERRAL : signed up via /r/<admin_user_code>/signup or ?ref=
+    #   CUSTOM_DOMAIN    : signed up directly on admin's custom_domain host
+    signup_origin: str | None = None
+
     class Settings:
         name = "users"
         use_state_management = True
@@ -263,6 +304,19 @@ class User(TimestampMixin):
             # Multikey index — Mongo creates one entry per element of the
             # array, so {"broker_ancestry": <id>} matches in O(log n).
             IndexModel([("broker_ancestry", ASCENDING)]),
+            # White-label custom domain — partial + unique. `sparse=True`
+            # was wrong: MongoDB sparse only skips MISSING fields, not
+            # explicit `null` values, and Beanie/Pydantic always serializes
+            # the field (default None) so every user row had `custom_domain: null`,
+            # collapsing the unique constraint to "at most one row with null".
+            # `partialFilterExpression` correctly indexes only rows that
+            # actually have a string custom_domain set.
+            IndexModel(
+                [("custom_domain", ASCENDING)],
+                unique=True,
+                partialFilterExpression={"custom_domain": {"$type": "string"}},
+                name="custom_domain_unique_partial",
+            ),
         ]
 
     def is_admin(self) -> bool:

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from app.core.config import settings
 from app.core.dependencies import CurrentUser
+from app.models.user import User, UserRole, UserStatus
 from app.schemas.common import APIResponse
 from app.schemas.user import UpdateProfileRequest, UserMeOut
+from app.services import branding_service
 
 router = APIRouter(prefix="/users", tags=["user-profile"])
 
@@ -30,6 +33,42 @@ async def update_me(payload: UpdateProfileRequest, user: CurrentUser):
             user.kyc = payload.kyc
     await user.save()
     return APIResponse(data=_user_to_me(user))
+
+
+@router.get("/me/branding", response_model=APIResponse[dict])
+async def get_my_branding(user: CurrentUser):
+    """Return the branding payload for the logged-in user's
+    ``assigned_admin_id`` (or ``None`` if the user is in the
+    super-admin/platform pool).
+
+    The frontend's ``BrandingProvider`` calls this once after login
+    to apply the right logo / brand-name / favicon on the dashboard,
+    and to decide whether to redirect to the admin's custom domain
+    (gated on ``user.signup_origin``).
+    """
+    if not settings.BRANDING_ENABLED:
+        return APIResponse(
+            data={"branding": None, "signup_origin": user.signup_origin}
+        )
+    if user.assigned_admin_id is None:
+        return APIResponse(
+            data={"branding": None, "signup_origin": user.signup_origin}
+        )
+    admin = await User.get(user.assigned_admin_id)
+    if (
+        admin is None
+        or admin.role != UserRole.ADMIN
+        or admin.status != UserStatus.ACTIVE
+    ):
+        return APIResponse(
+            data={"branding": None, "signup_origin": user.signup_origin}
+        )
+    return APIResponse(
+        data={
+            "branding": branding_service.to_branding_payload(admin),
+            "signup_origin": user.signup_origin,
+        }
+    )
 
 
 def _user_to_me(user) -> UserMeOut:

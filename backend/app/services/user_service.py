@@ -85,6 +85,7 @@ async def create_user(
     assigned_admin_id: PydanticObjectId | None = None,
     assigned_broker_id: PydanticObjectId | None = None,
     broker_ancestry: list[PydanticObjectId] | None = None,
+    signup_origin: str | None = None,
 ) -> User:
     email_l = email.lower().strip()
     mobile_n = normalize_mobile_in(mobile)
@@ -111,6 +112,7 @@ async def create_user(
         assigned_admin_id=assigned_admin_id,
         assigned_broker_id=assigned_broker_id,
         broker_ancestry=broker_ancestry or [],
+        signup_origin=signup_origin,
     )
     await user.insert()
 

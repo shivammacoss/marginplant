@@ -62,6 +62,11 @@ export interface AdminUser {
   // When role === "BROKER" and this is set, the broker was created under
   // another broker — i.e., they're a sub-broker. UI flips the role chip.
   assigned_broker_id?: string | null;
+  // White-label branding (only populated for role === "ADMIN" when the
+  // backend has BRANDING_ENABLED=true). Drives the sidebar <BrandLogo>
+  // so admins see their own brand instead of the platform default.
+  brand_name?: string | null;
+  logo_url?: string | null;
 }
 
 export interface AdminTokenPair {

@@ -18,7 +18,53 @@ from app.models.user import User, UserRole
 from app.schemas.admin.auth import AdminLoginRequest, AdminTokenPair, AdminUserOut
 from app.schemas.auth import LogoutRequest, RefreshRequest, TokenPair
 from app.schemas.common import APIResponse, OkResponse
+from app.core.config import settings
 from app.services import auth_service
+
+
+async def _branding_fields_for(admin_user: User) -> dict:
+    """Return the branding kwargs to pass into AdminUserOut for this row.
+
+    Cascade rules (confirmed with operator):
+      - SUPER_ADMIN → no branding ever. Sidebar shows platform default.
+                      Super-admin runs the whole system and is not part
+                      of any tenant.
+      - ADMIN       → their OWN brand_name / logo_url.
+      - BROKER      → branding INHERITED from their parent ADMIN
+                      (resolved via `assigned_admin_id`). Sub-brokers
+                      have the same `assigned_admin_id` populated by
+                      the broker-management service when they're
+                      minted, so this single hop covers any depth of
+                      sub-broker nesting without walking parent_id.
+                      A broker created directly under super-admin (no
+                      assigned_admin_id) gets platform default.
+
+    The helper short-circuits when `BRANDING_ENABLED=false` so admins
+    on a fresh deploy see the unchanged platform sidebar until the
+    operator flips the flag.
+    """
+    if not settings.BRANDING_ENABLED:
+        return {"brand_name": None, "logo_url": None}
+
+    if admin_user.role == UserRole.ADMIN:
+        return {
+            "brand_name": admin_user.brand_name,
+            "logo_url": admin_user.logo_url,
+        }
+
+    if admin_user.role == UserRole.BROKER and admin_user.assigned_admin_id is not None:
+        parent_admin = await User.get(admin_user.assigned_admin_id)
+        if (
+            parent_admin is not None
+            and parent_admin.role == UserRole.ADMIN
+        ):
+            return {
+                "brand_name": parent_admin.brand_name,
+                "logo_url": parent_admin.logo_url,
+            }
+
+    # SUPER_ADMIN, top-level brokers under super-admin pool, anything else.
+    return {"brand_name": None, "logo_url": None}
 
 router = APIRouter(prefix="/auth", tags=["admin-auth"])
 
@@ -80,6 +126,7 @@ async def admin_login(payload: AdminLoginRequest, request: Request):
                     if admin_user.assigned_broker_id
                     else None
                 ),
+                **(await _branding_fields_for(admin_user)),
             ),
         )
     )
@@ -120,6 +167,7 @@ async def admin_refresh(payload: RefreshRequest):
                     if admin_user.assigned_broker_id
                     else None
                 ),
+                **(await _branding_fields_for(admin_user)),
             ),
         )
     )
@@ -152,5 +200,6 @@ async def admin_me(admin: CurrentAdmin):
             assigned_broker_id=(
                 str(admin.assigned_broker_id) if admin.assigned_broker_id else None
             ),
+            **(await _branding_fields_for(admin)),
         )
     )

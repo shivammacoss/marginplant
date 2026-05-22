@@ -4,6 +4,7 @@ import { Sprout } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { useAdminAuthStore } from "@/stores/authStore";
+import { API_URL } from "@/lib/constants";
 
 interface BrandLogoProps {
   href?: string | null;
@@ -20,10 +21,31 @@ export function BrandLogo({ href = "/dashboard", size = "md", showAdminBadge = t
   // routes, permissions, and APIs are identical to a top-level broker.
   const isSubBroker = role === "BROKER" && !!admin?.assigned_broker_id;
 
+  // ── White-label branding override ─────────────────────────────────
+  // Branding cascade (matches backend `_branding_fields_for`):
+  //   - SUPER_ADMIN     → platform default ("MarginPlant Broker")
+  //   - ADMIN           → their OWN brand_name + logo_url
+  //   - BROKER / sub-broker → INHERITS parent admin's brand (backend
+  //                            already resolves this via assigned_admin_id
+  //                            and ships the resolved values in the auth
+  //                            payload, so the frontend just trusts them).
+  // Top-level brokers under super-admin pool have no parent admin, so
+  // brand_name/logo_url come back null → platform default — same as
+  // super-admin.
+  const useTenantBrand =
+    (role === "ADMIN" || role === "BROKER") &&
+    (!!admin?.brand_name || !!admin?.logo_url);
+  const tenantName = useTenantBrand ? admin?.brand_name?.trim() : null;
+  const tenantLogo = useTenantBrand && admin?.logo_url
+    ? (admin.logo_url.startsWith("http")
+        ? admin.logo_url
+        : `${API_URL}${admin.logo_url}`)
+    : null;
+
   const sizes = {
-    sm: { wrap: "text-sm", icon: "size-5", badge: "p-1" },
-    md: { wrap: "text-lg", icon: "size-6", badge: "p-1.5" },
-    lg: { wrap: "text-2xl", icon: "size-8", badge: "p-2" },
+    sm: { wrap: "text-sm", icon: "size-5", badge: "p-1", img: "size-7" },
+    md: { wrap: "text-lg", icon: "size-6", badge: "p-1.5", img: "size-9" },
+    lg: { wrap: "text-2xl", icon: "size-8", badge: "p-2", img: "size-12" },
   }[size];
 
   // Role-aware chip — colour + label switch by tier so the brand bar
@@ -41,15 +63,36 @@ export function BrandLogo({ href = "/dashboard", size = "md", showAdminBadge = t
           }
         : { label: "Admin", cls: "bg-destructive/15 text-destructive" };
 
+  // Logo block — tenant logo (img) when present, else the platform
+  // sprout icon in a tinted tile.
+  const logoBlock = tenantLogo ? (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={tenantLogo}
+      alt={tenantName || "Brand logo"}
+      className={cn("rounded-md object-contain bg-card ring-1 ring-border", sizes.img)}
+    />
+  ) : (
+    <span className={cn("rounded-md bg-primary/15 text-primary", sizes.badge)}>
+      <Sprout className={sizes.icon} strokeWidth={2.5} />
+    </span>
+  );
+
+  // Name block — tenant brand_name (single accent line) when set, else
+  // the two-tone "MarginPlant Broker" platform wordmark.
+  const nameBlock = tenantName ? (
+    <span className="truncate text-foreground">{tenantName}</span>
+  ) : (
+    <span className="truncate text-foreground">
+      <span className="text-primary">MarginPlant</span> Broker
+    </span>
+  );
+
   const content = (
     <span className={cn("inline-flex items-center gap-2 font-semibold tracking-tight", sizes.wrap, className)}>
-      <span className={cn("rounded-md bg-primary/15 text-primary", sizes.badge)}>
-        <Sprout className={sizes.icon} strokeWidth={2.5} />
-      </span>
+      {logoBlock}
       <span className="flex min-w-0 flex-col leading-tight">
-        <span className="truncate text-foreground">
-          <span className="text-primary">MarginPlant</span> Broker
-        </span>
+        {nameBlock}
         {showAdminBadge && (
           <span
             className={cn(

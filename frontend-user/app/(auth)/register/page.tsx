@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -81,8 +81,26 @@ function passwordStrength(pwd: string): Strength {
   };
 }
 
+// Wraps the inner client component in <Suspense> because Next 14's
+// `useSearchParams()` requires a Suspense boundary in the page tree.
 export default function RegisterPage() {
+  return (
+    <Suspense fallback={null}>
+      <RegisterPageInner />
+    </Suspense>
+  );
+}
+
+function RegisterPageInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  // White-label referral attribution — admin-A sends a prospect to
+  // marginplant.com/register?ref=ADM12345678. We forward this as
+  // `referral_code` to the backend, which resolves it to the admin's
+  // id and stamps `assigned_admin_id` + `signup_origin=BRANDED_REFERRAL`
+  // on the new user. Empty / missing is the pre-rollout default
+  // (super-admin pool, signup_origin=PLATFORM).
+  const refCode = (searchParams?.get("ref") || "").trim().toUpperCase();
   const [showPwd, setShowPwd] = useState(false);
   const [pwdFocused, setPwdFocused] = useState(false);
 
@@ -104,9 +122,16 @@ export default function RegisterPage() {
         mobile: values.mobile,
         pan: values.pan || undefined,
         password: values.password,
+        // Forward `?ref=` as referral_code so the backend can attribute
+        // this signup to the admin who shared the link. Undefined when
+        // missing → backend treats as PLATFORM signup.
+        referral_code: refCode || undefined,
       });
       toast.success("Account created. Please sign in.");
-      router.push("/login");
+      // Preserve the ref on the way to /login so the BrandingProvider
+      // there can keep showing the admin's brand (otherwise the user
+      // would see platform branding for one tick).
+      router.push(refCode ? `/login?ref=${encodeURIComponent(refCode)}` : "/login");
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : "Registration failed";
       toast.error(msg);

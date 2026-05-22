@@ -66,6 +66,8 @@ export const useAdminAuthStore = create<AdminAuthState>()(
                 broker_permissions: me.broker_permissions ?? null,
                 pnl_share_pct: me.pnl_share_pct ?? null,
                 assigned_broker_id: (me as any).assigned_broker_id ?? null,
+                brand_name: (me as any).brand_name ?? null,
+                logo_url: (me as any).logo_url ?? null,
               },
             });
           }

@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from app.api.v1.admin import (
     auth,
+    branding,
     brokerage,
     brokers,
     dashboard,
@@ -46,3 +47,4 @@ router.include_router(brokers.router)
 router.include_router(pnl_sharing.router)
 router.include_router(notifications.router)
 router.include_router(support.router)
+router.include_router(branding.router)

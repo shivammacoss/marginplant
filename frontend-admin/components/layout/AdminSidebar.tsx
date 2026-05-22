@@ -43,6 +43,9 @@ type NavItem = {
   // the route or duplicating the nav entry.
   brokerLabel?: string;
   superOnly?: boolean;
+  // Show only for SUPER_ADMIN + ADMIN (not BROKER) — e.g. white-label
+  // branding settings, which are admin-tier only.
+  adminTierOnly?: boolean;
   // Suppress the item for SUPER_ADMIN. Used for "Brokers" — super-admin
   // doesn't create brokers (admins do); they manage admins via Sub-admins.
   hideForSuperAdmin?: boolean;
@@ -107,6 +110,11 @@ const groups: { title: string; items: NavItem[] }[] = [
     title: "System",
     items: [
       { href: "/settings/platform", label: "Platform settings", icon: Cog, superOnly: true },
+      // White-label branding — each admin sets their own logo / brand
+      // name / custom domain. Hidden for brokers (sub-tier branding is
+      // out of scope for v1) but visible to admin + super-admin so
+      // both tiers can configure their own brand.
+      { href: "/settings/branding", label: "Branding", icon: Cog, adminTierOnly: true },
       { href: "/holidays", label: "Holiday calendar", icon: Calendar, superOnly: true },
       { href: "/backup", label: "Backup & EOD", icon: DatabaseBackup, superOnly: true },
       // Per-admin support WhatsApp — visible to EVERY admin tier
@@ -137,6 +145,10 @@ export function AdminSidebar() {
         // Explicit hide for super-admin (e.g. Brokers nav — super-admin
         // doesn't create brokers, admins do).
         if (it.hideForSuperAdmin && isSuperAdmin(admin)) return false;
+        // adminTierOnly = ADMIN role only (NOT super-admin, NOT broker).
+        // Super-admin runs the whole platform — its "brand" IS MarginPlant
+        // itself, so a per-admin white-label config doesn't apply to them.
+        if (it.adminTierOnly) return admin?.role === "ADMIN";
         if (it.superOnly) return isSuperAdmin(admin);
         if (it.perm) {
           // Broker sessions use brokerPerm if provided (e.g. "Brokers" nav

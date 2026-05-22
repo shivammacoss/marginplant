@@ -265,8 +265,19 @@ export async function unwrap<T>(p: Promise<{ data: ApiResponse<T> }>): Promise<T
 export const AuthAPI = {
   login: (body: { identifier: string; password: string; two_fa_code?: string }) =>
     unwrap<TokenPair>(api.post("/user/auth/login", body)),
-  register: (body: { email: string; mobile: string; password: string; full_name: string; pan?: string }) =>
-    unwrap(api.post("/user/auth/register", body)),
+  register: (body: {
+    email: string;
+    mobile: string;
+    password: string;
+    full_name: string;
+    pan?: string;
+    // White-label attribution. When the user landed on /register?ref=<ADM…>
+    // (or on a tenant's custom domain), the BrandingProvider plumbs the
+    // admin's user_code through here. Backend treats it as the admin's
+    // ``user_code`` and stamps ``signup_origin`` accordingly. Optional —
+    // omitting it preserves the pre-rollout behaviour (super-admin pool).
+    referral_code?: string;
+  }) => unwrap(api.post("/user/auth/register", body)),
   logout: (refresh_token?: string) => unwrap(api.post("/user/auth/logout", { refresh_token })),
   refresh: (refresh_token: string) => unwrap<TokenPair>(api.post("/user/auth/refresh", { refresh_token })),
   forgotPassword: (identifier: string) => unwrap(api.post("/user/auth/forgot-password", { identifier })),
