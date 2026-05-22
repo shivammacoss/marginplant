@@ -745,49 +745,98 @@ async def list_active_trades(user: CurrentUser):
             else:
                 ovn_settings_by_key[k] = r.get("settings") or {}
 
-    # ── FIFO matching ─────────────────────────────────────────────────
-    # Without this, closing one BUY fill via the active-trades "Close"
-    # button reduces the underlying position but the BUY trade record
-    # still exists, so the next refetch shows it again. User perception:
-    # "trade close hi nahi ho rahi". FIFO-consume opposite-side trades
-    # against same-side trades (oldest first) and drop any same-side
-    # trade whose entire qty has been closed out.
+    # ── Per-position FIFO matching ───────────────────────────────────
+    # The old logic grouped every fill by `(token, product_type)` and ran
+    # one combined FIFO per group. That works for the simplest case (one
+    # OPEN position per group, no history) but produced phantom Active
+    # rows in two real-world scenarios the operator hit on 22-May:
+    #
+    #   1. Many historical cycles on the same instrument. A user with
+    #      20+ open/close cycles on CRUDEOIL ended up with 21+ same-
+    #      side fills competing against the entire `opposite_total` from
+    #      every previous cycle's closing legs. FIFO consumption no
+    #      longer matched what was actually held in the current cycle.
+    #
+    #   2. Two OPEN positions for the same (token, product_type) — a
+    #      data anomaly that can occur after an admin position edit /
+    #      reopen race. The previous code kept only one position in
+    #      `pos_by_token`, so the second position's fills were
+    #      attributed to the wrong row.
+    #
+    # New approach: partition trades into per-position time windows
+    # using `opened_at` as the cycle boundary. For a (token, product)
+    # group with positions P1 (opened T1) and P2 (opened T2 > T1):
+    #   * Trades in [T1, T2) belong to P1.
+    #   * Trades in [T2, ∞)  belong to P2.
+    # Within each window we then run the same FIFO consumption (oldest
+    # same-side first, eaten by opposite-side totals) — but now the
+    # window only contains THIS cycle's fills, so the math matches the
+    # position's actual lots.
     from collections import defaultdict
     from datetime import datetime as _datetime
 
-    # Group trades per (token, product) — sort same-side ASC (oldest
-    # first so FIFO consumes the earliest fill), opposite-side total.
-    same_side_by_key: dict[tuple[str, str], list[Any]] = defaultdict(list)
-    opposite_total_by_key: dict[tuple[str, str], float] = defaultdict(float)
-    # Track which (token, product_type) keys we mapped each trade to —
-    # used downstream so the row builder doesn't need to repeat the
-    # primary/secondary lookup dance.
-    trade_key_resolved: dict[str, tuple[str, str]] = {}
+    # Group OPEN positions per (token, product_type) and sort by
+    # opened_at ascending. Most users only have ONE position per group,
+    # but the partitioning logic naturally handles N positions.
+    positions_by_key: dict[tuple[str, str], list[Position]] = defaultdict(list)
+    for p in open_positions:
+        positions_by_key[(p.instrument.token, str(p.product_type.value))].append(p)
+    for plist in positions_by_key.values():
+        plist.sort(key=lambda pp: pp.opened_at or _datetime.min)
+
+    # trade_id → owning Position (used by the row builder below to
+    # render per-row position attribution + look up the right margin /
+    # SL / TP). Trades that fall outside ALL position windows are
+    # ignored (belong to a closed cycle, not Active).
+    trade_owner: dict[str, Position] = {}
+
+    # Build per-position bucket: same-side fills + opposite-side total,
+    # restricted to the position's own time window.
+    same_side_by_pos: dict[str, list[Any]] = defaultdict(list)
+    opposite_total_by_pos: dict[str, float] = defaultdict(float)
+
     for t in trades:
-        primary_key = (t.instrument.token, str(t.product_type.value))
-        p = pos_by_key.get(primary_key)
-        key = primary_key
-        if p is None:
-            # Fallback to token-only when product_type didn't match any
-            # OPEN position's key — see comment on pos_by_token above.
-            p = pos_by_token.get(t.instrument.token)
-            if p is None:
+        t_key = (t.instrument.token, str(t.product_type.value))
+        ps = positions_by_key.get(t_key)
+        if not ps:
+            # Token-only fallback for legacy product_type drift (see
+            # comment on pos_by_token above). Match against the single
+            # token-keyed position if any.
+            fallback = pos_by_token.get(t.instrument.token)
+            if fallback is None:
                 continue
-            key = (t.instrument.token, str(p.product_type.value))
-        trade_key_resolved[str(t.id)] = key
-        is_long = p.quantity > 0
+            ps = [fallback]
+        t_at = t.executed_at or _datetime.min
+        # Find which position's window this trade belongs to. A trade
+        # at t_at belongs to position i if
+        #     ps[i].opened_at <= t_at < (ps[i+1].opened_at or +∞)
+        target_pos: Position | None = None
+        for i, pp in enumerate(ps):
+            start = pp.opened_at or _datetime.min
+            end = ps[i + 1].opened_at if i + 1 < len(ps) else None
+            if t_at < start:
+                continue
+            if end is not None and t_at >= end:
+                continue
+            target_pos = pp
+            break
+        # Trade before any open cycle — it belonged to a closed
+        # position that no longer exists in `open_positions`. Drop it.
+        if target_pos is None:
+            continue
+        trade_owner[str(t.id)] = target_pos
+        is_long = target_pos.quantity > 0
         is_buy = t.action == OrderAction.BUY
         if is_long == is_buy:
-            same_side_by_key[key].append(t)
+            same_side_by_pos[str(target_pos.id)].append(t)
         else:
-            opposite_total_by_key[key] += t.quantity
+            opposite_total_by_pos[str(target_pos.id)] += t.quantity
 
-    # Sort each bucket oldest-first so FIFO consumes from the earliest
-    # entry. Compute remaining qty per same-side trade.
+    # FIFO consume per-position: oldest same-side eaten first.
     remaining_qty: dict[str, float] = {}
-    for key, side_trades in same_side_by_key.items():
+    for pid, side_trades in same_side_by_pos.items():
         side_trades.sort(key=lambda tr: tr.executed_at or _datetime.min)
-        to_consume = opposite_total_by_key.get(key, 0.0)
+        to_consume = opposite_total_by_pos.get(pid, 0.0)
         for tr in side_trades:
             tq = tr.quantity
             if to_consume <= 0:
@@ -801,17 +850,15 @@ async def list_active_trades(user: CurrentUser):
 
     rows: list[dict[str, Any]] = []
     for t in trades:
-        # Use the same primary→fallback key resolution as the FIFO pass
-        # so a product_type drift can't make a trade vanish here while
-        # still being counted in opposite_total above.
-        key = trade_key_resolved.get(str(t.id))
-        if key is None:
-            continue
-        p = pos_by_key.get(key) or pos_by_token.get(t.instrument.token)
+        # Per-position attribution from the windowed-FIFO pass above.
+        # `trade_owner` only contains trades that landed inside an OPEN
+        # position's time window — closed-cycle trades are excluded
+        # automatically. The pre-existing direction filter is now
+        # redundant (a trade is in `same_side_by_pos` only if it
+        # matched direction) but we keep it as a defensive guard.
+        p = trade_owner.get(str(t.id))
         if p is None:
             continue
-        # Direction filter: only keep fills that ADD to the current direction.
-        # BUYs are kept for longs (qty > 0), SELLs for shorts (qty < 0).
         if p.quantity > 0 and t.action != OrderAction.BUY:
             continue
         if p.quantity < 0 and t.action != OrderAction.SELL:
