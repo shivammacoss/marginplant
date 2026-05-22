@@ -86,16 +86,37 @@ NSE_BSE_CLOSE: time = time(15, 30)
 MCX_CLOSE: time = time(23, 55)
 
 INDIAN_EQUITY_FNO_SEGMENTS: frozenset[str] = frozenset({
-    "NSE_EQUITY",
+    # Names that show up as `instrument.segment` in actual Position
+    # docs — these are what the matching engine writes (driven by the
+    # Zerodha CSV / Infoway mapping). Operator-flagged 22-May: NIFTY +
+    # BHARTIARTL etc. positions never auto-closed at 15:31 IST
+    # rollover even when the user couldn't cover overnight, because
+    # this set only had the "NSE_*" names; positions on NFO / BFO
+    # (which is where futures + options actually live) were silently
+    # invisible to the convert_intraday_to_carry loop.
+    "NSE_EQUITY", "NSE_EQ",
     "NSE_FUTURE", "NSE_INDEX_FUTURE",
     "NSE_STOCK_OPTION_BUY", "NSE_STOCK_OPTION_SELL",
     "NSE_INDEX_OPTION_BUY", "NSE_INDEX_OPTION_SELL",
-    "BSE_EQUITY",
+    # NFO is the segment NSE futures / options trade ON — every
+    # NIFTY / BANKNIFTY / FUT / CE / PE position has
+    # instrument.segment == "NFO_FUTURE" or "NFO_OPTION".
+    "NFO_FUTURE", "NFO_OPTION",
+    "BSE_EQUITY", "BSE_EQ",
     "BSE_FUTURE", "BSE_INDEX_FUTURE",
     "BSE_OPTION_BUY", "BSE_OPTION_SELL",
+    # BFO is the analogous BSE futures/options segment.
+    "BFO_FUTURE", "BFO_OPTION",
 })
 MCX_SEGMENTS: frozenset[str] = frozenset({
     "MCX_FUTURE", "MCX_OPTION_BUY", "MCX_OPTION_SELL",
+    # Same Zerodha-CSV-driven shape — actual MCX position docs use
+    # "MCX_FUT" / "MCX_OPT" in `instrument.segment`. Operator's
+    # CRUDEOIL / SILVERMIC positions are stored with these names.
+    "MCX_FUT", "MCX_OPT",
+    # Standalone MCX_OPTION variant covers a few rows that the
+    # CSV-import normaliser produced under that single name.
+    "MCX_OPTION",
 })
 ROLLOVER_EXEMPT_SEGMENTS: frozenset[str] = frozenset({
     # Forex: 24/5 — no intraday close, MIS stays MIS across days until weekend.
