@@ -9,6 +9,7 @@ import { RejectedPanel } from "@/components/admin/payments/RejectedPanel";
 import { HistoryPanel } from "@/components/admin/payments/HistoryPanel";
 import { BankAccountsPanel } from "@/components/admin/payments/BankAccountsPanel";
 import { SettlementRequestsPanel } from "@/components/admin/payments/SettlementRequestsPanel";
+import { WdRulesPanel } from "@/components/admin/payments/WdRulesPanel";
 import { cn } from "@/lib/utils";
 import { useAdminAuthStore } from "@/stores/authStore";
 import { canSee, type PermissionKey } from "@/lib/permissions";
@@ -19,7 +20,8 @@ type Tab =
   | "settlements"
   | "history"
   | "rejected"
-  | "banks";
+  | "banks"
+  | "rules";
 
 type TabDef = {
   id: Tab;
@@ -44,6 +46,12 @@ const TABS: TabDef[] = [
   { id: "history", label: "History", description: "Unified ledger of every deposit and withdrawal across all users — filterable by type, status, user or UTR." },
   { id: "rejected", label: "Rejected", description: "Read-only history of all rejected deposits and withdrawals with the reason given." },
   { id: "banks", label: "Bank Accounts", description: "Bank accounts, UPI IDs and QR codes shown to users on the deposit form.", perm: "banks" },
+  // Tier-scoped deposit / withdrawal rules — caller's own pool is what
+  // gets edited. Super-admin / admin / broker each see THEIR OWN row;
+  // user-facing rules cascade resolve through broker → admin → super →
+  // global. Uses the same `banks` permission since the same operator
+  // group typically owns both the bank list AND the rule editor.
+  { id: "rules", label: "Rules", description: "Deposit / withdrawal rules for your user pool — min, max, daily limit, allowed days, time window. Blank fields inherit from the tier above.", perm: "banks" },
 ];
 
 export default function PaymentsPage() {
@@ -98,6 +106,7 @@ export default function PaymentsPage() {
       {tab === "history" && <HistoryPanel />}
       {tab === "rejected" && <RejectedPanel />}
       {tab === "banks" && <BankAccountsPanel />}
+      {tab === "rules" && <WdRulesPanel />}
     </div>
   );
 }
