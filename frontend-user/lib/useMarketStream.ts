@@ -30,16 +30,16 @@ export type MarketQuote = {
  * subscribes to the given tokens, and returns a `{token → quote}` map that
  * updates as ticks arrive. Auto-reconnects with exponential backoff.
  *
- * Throttling — display refresh is coalesced to ~500 ms (matches Zerodha
- * Kite / Dhan; Groww + Upstox sit at ~1 s). The WS itself still receives
- * every upstream tick at full rate so data freshness is preserved; we just
- * apply the LATEST per-token snapshot to React state at most twice per
- * second so the PnL number doesn't flicker 4-10× per second. User-reported
- * symptom before this change: "PnL bahut jada fast move ho raha hai, glitch
- * jaisa lag raha". Setting this to 0 would restore the old behaviour
- * (every tick → re-render).
+ * Throttling — display refresh is coalesced to ~200 ms (5 Hz). The
+ * backend tick loop publishes at 250 ms so this lines up with one
+ * upstream tick per render cycle. Previously sat at 500 ms (2 Hz) to
+ * suppress flicker, but option-chain and Zerodha price movements felt
+ * static between polls. 200 ms strikes the balance — visible "tick
+ * tick" movement without the 4-10 Hz flicker users complained about
+ * at 0 ms. The WS itself still receives every upstream tick at full
+ * rate so data freshness is preserved.
  */
-const DISPLAY_THROTTLE_MS = 500;
+const DISPLAY_THROTTLE_MS = 200;
 
 export function useMarketStream(tokens: string[]): Map<string, MarketQuote> {
   const [quotes, setQuotes] = useState<Map<string, MarketQuote>>(new Map());
