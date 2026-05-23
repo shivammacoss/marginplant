@@ -20,6 +20,7 @@ export function AdminBrandingChrome() {
   const role = admin?.role;
   const brandName = (admin?.brand_name ?? "").trim();
   const logoPath = admin?.logo_url ?? null;
+  const userCode = (admin?.user_code ?? "").trim();
 
   // SUPER_ADMIN never gets tenant chrome — always platform default.
   const isTenant = role === "ADMIN" || role === "BROKER";
@@ -92,7 +93,21 @@ export function AdminBrandingChrome() {
     } else if (existing) {
       existing.remove();
     }
-  }, [tenantName, tenantLogo]);
+
+    // ── PWA manifest ───────────────────────────────────────────────
+    // Point the <link rel="manifest"> at the per-tenant URL so when the
+    // admin clicks "Install app" the OS launcher picks up THEIR brand
+    // name + logo. Super-admins / pre-login keep the platform default.
+    const manifestEl = head.querySelector<HTMLLinkElement>('link[rel="manifest"]');
+    if (manifestEl) {
+      const desired = isTenant && userCode
+        ? `/manifest.webmanifest?u=${encodeURIComponent(userCode)}`
+        : "/manifest.webmanifest";
+      if (manifestEl.getAttribute("href") !== desired) {
+        manifestEl.setAttribute("href", desired);
+      }
+    }
+  }, [tenantName, tenantLogo, isTenant, userCode]);
 
   return null;
 }

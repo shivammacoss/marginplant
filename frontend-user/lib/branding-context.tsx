@@ -211,6 +211,22 @@ function applyBrandingChrome(brand: Branding | null): void {
   } else if (existing) {
     existing.remove();
   }
+
+  // ── PWA manifest ────────────────────────────────────────────────
+  // Repoint the manifest <link> at the dynamic per-tenant route so
+  // when the visitor clicks "Install app" the OS launcher picks up
+  // the broker's brand name + logo (not the platform default). When
+  // branding clears, restore the canonical manifest path.
+  const manifestEl = head.querySelector<HTMLLinkElement>('link[rel="manifest"]');
+  if (manifestEl) {
+    const code = brand?.user_code?.trim();
+    const desired = code
+      ? `/manifest.webmanifest?u=${encodeURIComponent(code)}`
+      : "/manifest.webmanifest";
+    if (manifestEl.getAttribute("href") !== desired) {
+      manifestEl.setAttribute("href", desired);
+    }
+  }
 }
 
 export function BrandingProvider({ children }: { children: ReactNode }) {
