@@ -5,6 +5,8 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Menu, Sprout, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useBranding } from "@/lib/branding-context";
+import { API_URL } from "@/lib/constants";
 
 const NAV_LINKS = [
   { href: "/features", label: "Features" },
@@ -19,6 +21,15 @@ export function MarketingNav() {
   const pathname = usePathname();
   const [scrolled, setScrolled] = useState(false);
   const [open, setOpen] = useState(false);
+  // Whitelabel-aware brand mark. When the visitor is on a tenant
+  // custom domain (or arrived via ?ref=) BrandingProvider has resolved
+  // the broker's brand_name + uploaded logo. We mirror BrandLogo.tsx's
+  // logic here instead of importing it directly so this nav can keep
+  // its tighter sizing / typography (the broker name slots into the
+  // existing 8 px tile + 16 px wordmark layout without a redesign).
+  const { branding } = useBranding();
+  const customName = (branding?.brand_name ?? "").trim();
+  const logoSrc = branding?.logo_url ? `${API_URL}${branding.logo_url}` : null;
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 8);
@@ -42,13 +53,37 @@ export function MarketingNav() {
       )}
     >
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
-        {/* Brand */}
+        {/* Brand — tenant-aware. Falls back to "MarginPlant Broker"
+            wordmark when no branding has resolved (platform host or
+            anon visitor on a custom domain before /by-domain returns). */}
         <Link href="/" className="flex items-center gap-2">
-          <span className="grid size-8 place-items-center rounded-md bg-primary text-primary-foreground">
-            <Sprout className="size-4" />
+          <span
+            className={cn(
+              "grid size-8 place-items-center rounded-md",
+              logoSrc
+                ? "bg-primary/10"
+                : "bg-primary text-primary-foreground",
+            )}
+          >
+            {logoSrc ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={logoSrc}
+                alt={customName || "Logo"}
+                className="size-6 rounded object-contain"
+              />
+            ) : (
+              <Sprout className="size-4" />
+            )}
           </span>
           <span className="text-base font-semibold tracking-tight">
-            MarginPlant <span className="text-muted-foreground">Broker</span>
+            {customName ? (
+              <span className="text-foreground">{customName}</span>
+            ) : (
+              <>
+                MarginPlant <span className="text-muted-foreground">Broker</span>
+              </>
+            )}
           </span>
         </Link>
 
