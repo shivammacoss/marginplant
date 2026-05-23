@@ -367,10 +367,25 @@ async def check_dns_a_record(domain: str) -> tuple[bool, str | None]:
     www_ok = False
     seen: list[str] = []
 
-    resolver = dns.resolver.Resolver()
-    # 5 s lookup is plenty; default 30 s would block the API thread.
+    # Bypass the system resolver (e.g. systemd-resolved, dnsmasq) and
+    # query Google + Cloudflare directly. Two reasons:
+    #   1. The system resolver aggressively caches NXDOMAIN. If an admin
+    #      added their A records minutes after we first checked, the
+    #      negative cache (typically 15s–1h) keeps returning NXDOMAIN
+    #      until it expires — manifesting as the bug where `dig` from
+    #      the same host shows the right IP but our verify endpoint
+    #      keeps failing.
+    #   2. Public resolvers see the latest authoritative answer fastest
+    #      and have no per-tenant negative cache that can wedge us.
+    # Hardcoded list is fine — these are rock-solid and we just need a
+    # working answer; if all four are down DNS itself is broken.
+    resolver = dns.resolver.Resolver(configure=False)
+    resolver.nameservers = ["8.8.8.8", "1.1.1.1", "8.8.4.4", "1.0.0.1"]
     resolver.lifetime = 5.0
     resolver.timeout = 5.0
+    # Disable our own negative cache so a stale NXDOMAIN from this
+    # process can't bite a subsequent retry inside the same worker.
+    resolver.cache = None
 
     for host, target_flag in ((domain, "apex"), (f"www.{domain}", "www")):
         try:
@@ -439,9 +454,13 @@ async def resolve_dns_preview(domain: str) -> dict:
         out["www"]["error"] = out["apex"]["error"]
         return out
 
-    resolver = dns.resolver.Resolver()
+    # Same public-resolver bypass as check_dns_a_record — see comment
+    # there for rationale (avoids stale system NXDOMAIN cache).
+    resolver = dns.resolver.Resolver(configure=False)
+    resolver.nameservers = ["8.8.8.8", "1.1.1.1", "8.8.4.4", "1.0.0.1"]
     resolver.lifetime = 5.0
     resolver.timeout = 5.0
+    resolver.cache = None
 
     for host, key in ((norm, "apex"), (f"www.{norm}", "www")):
         try:
