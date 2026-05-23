@@ -215,11 +215,11 @@ export default function AdminUsersPage() {
       render: (r) => {
         const v = Number(r.wallet?.settlement_outstanding ?? 0);
         return v > 0 ? (
-          <span className="font-mono text-xs text-destructive">
+          <span className="text-sm font-semibold tabular-nums text-destructive">
             ₹{v.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </span>
         ) : (
-          <span className="text-xs text-muted-foreground">—</span>
+          <span className="text-sm text-muted-foreground">—</span>
         );
       },
     },
@@ -329,7 +329,7 @@ export default function AdminUsersPage() {
 function MoneyCell({ value, muted }: { value: number; muted?: boolean }) {
   return (
     <span
-      className={`font-mono text-xs tabular-nums ${
+      className={`text-sm font-semibold tabular-nums ${
         muted ? "text-foreground/90" : ""
       }`}
     >
@@ -345,11 +345,11 @@ function MoneyCell({ value, muted }: { value: number; muted?: boolean }) {
  */
 function PnlCell({ value }: { value: number | null }) {
   if (value == null) {
-    return <span className="text-xs text-muted-foreground">—</span>;
+    return <span className="text-sm text-muted-foreground">—</span>;
   }
   if (value === 0) {
     return (
-      <span className="font-mono text-xs tabular-nums text-muted-foreground">
+      <span className="text-sm font-semibold tabular-nums text-muted-foreground">
         ₹0.00
       </span>
     );
@@ -361,14 +361,14 @@ function PnlCell({ value }: { value: number | null }) {
   })}`;
   return (
     <span
-      className={`inline-flex items-center justify-end gap-1 font-mono text-xs font-semibold tabular-nums ${
+      className={`inline-flex items-center justify-end gap-1 text-sm font-semibold tabular-nums ${
         positive ? "text-emerald-400" : "text-destructive"
       }`}
     >
       {positive ? (
-        <TrendingUp className="h-3 w-3" />
+        <TrendingUp className="h-3.5 w-3.5" />
       ) : (
-        <TrendingDown className="h-3 w-3" />
+        <TrendingDown className="h-3.5 w-3.5" />
       )}
       {positive ? "+" : "−"}
       {formatted}
@@ -401,7 +401,7 @@ function EquityCell({
         ? "text-destructive"
         : "text-foreground/90";
   return (
-    <span className={`font-mono text-xs font-semibold tabular-nums ${tone}`}>
+    <span className={`text-sm font-semibold tabular-nums ${tone}`}>
       ₹{equity.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
     </span>
   );
