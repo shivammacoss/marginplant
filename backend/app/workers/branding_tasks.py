@@ -1,14 +1,31 @@
 """Celery tasks for the white-label branding subsystem.
 
-Currently a single task: ``provision_ssl(admin_id)`` runs
-``certbot --nginx`` for the admin's custom domain (apex + www) and
-flips the User row's ``custom_domain_status`` to READY / FAILED.
+Single task: ``provision_ssl(admin_id)`` orchestrates the full custom
+domain provisioning pipeline by shelling out to the deploy helper
+script ``marginplant-add-branded-domain.sh`` which:
+
+  1. Writes a per-tenant nginx server block proxying to the user
+     frontend (port 3000).
+  2. Reloads nginx so the block is reachable for ACME HTTP-01
+     validation.
+  3. Runs ``certbot --nginx`` to obtain a Let's Encrypt cert and
+     inject SSL listeners into that same block.
+  4. On failure, removes the half-provisioned config so the domain
+     never serves the app over plaintext.
+
+Final step: flip the User row's ``custom_domain_status`` to READY /
+FAILED with a human-readable error.
 
 Server prerequisites (see ``deploy/README.md``):
 
 * ``certbot`` and ``python3-certbot-nginx`` installed.
-* The backend's OS user has passwordless sudo for ``/usr/bin/certbot``
-  and ``/usr/sbin/nginx`` (via ``/etc/sudoers.d/marginplant``).
+* The provisioning helper scripts deployed to ``/usr/local/bin/``:
+
+    /usr/local/bin/marginplant-add-branded-domain
+    /usr/local/bin/marginplant-remove-branded-domain
+
+* The backend's OS user has passwordless sudo for those two scripts
+  via ``/etc/sudoers.d/marginplant-branding``.
 * ``settings.PLATFORM_PUBLIC_IP`` set in ``.env`` — admins point
   their A records here.
 
@@ -31,6 +48,16 @@ logger = logging.getLogger(__name__)
 
 CERTBOT_TIMEOUT_SEC: Final[int] = 180
 CERTBOT_EMAIL_DEFAULT: Final[str] = "ops@marginplant.com"
+PROVISION_SCRIPT: Final[str] = "/usr/local/bin/marginplant-add-branded-domain"
+
+
+def _script_exists(path: str) -> bool:
+    """Cheap check that the provisioning helper is deployed and
+    executable. We don't try to invoke it here — the actual sudo run
+    will surface any permission errors with full context."""
+    import os
+
+    return os.path.isfile(path) and os.access(path, os.X_OK)
 
 
 @celery_app.task(
@@ -72,7 +99,19 @@ def provision_ssl(self, admin_id: str) -> dict:
                 )
                 return {"ok": False, "error": "no_domain"}
 
-            # Sanity: certbot binary present?
+            # Sanity: provisioning helper deployed?
+            # We check the script presence rather than just the certbot
+            # binary because the helper is the actual contract — a host
+            # with certbot but no helper script is misconfigured for
+            # Phase 4 and the human-readable error helps the operator.
+            if not _script_exists(PROVISION_SCRIPT):
+                await branding_service.mark_domain_failed(
+                    user.id,
+                    f"Provisioning helper not found at {PROVISION_SCRIPT}. "
+                    "Deploy `deploy/scripts/marginplant-add-branded-domain.sh` "
+                    "and update sudoers (see deploy/README.md).",
+                )
+                return {"ok": False, "error": "helper_missing"}
             if shutil.which("certbot") is None:
                 await branding_service.mark_domain_failed(
                     user.id,
@@ -81,20 +120,17 @@ def provision_ssl(self, admin_id: str) -> dict:
                 )
                 return {"ok": False, "error": "certbot_missing"}
 
+            # Use the admin's email when available so they receive the
+            # Let's Encrypt expiry notices for THEIR cert; otherwise
+            # fall back to the platform ops mailbox.
+            email = (user.email or "").strip() or CERTBOT_EMAIL_DEFAULT
+
             cmd = [
                 "sudo",
                 "-n",  # never prompt for a password — fail fast if sudoers is wrong
-                "certbot",
-                "--nginx",
-                "-d",
+                PROVISION_SCRIPT,
                 domain,
-                "-d",
-                f"www.{domain}",
-                "--non-interactive",
-                "--agree-tos",
-                "-m",
-                CERTBOT_EMAIL_DEFAULT,
-                "--redirect",
+                email,
             ]
 
             logger.info(
@@ -110,20 +146,20 @@ def provision_ssl(self, admin_id: str) -> dict:
             except subprocess.TimeoutExpired:
                 await branding_service.mark_domain_failed(
                     user.id,
-                    f"certbot timed out after {CERTBOT_TIMEOUT_SEC}s. "
+                    f"Provisioning timed out after {CERTBOT_TIMEOUT_SEC}s. "
                     "Check the worker can reach Let's Encrypt.",
                 )
                 return {"ok": False, "error": "timeout"}
             except FileNotFoundError:
                 await branding_service.mark_domain_failed(
-                    user.id, "sudo or certbot not found in PATH"
+                    user.id, "sudo or provisioning helper not found in PATH"
                 )
                 return {"ok": False, "error": "binary_missing"}
 
             if result.returncode != 0:
                 stderr = (result.stderr or "").strip()
                 stdout = (result.stdout or "").strip()
-                err = (stderr or stdout or "certbot failed without output")[:500]
+                err = (stderr or stdout or "provisioning failed without output")[:500]
                 logger.warning(
                     "branding_provision_ssl_failed admin_id=%s rc=%d err=%s",
                     admin_id,
@@ -131,22 +167,11 @@ def provision_ssl(self, admin_id: str) -> dict:
                     err,
                 )
                 await branding_service.mark_domain_failed(user.id, err)
-                return {"ok": False, "error": "certbot_failed", "rc": result.returncode}
-
-            # Belt-and-braces: certbot --nginx normally reloads nginx
-            # after patching its config, but a stale process listing
-            # has been seen on Ubuntu 22 — explicit reload is cheap.
-            try:
-                subprocess.run(  # noqa: S603
-                    ["sudo", "-n", "nginx", "-s", "reload"],
-                    timeout=15,
-                    capture_output=True,
-                    text=True,
-                )
-            except Exception:  # pragma: no cover
-                logger.exception(
-                    "branding_nginx_reload_failed admin_id=%s", admin_id
-                )
+                return {
+                    "ok": False,
+                    "error": "provision_failed",
+                    "rc": result.returncode,
+                }
 
             await branding_service.mark_domain_ready(user.id)
 
