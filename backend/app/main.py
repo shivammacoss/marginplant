@@ -551,14 +551,41 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ── Middleware (order matters: outer-first below) ─────────────────────
+# ── Middleware ────────────────────────────────────────────────────────
+# IMPORTANT: Starlette `add_middleware` PREPENDS to the stack — the
+# LAST one registered runs FIRST on the incoming request. So everything
+# below is in "innermost-first" order: CORSMiddleware/GZip/TrustedHost
+# are registered first (they end up as inner layers), then the dynamic
+# branding CORS middleware is registered LAST so it becomes the
+# OUTERMOST layer and intercepts the OPTIONS preflight before the
+# static CORSMiddleware (which only knows our own origins) can 400 it.
+# Before this swap, tenant custom domains (e.g. stockcafe.live) hit
+# CORSMiddleware first, got rejected without ACAO, and never reached
+# the branding lookup — so every branded login page failed with a
+# CORS preflight error and fell back to the platform default.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Request-Id"],
+    max_age=3600,
+)
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+if settings.is_production:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])  # tighten via env in prod
+
+
 # Branding CORS middleware: lets requests from active admin
-# custom_domain origins through (the regular CORSMiddleware below
+# custom_domain origins through (the regular CORSMiddleware above
 # can't see DB rows, so it would 403 a request from broker_a.com
 # even when broker_a.com is a legitimate, READY-status tenant).
 # Cached in-process for 60 s — refreshed lazily on the first request
 # after the TTL expires. Idempotent and tolerant of DB outages
 # (falls back to "no extra origins" when the lookup fails).
+# MUST be registered AFTER CORSMiddleware so it ends up outermost.
 @app.middleware("http")
 async def branding_cors_middleware(request: Request, call_next):
     origin = request.headers.get("origin")
@@ -597,6 +624,9 @@ async def branding_cors_middleware(request: Request, call_next):
         return await call_next(request)
 
     # Preflight: respond directly so we control headers and method.
+    # We answer here (instead of forwarding to CORSMiddleware) because
+    # CORSMiddleware only knows the static allow-list and would reject
+    # this origin — we already validated it against the live DB above.
     if request.method == "OPTIONS":
         from starlette.responses import Response as _R
 
@@ -614,21 +644,6 @@ async def branding_cors_middleware(request: Request, call_next):
     resp.headers["Access-Control-Max-Age"] = "3600"
     resp.headers["Vary"] = "Origin"
     return resp
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_allowed_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["X-Request-Id"],
-    max_age=3600,
-)
-app.add_middleware(GZipMiddleware, minimum_size=1024)
-
-if settings.is_production:
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])  # tighten via env in prod
 
 
 @app.middleware("http")
