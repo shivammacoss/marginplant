@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
-  AlarmClock,
+  AlertTriangle,
   CheckCircle2,
   Clock,
   KeyRound,
@@ -12,13 +12,13 @@ import {
   Pause,
   Play,
   RefreshCw,
+  Repeat,
   XCircle,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Card } from "@/components/ui/card";
 import {
   ZerodhaAutoLoginAPI,
   type ZerodhaAutoLoginStatus,
@@ -31,16 +31,15 @@ import { CredentialsModal } from "./CredentialsModal";
 const STATUS_QUERY_KEY = ["zerodha", "auto-login", "status"] as const;
 
 /**
- * Auto-login configuration card — drops into the Zerodha admin page next
- * to the existing manual-login controls. Super-admin only (the API is
- * gated server-side too).
+ * Auto-login configuration card. Drops into the Zerodha admin page next
+ * to the existing manual-login controls. Super-admin only (API also gated
+ * server-side).
  *
- * Surfaces:
- *   • Whether creds are saved (masked username)
- *   • Toggle to enable/disable the daily scheduler
- *   • Configurable HH:MM IST schedule time
- *   • "Test login now" button — fires the full Playwright flow on demand
- *   • Last attempt + last success timestamps, failure stage on error
+ * Layout mirrors the polished card we use elsewhere:
+ *   • Title row: heading + description + Enabled/Disabled status pill
+ *   • 4-tile stat grid: Schedule, Last attempt, Last success, Consecutive failures
+ *   • Trigger time row: input + Save time
+ *   • Action row: Update credentials + Test login now (green CTA)
  */
 export function AutoLoginPanel() {
   const admin = useAdminAuthStore((s) => s.admin);
@@ -52,8 +51,6 @@ export function AutoLoginPanel() {
     queryKey: STATUS_QUERY_KEY,
     queryFn: () => ZerodhaAutoLoginAPI.status(),
     refetchInterval: 15_000,
-    // Without this guard the panel would briefly query as a non-super
-    // admin and pop a 403 toast before the auth store hydrates.
     enabled: isSuperAdmin(admin),
   });
 
@@ -116,20 +113,28 @@ export function AutoLoginPanel() {
   const isConfigured = !!status?.is_configured;
   const isEnabled = !!status?.is_enabled;
   const lastStatus = status?.last_status ?? "";
+  const consecutiveFailures = status?.consecutive_failures ?? 0;
+  const schedule = status?.schedule_time_ist ?? "07:00";
+  const lastDurationSec = status?.last_duration_ms
+    ? (status.last_duration_ms / 1000).toFixed(1)
+    : null;
 
   return (
-    <Card className="space-y-4 p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2 text-base font-semibold">
-            <AlarmClock className="h-4 w-4" />
-            Auto-login (daily)
+    <section className="rounded-xl border border-border/60 bg-card/40 p-5 shadow-sm backdrop-blur-sm">
+      {/* ── Header ─────────────────────────────────────────────────── */}
+      <div className="mb-5 flex items-start justify-between gap-3">
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400">
+            <Repeat className="h-4 w-4" />
           </div>
-          <p className="text-xs text-muted-foreground">
-            Refreshes the Kite access token automatically each weekday so
-            you don&apos;t have to do the manual 2FA dance every morning.
-            Skips weekends + Indian trading holidays.
-          </p>
+          <div className="space-y-1">
+            <h3 className="text-base font-semibold">Daily auto-login</h3>
+            <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
+              Refreshes the Kite access token daily before market open.
+              Drives the Kite OAuth + TOTP screen with a headless browser —
+              credentials are AES-256-GCM encrypted at rest.
+            </p>
+          </div>
         </div>
         <StatusPillLocal
           enabled={isEnabled}
@@ -138,109 +143,96 @@ export function AutoLoginPanel() {
         />
       </div>
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <InfoRow
-          icon={<KeyRound className="h-4 w-4" />}
-          label="Credentials"
-          value={
-            isConfigured
-              ? `Saved (${status?.username_masked || "stored"})`
-              : "Not yet saved"
-          }
+      {/* ── Stat tiles ─────────────────────────────────────────────── */}
+      <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4">
+        <StatTile
+          label="Schedule (IST)"
+          icon={<Clock className="h-3.5 w-3.5" />}
+          value={schedule}
+          subtitle="Mon–Fri"
         />
-        <InfoRow
-          icon={<Clock className="h-4 w-4" />}
-          label="Scheduled time"
-          value={`${status?.schedule_time_ist ?? "07:00"} IST`}
-        />
-        <InfoRow
-          icon={<CheckCircle2 className="h-4 w-4" />}
-          label="Last success"
-          value={formatTs(status?.last_success_at)}
-        />
-        <InfoRow
-          icon={
-            lastStatus === "failed" ? (
-              <XCircle className="h-4 w-4 text-destructive" />
-            ) : (
-              <RefreshCw className="h-4 w-4" />
-            )
-          }
+        <StatTile
           label="Last attempt"
           value={formatTs(status?.last_attempt_at)}
+          subtitle={
+            lastStatus === "success" ? (
+              <span className="inline-flex items-center gap-1 text-emerald-400">
+                <CheckCircle2 className="h-3 w-3" />
+                Success
+              </span>
+            ) : lastStatus === "failed" ? (
+              <span className="inline-flex items-center gap-1 text-destructive">
+                <XCircle className="h-3 w-3" />
+                {status?.last_stage ? `Failed at "${status.last_stage}"` : "Failed"}
+              </span>
+            ) : (
+              <span className="text-muted-foreground">Never run</span>
+            )
+          }
+        />
+        <StatTile
+          label="Last success"
+          value={formatTs(status?.last_success_at)}
+          subtitle={
+            lastDurationSec ? `${lastDurationSec}s end-to-end` : "—"
+          }
+        />
+        <StatTile
+          label="Consecutive failures"
+          value={consecutiveFailures.toString()}
+          valueClassName={
+            consecutiveFailures > 0
+              ? "text-destructive"
+              : "text-emerald-400"
+          }
+          subtitle={
+            isConfigured ? (
+              `Kite user ${status?.username_masked || "stored"}`
+            ) : (
+              <span className="text-muted-foreground">Not configured</span>
+            )
+          }
         />
       </div>
 
+      {/* ── Inline error banner if last run failed ─────────────────── */}
       {lastStatus === "failed" && status?.last_error_detail && (
-        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          <div className="font-medium">
-            Last attempt failed
-            {status.last_stage ? ` at "${status.last_stage}"` : ""}
-            {status.consecutive_failures > 0
-              ? ` (${status.consecutive_failures} in a row)`
-              : ""}
+        <div className="mb-5 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <div className="min-w-0">
+            <div className="font-medium">
+              Last run failed{status?.last_stage ? ` at "${status.last_stage}"` : ""}
+              {consecutiveFailures > 1 ? ` · ${consecutiveFailures} in a row` : ""}
+            </div>
+            <div className="mt-0.5 break-words text-[11px] opacity-80">
+              {status.last_error_detail}
+            </div>
           </div>
-          <div className="mt-0.5 break-words">{status.last_error_detail}</div>
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setCredsOpen(true)}
-        >
-          <KeyRound className="mr-1.5 h-4 w-4" />
-          {isConfigured ? "Update credentials" : "Save credentials"}
-        </Button>
-        <Button
-          variant={isEnabled ? "ghost" : "default"}
-          size="sm"
-          disabled={!isConfigured || toggleMut.isPending}
-          onClick={() => toggleMut.mutate(!isEnabled)}
-        >
-          {isEnabled ? (
-            <>
-              <Pause className="mr-1.5 h-4 w-4" />
-              Disable
-            </>
-          ) : (
-            <>
-              <Play className="mr-1.5 h-4 w-4" />
-              Enable
-            </>
-          )}
-        </Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={!isConfigured || testMut.isPending}
-          onClick={() => testMut.mutate()}
-        >
-          {testMut.isPending ? (
-            <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-          ) : (
-            <RefreshCw className="mr-1.5 h-4 w-4" />
-          )}
-          Test login now
-        </Button>
-      </div>
-
-      <div className="flex items-end gap-2 border-t border-border/60 pt-3">
-        <div className="flex-1 space-y-1">
-          <Label htmlFor="auto-login-schedule" className="text-xs">
-            Daily schedule (HH:MM IST, 24-hour)
+      {/* ── Trigger time row ───────────────────────────────────────── */}
+      <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto] md:items-end">
+        <div className="space-y-1.5">
+          <Label htmlFor="auto-login-schedule" className="text-xs font-medium">
+            Trigger time (HH:MM IST)
           </Label>
           <Input
             id="auto-login-schedule"
-            placeholder={status?.schedule_time_ist ?? "07:00"}
+            placeholder={schedule}
             value={scheduleInput}
             onChange={(e) => setScheduleInput(e.target.value)}
+            className="font-mono"
           />
+          <p className="text-[11px] text-muted-foreground">
+            Kite tokens expire at 08:00 IST. Default 07:00 gives a 1-hour
+            buffer plus retries before the 09:15 market open.
+          </p>
         </div>
         <Button
           variant="outline"
           size="sm"
+          className="md:mb-[26px]"
           disabled={!scheduleInput.trim() || scheduleMut.isPending}
           onClick={() => {
             const v = scheduleInput.trim();
@@ -251,7 +243,53 @@ export function AutoLoginPanel() {
             scheduleMut.mutate(v);
           }}
         >
-          Update time
+          Save time
+        </Button>
+      </div>
+
+      {/* ── Action row ─────────────────────────────────────────────── */}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setCredsOpen(true)}
+        >
+          <KeyRound className="mr-1.5 h-4 w-4" />
+          {isConfigured ? "Update credentials" : "Save credentials"}
+        </Button>
+
+        <Button
+          size="sm"
+          className="bg-emerald-500 text-white shadow-sm hover:bg-emerald-600 focus-visible:ring-emerald-400"
+          disabled={!isConfigured || testMut.isPending}
+          onClick={() => testMut.mutate()}
+        >
+          {testMut.isPending ? (
+            <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+          ) : (
+            <Play className="mr-1.5 h-4 w-4 fill-current" />
+          )}
+          {testMut.isPending ? "Testing…" : "Test login now"}
+        </Button>
+
+        <Button
+          variant={isEnabled ? "ghost" : "secondary"}
+          size="sm"
+          className="ml-auto"
+          disabled={!isConfigured || toggleMut.isPending}
+          onClick={() => toggleMut.mutate(!isEnabled)}
+        >
+          {isEnabled ? (
+            <>
+              <Pause className="mr-1.5 h-4 w-4" />
+              Disable scheduler
+            </>
+          ) : (
+            <>
+              <Play className="mr-1.5 h-4 w-4" />
+              Enable scheduler
+            </>
+          )}
         </Button>
       </div>
 
@@ -263,28 +301,42 @@ export function AutoLoginPanel() {
           await credsMut.mutateAsync(body);
         }}
       />
-    </Card>
+    </section>
   );
 }
 
-function InfoRow({
-  icon,
+/* ─────────────────────────────────────────────────────────────────── */
+
+function StatTile({
   label,
+  icon,
   value,
+  subtitle,
+  valueClassName,
 }: {
-  icon: React.ReactNode;
   label: string;
+  icon?: React.ReactNode;
   value: string;
+  subtitle?: React.ReactNode;
+  valueClassName?: string;
 }) {
   return (
-    <div className="flex items-start gap-2 rounded-md border border-border/60 bg-muted/30 px-3 py-2">
-      <div className="mt-0.5 text-muted-foreground">{icon}</div>
-      <div className="min-w-0 flex-1">
-        <div className="text-[11px] uppercase tracking-wider text-muted-foreground">
-          {label}
-        </div>
-        <div className="truncate text-sm">{value}</div>
+    <div className="rounded-lg border border-border/60 bg-muted/30 px-3.5 py-3">
+      <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        {icon ? <span>{icon}</span> : null}
+        <span>{label}</span>
       </div>
+      <div
+        className={`mt-1.5 truncate text-base font-semibold ${valueClassName ?? ""}`}
+        title={value}
+      >
+        {value || "—"}
+      </div>
+      {subtitle ? (
+        <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+          {subtitle}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -299,28 +351,30 @@ function StatusPillLocal({
   lastStatus: string;
 }) {
   let label: string;
-  let className: string;
+  let dotClass: string;
+  let pillClass: string;
   if (!configured) {
     label = "Not configured";
-    className =
-      "bg-muted text-muted-foreground border-border";
+    dotClass = "bg-muted-foreground";
+    pillClass = "border-border bg-muted/40 text-muted-foreground";
   } else if (!enabled) {
     label = "Disabled";
-    className =
-      "bg-yellow-500/10 text-yellow-300 border-yellow-500/30";
+    dotClass = "bg-yellow-400";
+    pillClass = "border-yellow-500/30 bg-yellow-500/10 text-yellow-300";
   } else if (lastStatus === "failed") {
-    label = "Enabled (last run failed)";
-    className =
-      "bg-destructive/10 text-destructive border-destructive/30";
+    label = "Enabled · last run failed";
+    dotClass = "bg-destructive";
+    pillClass = "border-destructive/30 bg-destructive/10 text-destructive";
   } else {
     label = "Enabled";
-    className =
-      "bg-emerald-500/10 text-emerald-400 border-emerald-500/30";
+    dotClass = "bg-emerald-400";
+    pillClass = "border-emerald-500/30 bg-emerald-500/10 text-emerald-400";
   }
   return (
     <span
-      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium uppercase tracking-wider ${className}`}
+      className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium ${pillClass}`}
     >
+      <span className={`h-1.5 w-1.5 rounded-full ${dotClass}`} />
       {label}
     </span>
   );
@@ -332,9 +386,10 @@ function formatTs(iso: string | null | undefined): string {
     return new Date(iso).toLocaleString("en-IN", {
       day: "2-digit",
       month: "short",
+      year: "numeric",
       hour: "2-digit",
       minute: "2-digit",
-      hour12: false,
+      hour12: true,
     });
   } catch {
     return iso;
