@@ -29,6 +29,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { StatusPill } from "@/components/common/StatusPill";
+import { AutoLoginPanel } from "@/components/zerodha/AutoLoginPanel";
 
 type Settings = {
   apiKey: string;
@@ -565,6 +566,8 @@ export default function ZerodhaConnectPage() {
           </CardContent>
         </Card>
       </div>
+
+      <AutoLoginPanel />
 
       <Card>
         <CardHeader>

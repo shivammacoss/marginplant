@@ -50,6 +50,12 @@ boto3==1.35.71
 # Zerodha Kite Connect SDK (REST + WebSocket ticker)
 kiteconnect>=5.2.0
 
+# Headless browser for Zerodha auto-login (drives Kite OAuth + TOTP screen
+# daily so admin doesn't have to manually login every morning).
+# After installing this package run `playwright install chromium` once on
+# every host running the backend to download the actual browser binary.
+playwright>=1.45.0,<2
+
 # Utilities
 python-dotenv>=1.0.1
 orjson>=3.10.11

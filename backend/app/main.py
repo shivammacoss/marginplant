@@ -413,6 +413,19 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     )
     setattr(app, "_zerodha_self_heal_task", zerodha_heal_task)
 
+    # Zerodha auto-login daily scheduler — fires once per IST day at the
+    # configured schedule_time_ist when the admin has both saved
+    # credentials and toggled the feature ON. Skips weekends + Indian
+    # trading holidays. Multi-worker safe via Redis SETNX leader lock.
+    from app.services.zerodha_auto_login_scheduler import (
+        zerodha_auto_login_loop,
+    )
+
+    zerodha_auto_login_task: _asyncio.Task = _asyncio.create_task(
+        _supervise("zerodha_auto_login_scheduler", zerodha_auto_login_loop)
+    )
+    setattr(app, "_zerodha_auto_login_task", zerodha_auto_login_task)
+
     logger.info(
         "app_started",
         extra={
@@ -515,6 +528,23 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             ptask.cancel()
             try:
                 await ptask
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Stop Zerodha auto-login scheduler cleanly
+    try:
+        from app.services.zerodha_auto_login_scheduler import (
+            stop_zerodha_auto_login_scheduler,
+        )
+
+        stop_zerodha_auto_login_scheduler()
+        ztask = getattr(app, "_zerodha_auto_login_task", None)
+        if ztask is not None:
+            ztask.cancel()
+            try:
+                await ztask
             except Exception:
                 pass
     except Exception:

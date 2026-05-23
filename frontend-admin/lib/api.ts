@@ -493,6 +493,68 @@ export const ZerodhaAPI = {
       .then((r) => r.data?.report ?? r.data),
 };
 
+// ─────────────────────────────────────────────────────────────────────
+// Zerodha auto-login (daily scheduled token refresh via Playwright).
+// All endpoints are super-admin gated server-side.
+// ─────────────────────────────────────────────────────────────────────
+
+export type ZerodhaAutoLoginStatus = {
+  is_configured: boolean;
+  is_enabled: boolean;
+  schedule_time_ist: string;
+  last_attempt_at: string | null;
+  last_success_at: string | null;
+  last_status: "" | "success" | "failed";
+  last_error_detail: string | null;
+  last_stage: string | null;
+  consecutive_failures: number;
+  last_duration_ms: number | null;
+  username_masked: string;
+};
+
+export type ZerodhaAutoLoginTestResult = {
+  success: boolean;
+  error?: string;
+  stage?: string;
+  duration_ms?: number;
+  access_token_obtained?: boolean;
+};
+
+export const ZerodhaAutoLoginAPI = {
+  status: () =>
+    api
+      .get("/admin/zerodha/auto-login")
+      .then((r) => r.data?.status as ZerodhaAutoLoginStatus),
+
+  updateCredentials: (body: {
+    username: string;
+    password: string;
+    totp_secret: string;
+  }) =>
+    api
+      .put("/admin/zerodha/auto-login/credentials", body)
+      .then((r) => r.data?.status as ZerodhaAutoLoginStatus),
+
+  toggle: (enabled: boolean) =>
+    api
+      .post("/admin/zerodha/auto-login/toggle", { enabled })
+      .then((r) => r.data?.status as ZerodhaAutoLoginStatus),
+
+  setSchedule: (schedule_time_ist: string) =>
+    api
+      .put("/admin/zerodha/auto-login/schedule", { schedule_time_ist })
+      .then((r) => r.data?.status as ZerodhaAutoLoginStatus),
+
+  testNow: () =>
+    api.post("/admin/zerodha/auto-login/test").then(
+      (r) =>
+        r.data as {
+          result: ZerodhaAutoLoginTestResult;
+          status: ZerodhaAutoLoginStatus;
+        },
+    ),
+};
+
 export const BrokerMgmtAPI = {
   // Cap — drives the create/edit form so OFF/VIEW/EDIT radio options
   // above the actor's own level are greyed out.

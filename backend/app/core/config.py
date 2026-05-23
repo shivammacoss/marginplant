@@ -114,6 +114,12 @@ class Settings(BaseSettings):
     ANGEL_ONE_TOTP_SECRET: str = ""
     ZERODHA_API_KEY: str = ""
     ZERODHA_API_SECRET: str = ""
+    # AES-256-GCM key for encrypting the Zerodha auto-login credentials at rest.
+    # 32 raw bytes, base64-encoded. Generate with:
+    #   python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
+    # If unset, the auto-login service refuses to save credentials so a
+    # misconfigured deploy can't accidentally store plaintext.
+    ZERODHA_CREDS_KEY: SecretStr = Field(default=SecretStr(""))
     PRICE_FEED_PROVIDER: Literal["mock", "angel_one", "zerodha"] = "mock"
 
     # Infoway — global forex / crypto / metals / energy / stocks / indices feed.
