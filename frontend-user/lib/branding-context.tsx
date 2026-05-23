@@ -70,17 +70,20 @@ const PLATFORM_HOSTS = new Set<string>(
     "www.marginplant.com",
     "localhost",
     "127.0.0.1",
-    // dev / preview origins
-    typeof window !== "undefined" ? window.location.hostname : "",
-  ]
-    .filter(Boolean)
-    .map((h) => h.toLowerCase()),
+  ].map((h) => h.toLowerCase()),
 );
 
 function isPlatformHost(host: string): boolean {
   const h = host.toLowerCase();
   if (PLATFORM_HOSTS.has(h)) return true;
-  // Also treat any *.vercel.app / *.netlify.app preview as platform.
+  // Also treat any *.vercel.app / *.netlify.app / *.fly.dev preview as
+  // platform (these are our own dev/staging hosts, not tenant domains).
+  // NOTE: do NOT auto-include `window.location.hostname` here. Doing so
+  // makes every tenant custom domain (e.g. stockcafe.live) self-classify
+  // as platform, which silently skips the /branding/by-domain fetch and
+  // falls the page back to the default "MarginPlant Broker" wordmark —
+  // exactly the bug where admins set a logo + brand name but their own
+  // branded host kept rendering the platform default.
   return /\.(vercel|netlify|fly)\.(app|dev)$/.test(h);
 }
 
