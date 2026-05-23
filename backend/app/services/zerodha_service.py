@@ -1297,7 +1297,15 @@ class ZerodhaService:
         idx = len(self._tickers)
         ws_label = f"WS-{idx + 1}"
 
-        kws = KiteTicker(api_key, access_token)
+        # Disable KiteTicker's library-level auto-reconnect — default is
+        # 50 retries with exponential backoff which, when the access
+        # token is bad (e.g. expired), becomes a 1-3 second 403 spam in
+        # the Twisted reactor that we can't easily stop. Our own
+        # `ws_self_heal_loop` (30 s cadence) is the single coordinated
+        # retry path — it knows about token state, leader lock, and
+        # admin's explicit Disconnect intent. Internal lib retries are
+        # redundant and create zombie threads.
+        kws = KiteTicker(api_key, access_token, reconnect=False)
         entry: dict[str, Any] = {
             "ticker": kws,
             "tokens": set(),
@@ -1349,6 +1357,17 @@ class ZerodhaService:
                 pass
             with self._ticker_lock:
                 if should_prune:
+                    # Explicitly close the underlying KiteTicker BEFORE
+                    # removing it from the list. Without this the Twisted
+                    # reactor thread the ticker spawned at .connect() stays
+                    # alive (the library does NOT auto-stop on a 403 close)
+                    # and we have no reference to it anymore — zombie
+                    # threads accumulate every reconnect cycle and fight
+                    # for the single WS slot Kite allows per token.
+                    try:
+                        entry["ticker"].close()
+                    except Exception:
+                        pass
                     try:
                         self._tickers.remove(entry)
                     except ValueError:
@@ -1833,14 +1852,20 @@ class ZerodhaService:
         s = await self._get_settings()
         s.wsStatus = status
         if error is not None:
+            # Caller is recording a fresh failure — keep it.
             s.wsLastError = error
-        # Clear the stale error whenever we step into CONNECTING or
-        # CONNECTED. Previously a failed-retries error message (red banner
-        # on the admin page) stuck around even after the next retry was
-        # in progress, making it look like nothing was happening. The
-        # self-heal loop retries every 30 s — admin should see "CONNECTING"
-        # without the obsolete error from the prior cycle.
-        if status in (WsStatus.CONNECTED, WsStatus.CONNECTING):
+        elif status in (
+            WsStatus.CONNECTED,
+            WsStatus.CONNECTING,
+            WsStatus.DISCONNECTED,
+        ):
+            # Transition to a clean state WITHOUT a new error — clear any
+            # historical error message so the admin UI doesn't carry a
+            # stale red banner forward. Hits these cases:
+            #   • CONNECTING / CONNECTED — successful reconnect.
+            #   • DISCONNECTED — admin clicked Disconnect (`disconnect_ws()`
+            #     calls this with no error). Without the clear, the last
+            #     403 from the prior session sticks to the panel forever.
             s.wsLastError = None
         await s.save()
 
