@@ -194,6 +194,171 @@ async def list_users(
     )
 
 
+@router.get("/live-stats", response_model=APIResponse[dict])
+async def users_live_stats(
+    admin: CurrentAdmin,
+    user_ids: str | None = Query(
+        default=None,
+        description=(
+            "Comma-separated list of user ids to compute stats for. When "
+            "omitted the endpoint computes stats for every user in the "
+            "admin's scope (capped at 200 for safety)."
+        ),
+    ),
+    _: None = Depends(require_perm("users", "read")),
+) -> APIResponse:
+    """Live per-user balance + open P&L aggregate for the admin Users
+    table. Polled every ~1.5s by the frontend so the OPEN P&L column
+    can update with the same cadence the customer-side terminal uses.
+
+    Returns
+    -------
+    items: list[{
+        user_id, available_balance, open_pnl, equity,
+        used_margin, credit_limit,
+    }]
+
+    Computation
+    -----------
+    • `available_balance` = wallet cash (from `Wallet.available_balance`)
+    • `open_pnl`          = Σ unrealised P&L across the user's currently
+                            OPEN positions, recomputed against the latest
+                            cached LTP (no DB writes — this is a hot path).
+                            USD-quoted segments are baked into INR using
+                            the same `usd_inr_rate` snapshot the customer
+                            terminal uses, so admin numbers match what
+                            users see in real time.
+    • `equity`            = `available_balance + open_pnl`. The "left
+                            balance" / net account value once floating
+                            P&L is folded in.
+
+    Performance notes
+    -----------------
+    LTP fan-out is parallel across unique tokens (the same pattern used
+    by `live_trade_stats` for the per-user detail page) so the per-row
+    cost stays sub-linear in the number of open positions across the
+    whole page.
+    """
+    from decimal import Decimal
+
+    from app.models.position import Position, PositionStatus
+    from app.models.wallet import Wallet
+    from app.services import market_data_service, position_service
+    from app.utils.decimal_utils import to_decimal
+
+    # ── 1. Resolve target users (parse ids or query the admin's scope) ──
+    target_oids: list[PydanticObjectId] = []
+    if user_ids:
+        for raw in user_ids.split(","):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                target_oids.append(PydanticObjectId(raw))
+            except Exception:
+                # Skip malformed ids — the frontend filter probably has
+                # a stale value during page transitions. Don't 400 the
+                # whole call because of it.
+                continue
+        if not target_oids:
+            return APIResponse(data={"items": []})
+        scope_query: dict[str, Any] = {"_id": {"$in": target_oids}}
+        scope_query.update(scoped_admin_filter(admin))
+        users = await User.find(scope_query).to_list()
+    else:
+        scope_query = {
+            "role": {
+                "$nin": [
+                    UserRole.SUPER_ADMIN.value,
+                    UserRole.ADMIN.value,
+                    UserRole.BROKER.value,
+                ]
+            },
+            "status": {"$ne": UserStatus.CLOSED.value},
+        }
+        scope_query.update(scoped_admin_filter(admin))
+        users = await User.find(scope_query).limit(200).to_list()
+
+    if not users:
+        return APIResponse(data={"items": []})
+
+    user_ids_oid = [u.id for u in users]
+
+    # ── 2. Batch-load wallets (one round-trip) ─────────────────────
+    wallets = await Wallet.find({"user_id": {"$in": user_ids_oid}}).to_list()
+    wallet_map = {str(w.user_id): w for w in wallets}
+
+    # ── 3. Pull every OPEN position for the target users in one query ─
+    open_positions = await Position.find(
+        {
+            "user_id": {"$in": user_ids_oid},
+            "status": PositionStatus.OPEN.value,
+        }
+    ).to_list()
+
+    # Bucket positions by user for the P&L sum below.
+    pos_by_user: dict[str, list] = {}
+    for p in open_positions:
+        pos_by_user.setdefault(str(p.user_id), []).append(p)
+
+    # ── 4. Parallel LTP fan-out across UNIQUE tokens ─────────────────
+    unique_tokens = list({p.instrument.token for p in open_positions})
+    ltp_results = await asyncio.gather(
+        *[market_data_service.get_ltp(tok) for tok in unique_tokens],
+        return_exceptions=True,
+    )
+    ltp_map: dict[str, Any] = {}
+    for tok, res in zip(unique_tokens, ltp_results):
+        ltp_map[tok] = res if not isinstance(res, BaseException) else None
+
+    # ── 5. Compute per-user aggregates ────────────────────────────────
+    items: list[dict[str, Any]] = []
+    for u in users:
+        uid = str(u.id)
+        w = wallet_map.get(uid)
+        available = to_decimal(w.available_balance) if w else Decimal("0")
+        used_margin = to_decimal(w.used_margin) if w else Decimal("0")
+        credit_limit = to_decimal(w.credit_limit) if w else Decimal("0")
+
+        open_pnl = Decimal("0")
+        for p in pos_by_user.get(uid, []):
+            ltp = ltp_map.get(p.instrument.token)
+            if ltp is None:
+                # No cached price this tick — fall back to the
+                # last-persisted unrealised so the column doesn't blink
+                # to 0 when a feed misses one round.
+                try:
+                    open_pnl += to_decimal(p.unrealized_pnl)
+                except Exception:
+                    pass
+                continue
+            try:
+                # In-memory refresh — never writes to the DB.
+                await position_service.refresh_unrealized_pnl(p, ltp)
+                open_pnl += to_decimal(p.unrealized_pnl)
+            except Exception:
+                # Don't let one bad position kill the whole page.
+                try:
+                    open_pnl += to_decimal(p.unrealized_pnl)
+                except Exception:
+                    pass
+
+        equity = available + open_pnl
+
+        items.append(
+            {
+                "user_id": uid,
+                "available_balance": str(available),
+                "open_pnl": str(open_pnl),
+                "equity": str(equity),
+                "used_margin": str(used_margin),
+                "credit_limit": str(credit_limit),
+            }
+        )
+
+    return APIResponse(data={"items": items})
+
+
 @router.get("/{user_id}", response_model=APIResponse[dict])
 async def get_user(
     user_id: str,

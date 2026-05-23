@@ -244,6 +244,28 @@ export const UsersAPI = {
   delete: (id: string) => unwrap<any>(api.delete(`/admin/users/${id}`)),
   liveTradeStats: (id: string) =>
     unwrap<any>(api.get(`/admin/users/${id}/live-trade-stats`)),
+  // Aggregated live snapshot of available balance + open P&L + equity
+  // (available + open_pnl) across the given users. Polled by the
+  // /users table so the OPEN P&L column updates at the same cadence
+  // as the customer-side terminal. Pass the IDs visible on the current
+  // page; the backend caps to 200 ids per call.
+  liveStats: (user_ids?: string[]) =>
+    unwrap<{
+      items: Array<{
+        user_id: string;
+        available_balance: string;
+        open_pnl: string;
+        equity: string;
+        used_margin: string;
+        credit_limit: string;
+      }>;
+    }>(
+      api.get("/admin/users/live-stats", {
+        params: user_ids && user_ids.length > 0
+          ? { user_ids: user_ids.join(",") }
+          : undefined,
+      }),
+    ),
 };
 
 export const RiskAPI = {
