@@ -407,6 +407,8 @@ export default function ZerodhaConnectPage() {
         </div>
       )}
 
+      <AutoLoginPanel />
+
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Card className="lg:col-span-2">
           <CardHeader>
@@ -566,8 +568,6 @@ export default function ZerodhaConnectPage() {
           </CardContent>
         </Card>
       </div>
-
-      <AutoLoginPanel />
 
       <Card>
         <CardHeader>
