@@ -161,14 +161,22 @@ async def zerodha_auto_login_loop() -> None:
                 # Already fired today (in this worker) — skip.
                 continue
 
-            if today_ist.weekday() >= 5:  # 5=Sat, 6=Sun
-                logger.info("zerodha_scheduler_weekend_skip")
-                last_fired_iso_date = today_str
-                continue
-            if await _is_indian_trading_holiday(today_ist):
-                logger.info("zerodha_scheduler_holiday_skip")
-                last_fired_iso_date = today_str
-                continue
+            # NB: NO weekend / holiday skip. Kite rotates the access
+            # token at 08:00 IST EVERY day regardless of market hours
+            # — Sundays, holidays, market closures, all of them. If we
+            # skip Sunday's 07:00 IST run, by 08:00 IST the token is
+            # dead and the self-heal loop spins on 403s for the next
+            # ~23 hours until Monday's 07:00 IST run. The cost of a
+            # weekend Playwright run is trivial (~5–10s once a day),
+            # the cost of a 23-hour 403 storm in logs + a "Disconnected"
+            # status on Sunday morning is real operator pain — so we
+            # just refresh daily. Trading-hours have nothing to do
+            # with token validity; treating them as the same was the
+            # original mistake.
+            #
+            # If a specific holiday genuinely shouldn't drive the login
+            # (e.g. Kite's own scheduled maintenance), the operator can
+            # toggle the scheduler OFF on the admin panel for that day.
             if not await _try_acquire_leader_lock():
                 logger.info("zerodha_scheduler_other_worker_won")
                 last_fired_iso_date = today_str
