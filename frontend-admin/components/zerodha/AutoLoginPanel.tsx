@@ -224,7 +224,7 @@ export function AutoLoginPanel() {
         <StatCell
           label="Schedule"
           value={`${schedule} IST`}
-          subtitle="Mon–Fri"
+          subtitle="Daily · all 7 days"
         />
         <StatCell
           label="Last attempt"
