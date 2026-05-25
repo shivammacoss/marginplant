@@ -97,17 +97,21 @@ async def _aggregate_for_users(
     if is_lifetime:
         deposits = sum(_d(w.total_deposits) for w in wallets)
         withdrawals = sum(_d(w.total_withdrawals) for w in wallets)
-        brokerage = sum(_d(w.total_brokerage) for w in wallets)
         realized_pnl = sum(_d(w.realized_pnl) for w in wallets)
 
-        all_closing_trades = await Trade.find({
+        # Brokerage: wallet.total_brokerage is often 0 because brokerage
+        # is tracked per-trade (Trade.brokerage) not as a separate wallet
+        # transaction. Always sum from trades for accuracy.
+        all_trades = await Trade.find({
             "user_id": {"$in": user_ids},
-            "pnl_inr": {"$ne": None},
         }).to_list()
+        brokerage = sum(_d(t.brokerage) for t in all_trades)
+        volume = sum(_d(t.value) for t in all_trades)
+
+        all_closing_trades = [t for t in all_trades if t.pnl_inr is not None]
         total_trades = len(all_closing_trades)
         profit_trades = sum(1 for t in all_closing_trades if _d(t.pnl_inr) > 0)
         loss_trades = sum(1 for t in all_closing_trades if _d(t.pnl_inr) < 0)
-        volume = sum(_d(t.value) for t in all_closing_trades)
     else:
         date_filter = {}
         if start_utc:
