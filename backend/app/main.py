@@ -713,10 +713,22 @@ Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_sch
 # ── Static uploads (deposit screenshots etc., admin logos) ───────────
 _uploads_dir = Path("uploads")
 _uploads_dir.mkdir(parents=True, exist_ok=True)
-# Logos sub-dir — created here so a fresh prod deploy can serve
-# /uploads/logos/* immediately even before the first admin uploads
-# (StaticFiles doesn't auto-create missing sub-directories).
 (_uploads_dir / "logos").mkdir(parents=True, exist_ok=True)
+
+
+# CORS for static files: custom-domain PWA installs fetch logo from
+# api.marginplant.com → stockcafe.live origin. Without ACAO header
+# Chrome blocks the image and PWA gets the default platform icon.
+@app.middleware("http")
+async def uploads_cors_middleware(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/uploads/"):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
+        response.headers["Cache-Control"] = "public, max-age=86400"
+    return response
+
+
 app.mount("/uploads", StaticFiles(directory=str(_uploads_dir)), name="uploads")
 
 # ── Routers ──────────────────────────────────────────────────────────
