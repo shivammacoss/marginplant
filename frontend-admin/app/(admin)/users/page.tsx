@@ -93,10 +93,11 @@ export default function AdminUsersPage() {
    * (the static wallet snapshot) so the column never blinks to "—"
    * during the first 1.5 s after page load.
    */
-  function pickAvailable(r: any): number {
-    const live = liveStatsMap[r.id]?.available_balance;
-    if (live != null) return Number(live);
-    return Number(r.wallet?.available_balance ?? 0);
+  function pickBalance(r: any): number {
+    const live = liveStatsMap[r.id];
+    if (live) return Number(live.available_balance) + Number(live.used_margin);
+    const w = r.wallet;
+    return Number(w?.available_balance ?? 0) + Number(w?.used_margin ?? 0);
   }
 
   function pickOpenPnl(r: any): number | null {
@@ -105,9 +106,15 @@ export default function AdminUsersPage() {
   }
 
   function pickEquity(r: any): number | null {
-    const live = liveStatsMap[r.id]?.equity;
-    if (live != null) return Number(live);
+    const live = liveStatsMap[r.id];
+    if (live) return Number(live.available_balance) + Number(live.used_margin) + Number(live.open_pnl);
     return null;
+  }
+
+  function pickMargin(r: any): number {
+    const live = liveStatsMap[r.id]?.used_margin;
+    if (live != null) return Number(live);
+    return Number(r.wallet?.used_margin ?? 0);
   }
 
   const columns: Column<any>[] = [
@@ -189,12 +196,10 @@ export default function AdminUsersPage() {
       ),
     },
     {
-      key: "available",
-      header: "AVAILABLE",
+      key: "balance",
+      header: "BALANCE",
       align: "right",
-      render: (r: any) => (
-        <MoneyCell value={pickAvailable(r)} muted />
-      ),
+      render: (r: any) => <MoneyCell value={pickBalance(r)} muted />,
     },
     {
       key: "open_pnl",
@@ -204,9 +209,28 @@ export default function AdminUsersPage() {
     },
     {
       key: "equity",
-      header: "LEFT BALANCE",
+      header: "EQUITY",
       align: "right",
-      render: (r: any) => <EquityCell available={pickAvailable(r)} equity={pickEquity(r)} />,
+      render: (r: any) => {
+        const bal = pickBalance(r);
+        const eq = pickEquity(r);
+        return <EquityCell available={bal} equity={eq} />;
+      },
+    },
+    {
+      key: "margin",
+      header: "MARGIN",
+      align: "right",
+      render: (r: any) => {
+        const m = pickMargin(r);
+        return m > 0 ? (
+          <span className="text-sm font-semibold tabular-nums text-foreground/90">
+            ₹{m.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </span>
+        ) : (
+          <span className="text-sm text-muted-foreground">₹0.00</span>
+        );
+      },
     },
     {
       key: "settlement",
