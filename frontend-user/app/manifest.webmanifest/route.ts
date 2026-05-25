@@ -70,19 +70,20 @@ export async function GET(req: NextRequest) {
       const name = brand.brand_name?.trim() || PLATFORM_DEFAULT.name;
       const shortName = (brand.brand_name?.trim() || PLATFORM_DEFAULT.short_name).slice(0, 12);
       const logo = brand.logo_url ? `${API_BASE}${brand.logo_url}` : null;
-      // Chrome requires at least one same-origin icon for installability.
-      // Branded logos live on api.marginplant.com (cross-origin). We keep
-      // platform icons as fallback but put the branded icon FIRST so the
-      // OS launcher picks the admin's logo, not the platform default.
+      // Chrome Android picks same-origin icons over cross-origin ones.
+      // Admin logos live on api.marginplant.com (cross-origin) so Chrome
+      // was ignoring them and falling back to the platform default leaf.
+      // Fix: use /api/brand-icon?u=CODE proxy (same-origin) so Chrome
+      // picks the admin's logo as the launcher icon.
       //
       // `id` field: Chrome uses manifest `id` to distinguish PWAs on the
       // same origin. Without it, installing admin-A's PWA replaces
-      // admin-B's because Chrome sees them as the same app. With a
-      // unique `id` per admin, both can coexist on the same phone.
+      // admin-B's because Chrome sees them as the same app.
+      const proxyIcon = `/api/brand-icon?u=${encodeURIComponent(userCode)}`;
       const brandedIcons = logo
         ? [
-            { src: logo, sizes: "512x512", type: "image/png", purpose: "any" },
-            { src: logo, sizes: "192x192", type: "image/png", purpose: "any" },
+            { src: proxyIcon, sizes: "512x512", type: "image/png", purpose: "any" },
+            { src: proxyIcon, sizes: "192x192", type: "image/png", purpose: "any" },
           ]
         : [];
       manifest = {

@@ -206,6 +206,9 @@ function FallbackDialog({
             </>
           ) : (
             <>
+              <div className="rounded-lg bg-orange-500/10 border border-orange-500/20 p-2.5 text-xs text-orange-300">
+                <strong>Already have an older version installed?</strong> Uninstall it first from your phone settings, then come back and tap Install again.
+              </div>
               <Step
                 num={1}
                 icon={<MoreVertical className="size-4" />}
