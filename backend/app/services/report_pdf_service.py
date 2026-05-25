@@ -528,8 +528,8 @@ def build_full_tradebook_pdf(user, payload: dict) -> bytes:
     ARK_GREEN_SOFT = rl_colors.HexColor("#E8F5E9")
     ARK_GREEN_DARK = rl_colors.HexColor("#1B5E20")
     WHITE = rl_colors.white
-    FONT_SZ = 6
-    HDR_SZ = 6
+    FONT_SZ = 7
+    HDR_SZ = 7
 
     styles = _styles()
     buf = io.BytesIO()
@@ -652,12 +652,10 @@ def build_full_tradebook_pdf(user, payload: dict) -> bytes:
         "Side", "Open Time", "Open Price", "Close Price",
         "DP/WD/AJ", "Commission", "Open Com.", "Total PnL", "Comment",
     ]
-    # landscape A4 = ~277mm usable. 14 cols.
-    ct_widths = [
-        20 * mm, 9 * mm, 16 * mm, 22 * mm, 11 * mm,
-        9 * mm, 20 * mm, 16 * mm, 16 * mm,
-        16 * mm, 16 * mm, 15 * mm, 16 * mm, 16 * mm,
-    ]
+    # 14 cols, proportional to page_w so table fills full width
+    _ct = [7.5, 3.5, 7, 8.5, 4, 3.5, 7.5, 6.5, 6.5, 6, 6, 5.5, 6.5, 5]
+    _ct_sum = sum(_ct)
+    ct_widths = [page_w * w / _ct_sum for w in _ct]
 
     ct_rows: list[list[str]] = []
     total_commission = 0.0
@@ -733,11 +731,9 @@ def build_full_tradebook_pdf(user, payload: dict) -> bytes:
         "Price", "SL", "TP", "Current Price",
         "Commission", "Total PnL", "Value",
     ]
-    od_widths = [
-        16 * mm, 22 * mm, 10 * mm, 12 * mm, 24 * mm,
-        18 * mm, 16 * mm, 16 * mm, 18 * mm,
-        16 * mm, 18 * mm, 22 * mm,
-    ]
+    _od = [7, 9, 4, 5, 10, 8, 7, 7, 8, 7, 8, 10]
+    _od_sum = sum(_od)
+    od_widths = [page_w * w / _od_sum for w in _od]
     od_rows: list[list[str]] = []
     od_total_amt = 0.0
     od_total_com = 0.0
