@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Download, Smartphone } from "lucide-react";
+import { Download, Share2, Smartphone, MoreVertical, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -11,15 +11,23 @@ interface InstallPromptEvent extends Event {
 }
 
 /**
- * "Install App" button. Visible only when Chrome / Edge / Samsung
- * Internet fires `beforeinstallprompt` AND the user hasn't already
- * installed the PWA. iOS Safari doesn't fire this event — for those
- * users we surface a tiny hint instead with the manual Share →
- * "Add to Home Screen" path (the standard iOS install flow).
+ * "Install App" button. Works across all browsers:
  *
- * Variants:
- *   default — full-pill primary button suitable for marketing CTA
- *   compact — smaller variant for the login page footer
+ *   Chrome/Edge/Samsung: captures `beforeinstallprompt`, shows native prompt
+ *   iOS Safari: shows manual "Share → Add to Home Screen" instructions
+ *   Fallback: if `beforeinstallprompt` was consumed or never fired, shows
+ *             a manual-install dialog instead of silently doing nothing
+ *
+ * The button is ALWAYS visible (not gated behind `beforeinstallprompt`).
+ * Previously it was hidden until the browser event fired, which meant:
+ *   • First-time visitors on custom domains saw nothing (event fires
+ *     only after manifest + SW are validated — race with React hydration)
+ *   • If the user dismissed the native prompt once, the button vanished
+ *     forever (event consumed, Chrome doesn't re-fire for weeks)
+ *
+ * Now the button is always rendered. Click behaviour:
+ *   1. If native prompt available → use it (best UX)
+ *   2. If not → show a fallback dialog with browser-specific instructions
  */
 export function InstallPwaButton({
   variant = "default",
@@ -28,14 +36,14 @@ export function InstallPwaButton({
   variant?: "default" | "compact";
   className?: string;
 }) {
-  const [available, setAvailable] = useState(false);
   const [installed, setInstalled] = useState(false);
+  const [hasNativePrompt, setHasNativePrompt] = useState(false);
+  const [showFallback, setShowFallback] = useState(false);
   const [isIos, setIsIos] = useState(false);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    // Already running as an installed PWA? Hide the button entirely.
     const standalone =
       window.matchMedia?.("(display-mode: standalone)").matches ||
       (window.navigator as any).standalone === true;
@@ -44,19 +52,13 @@ export function InstallPwaButton({
       return;
     }
 
-    // iOS Safari support: no beforeinstallprompt, only manual install
-    // via Share → Add to Home Screen. Detect to render an instruction
-    // hint instead of an interactive button.
     const ua = window.navigator.userAgent;
-    const iOS = /iPad|iPhone|iPod/.test(ua) && !(window as any).MSStream;
-    if (iOS) setIsIos(true);
+    setIsIos(/iPad|iPhone|iPod/.test(ua) && !(window as any).MSStream);
 
-    // PwaRegister stashes the event on window — pick it up if it
-    // fired before we mounted, then listen for future fires.
-    if ((window as any).__mpInstallPrompt) setAvailable(true);
-    const onAvail = () => setAvailable(true);
+    if ((window as any).__mpInstallPrompt) setHasNativePrompt(true);
+    const onAvail = () => setHasNativePrompt(true);
     const onInstalled = () => {
-      setAvailable(false);
+      setHasNativePrompt(false);
       setInstalled(true);
     };
     window.addEventListener("mp:install-available", onAvail);
@@ -69,71 +71,201 @@ export function InstallPwaButton({
 
   if (installed) return null;
 
-  async function fire() {
+  async function handleClick() {
     const evt = (window as any).__mpInstallPrompt as
       | InstallPromptEvent
       | undefined;
-    if (!evt) return;
-    try {
-      await evt.prompt();
-      const choice = await evt.userChoice;
-      if (choice?.outcome === "accepted") {
-        (window as any).__mpInstallPrompt = null;
-        setAvailable(false);
+    if (evt) {
+      try {
+        await evt.prompt();
+        const choice = await evt.userChoice;
+        if (choice?.outcome === "accepted") {
+          (window as any).__mpInstallPrompt = null;
+          setHasNativePrompt(false);
+          setInstalled(true);
+          return;
+        }
+      } catch {
+        // Browser rejected the prompt (already dismissed, expired, etc.)
       }
-    } catch {
-      // Swallow — browser may reject if the user dismissed twice already.
+    }
+    // Native prompt not available or failed — show manual instructions
+    if (!evt) {
+      setShowFallback(true);
     }
   }
 
-  if (isIos && !available) {
-    return (
-      <div
-        className={cn(
-          "rounded-xl border border-border bg-card p-3 text-xs text-muted-foreground",
-          className,
-        )}
-      >
-        <div className="flex items-start gap-2">
-          <Smartphone className="mt-0.5 size-4 shrink-0 text-primary" />
-          <div>
-            <div className="text-sm font-semibold text-foreground">
-              Install MarginPlant on iPhone
-            </div>
-            <p className="mt-0.5">
-              Tap the Share icon in Safari and choose{" "}
-              <strong>Add to Home Screen</strong>.
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (!available) return null;
+  const isAndroid =
+    typeof navigator !== "undefined" && /android/i.test(navigator.userAgent);
 
   if (variant === "compact") {
     return (
-      <button
-        type="button"
-        onClick={fire}
-        className={cn(
-          "inline-flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/10 px-3 py-1.5 text-xs font-semibold text-primary hover:bg-primary/20",
-          className,
+      <>
+        <button
+          type="button"
+          onClick={handleClick}
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/10 px-3 py-1.5 text-xs font-semibold text-primary hover:bg-primary/20 transition-colors",
+            className,
+          )}
+        >
+          <Download className="size-3.5" />
+          Install app
+        </button>
+        {showFallback && (
+          <FallbackDialog
+            isIos={isIos}
+            isAndroid={isAndroid}
+            onClose={() => setShowFallback(false)}
+          />
         )}
-      >
-        <Download className="size-3.5" />
-        Install app
-      </button>
+      </>
     );
   }
 
   return (
-    <Button
-      onClick={fire}
-      className={cn("h-11 gap-2 px-5 text-sm font-semibold", className)}
-    >
-      <Download className="size-4" /> Install MarginPlant app
-    </Button>
+    <>
+      <Button
+        onClick={handleClick}
+        className={cn("h-11 gap-2 px-5 text-sm font-semibold", className)}
+      >
+        <Download className="size-4" /> Install app
+      </Button>
+      {showFallback && (
+        <FallbackDialog
+          isIos={isIos}
+          isAndroid={isAndroid}
+          onClose={() => setShowFallback(false)}
+        />
+      )}
+    </>
+  );
+}
+
+/**
+ * Fallback dialog when the native `beforeinstallprompt` isn't available.
+ * Shows step-by-step instructions specific to the user's browser/OS.
+ */
+function FallbackDialog({
+  isIos,
+  isAndroid,
+  onClose,
+}: {
+  isIos: boolean;
+  isAndroid: boolean;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-4 sm:items-center">
+      <div className="relative w-full max-w-sm rounded-2xl border border-border bg-card p-5 shadow-xl">
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute right-3 top-3 text-muted-foreground hover:text-foreground"
+        >
+          <X className="size-4" />
+        </button>
+
+        <div className="flex items-center gap-2.5 text-base font-semibold">
+          <Smartphone className="size-5 text-primary" />
+          Install this app
+        </div>
+
+        <p className="mt-2 text-sm text-muted-foreground">
+          Add this app to your home screen for quick access — works like a native app, no app store needed.
+        </p>
+
+        <div className="mt-4 space-y-3">
+          {isIos ? (
+            <>
+              <Step
+                num={1}
+                icon={<Share2 className="size-4" />}
+                text={
+                  <>
+                    Tap the <strong>Share</strong> button in Safari
+                    (bottom bar)
+                  </>
+                }
+              />
+              <Step
+                num={2}
+                icon={<Download className="size-4" />}
+                text={
+                  <>
+                    Scroll down and tap{" "}
+                    <strong>Add to Home Screen</strong>
+                  </>
+                }
+              />
+              <Step num={3} text={<>Tap <strong>Add</strong> to confirm</>} />
+            </>
+          ) : (
+            <>
+              <Step
+                num={1}
+                icon={<MoreVertical className="size-4" />}
+                text={
+                  <>
+                    Tap the <strong>⋮ menu</strong> (top-right corner in Chrome)
+                  </>
+                }
+              />
+              <Step
+                num={2}
+                icon={<Download className="size-4" />}
+                text={
+                  isAndroid ? (
+                    <>
+                      Tap <strong>Add to Home screen</strong> or{" "}
+                      <strong>Install app</strong>
+                    </>
+                  ) : (
+                    <>
+                      Tap <strong>Install app</strong> or{" "}
+                      <strong>Create shortcut</strong>
+                    </>
+                  )
+                }
+              />
+              <Step
+                num={3}
+                text={<>Tap <strong>Install</strong> to confirm</>}
+              />
+            </>
+          )}
+        </div>
+
+        <button
+          type="button"
+          onClick={onClose}
+          className="mt-4 w-full rounded-lg bg-primary/10 py-2 text-sm font-semibold text-primary hover:bg-primary/20 transition-colors"
+        >
+          Got it
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Step({
+  num,
+  icon,
+  text,
+}: {
+  num: number;
+  icon?: React.ReactNode;
+  text: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-start gap-2.5">
+      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/15 text-xs font-bold text-primary">
+        {num}
+      </span>
+      <div className="flex items-center gap-1.5 text-sm">
+        {icon && <span className="text-muted-foreground">{icon}</span>}
+        <span>{text}</span>
+      </div>
+    </div>
   );
 }
