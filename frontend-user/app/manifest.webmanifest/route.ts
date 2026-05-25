@@ -80,7 +80,7 @@ export async function GET(req: NextRequest) {
       // same origin. Without it, installing admin-A's PWA replaces
       // admin-B's because Chrome sees them as the same app.
       const proxyIcon = `/api/brand-icon?u=${encodeURIComponent(userCode)}`;
-      const ext = (logo.split(".").pop() || "").toLowerCase();
+      const ext = ((logo ?? "").split(".").pop() || "").toLowerCase();
       const mimeType = ext === "jpg" || ext === "jpeg" ? "image/jpeg"
         : ext === "svg" ? "image/svg+xml"
         : ext === "webp" ? "image/webp"
