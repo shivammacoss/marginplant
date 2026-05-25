@@ -2141,52 +2141,67 @@ async def get_effective_settings(
         UserSegmentOverride.symbol == None,  # noqa: E711
     )
 
-    # Pool-default cascade — picks exactly ONE pool override based on the
-    # user's tier ownership (broker > sub-admin > super-admin). Each tier
-    # is independent: super-admin's edits only affect their own pool, and
-    # don't leak into admin / broker pools as a shared fallback. The
-    # caller's `assigned_admin_id` + `broker_ancestry` decide which pool
-    # row applies.
-    pool_override = None
-    # `user_doc` was already fetched above for the tier-aware script
-    # override lookup — reuse it here so we don't make two User.get
-    # round-trips on the resolver hot path.
+    # Pool-default cascade — collect overrides from EVERY tier in the
+    # user's ownership chain (broker → admin → super-admin). Previously
+    # this was an `if/elif/else` that picked EXACTLY ONE tier — so when
+    # a user was under a broker with no override, the admin's override
+    # was never checked and the resolver fell straight through to the
+    # global segment defaults. Now each tier is a separate `if` that
+    # runs independently; all three overrides feed into the composite
+    # layer list below so the merge loop fills in per-field gaps:
+    #
+    #   broker.field > admin.field > super_admin.field > global.field
+    #
+    # This matches how operators think: "admin sets the pool baseline,
+    # broker overrides where needed, user overrides on top." If broker
+    # doesn't set `overnightMargin`, admin's value should apply —
+    # not the global default.
+    broker_pool_override = None
+    admin_pool_override = None
+    super_admin_pool_override = None
+
     if user_doc is not None:
-        # Broker pool (most specific) — immediate broker from ancestry.
         broker_anc = user_doc.broker_ancestry or []
+
+        # 1. Broker pool (most specific)
         if broker_anc:
             broker_id = broker_anc[-1]
-            pool_override = await BrokerSegmentOverride.find_one(
+            broker_pool_override = await BrokerSegmentOverride.find_one(
                 BrokerSegmentOverride.broker_id == broker_id,
                 BrokerSegmentOverride.segment_name == seg_name,
             )
-        elif user_doc.assigned_admin_id is not None:
-            # Sub-admin pool
-            pool_override = await SubAdminSegmentOverride.find_one(
+
+        # 2. Admin pool (fills in what broker doesn't set)
+        if user_doc.assigned_admin_id is not None:
+            admin_pool_override = await SubAdminSegmentOverride.find_one(
                 SubAdminSegmentOverride.sub_admin_id == user_doc.assigned_admin_id,
                 SubAdminSegmentOverride.segment_name == seg_name,
             )
-        else:
-            # Super-admin pool — find_one against the single super-admin's
-            # id. If there are multiple super-admins, each gets their own
-            # override row (single super-admin pool here uses the first).
-            sa_id = await _resolve_super_admin_id()
-            if sa_id is not None:
-                pool_override = await SuperAdminSegmentOverride.find_one(
-                    SuperAdminSegmentOverride.super_admin_id == sa_id,
-                    SuperAdminSegmentOverride.segment_name == seg_name,
-                )
 
-    # Walk in priority order (first-wins):
-    #   user-symbol > user-segment > script-override > <pool-override> > segment
-    # `_to_legacy_dict.pick` only reads from one override layer, so flatten
-    # by creating a synthetic override doc whose fields mask the segment defaults.
+        # 3. Super-admin pool (fills in what admin doesn't set)
+        sa_id = await _resolve_super_admin_id()
+        if sa_id is not None:
+            super_admin_pool_override = await SuperAdminSegmentOverride.find_one(
+                SuperAdminSegmentOverride.super_admin_id == sa_id,
+                SuperAdminSegmentOverride.segment_name == seg_name,
+            )
+
+    # Walk in priority order (first-wins per field):
+    #   user-symbol > user-segment > script-override >
+    #   broker-pool > admin-pool > super-admin-pool > segment
+    #
+    # The composite merge loop (below) reads each layer in order and
+    # only sets a field if no higher-priority layer already set it.
+    # This means broker.overnightMargin beats admin.overnightMargin,
+    # but if broker doesn't set it, admin's value flows through.
     composite_override = None
     layers = [
         user_override_symbol,
         user_override_segment,
         script_override,
-        pool_override,
+        broker_pool_override,
+        admin_pool_override,
+        super_admin_pool_override,
     ]
     if any(layers):
         composite_override = NettingFieldsBase()
@@ -2209,7 +2224,9 @@ async def get_effective_settings(
     sources = {
         "segment": seg_name,
         "script_override": bool(script_override),
-        "pool_override": bool(pool_override),
+        "broker_pool_override": bool(broker_pool_override),
+        "admin_pool_override": bool(admin_pool_override),
+        "super_admin_pool_override": bool(super_admin_pool_override),
         "user_override": bool(user_override_symbol or user_override_segment),
     }
     payload = {"segment_type": segment_type, "settings": settings_dict, "sources": sources}
