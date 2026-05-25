@@ -5,7 +5,7 @@ import { Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { API_URL, STORAGE_KEYS } from "@/lib/constants";
 
-export type ReportKind = "pnl" | "tradebook" | "brokerage" | "tax" | "margin";
+export type ReportKind = "pnl" | "tradebook" | "brokerage" | "tax" | "margin" | "tradebook/full";
 
 interface Props {
   kind: ReportKind;
@@ -42,7 +42,8 @@ export function ReportPdfButton({ kind, params, label = "Download PDF" }: Props)
         typeof window !== "undefined"
           ? window.localStorage.getItem(STORAGE_KEYS.accessToken)
           : null;
-      const res = await fetch(`${API_URL}/api/v1/user/reports/${kind}/pdf${qs}`, {
+      const pdfPath = kind === "tradebook/full" ? "tradebook/full-pdf" : `${kind}/pdf`;
+      const res = await fetch(`${API_URL}/api/v1/user/reports/${pdfPath}${qs}`, {
         headers: token ? { Authorization: `Bearer ${token}` } : undefined,
       });
       if (!res.ok) {

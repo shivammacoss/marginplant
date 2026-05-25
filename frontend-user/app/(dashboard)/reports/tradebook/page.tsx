@@ -84,7 +84,12 @@ export default function TradebookPage() {
       <PageHeader
         title="Tradebook"
         description={`${allRows.length} ${allRows.length === 1 ? "trade" : "trades"} in the selected period.`}
-        actions={<ReportPdfButton kind="tradebook" params={{ ...params }} />}
+        actions={
+          <div className="flex gap-2">
+            <ReportPdfButton kind="tradebook" params={{ ...params }} label="Simple PDF" />
+            <ReportPdfButton kind="tradebook/full" params={{ from_date: toIsoFrom(range.from), to_date: toIsoTo(range.to) }} label="Full Tradebook" />
+          </div>
+        }
       />
 
       <DateRangeBar value={range} onChange={setRange} />
