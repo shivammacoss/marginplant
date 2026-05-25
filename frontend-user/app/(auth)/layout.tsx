@@ -59,37 +59,52 @@ function AuthLayoutInner({ children }: { children: React.ReactNode }) {
             </p>
           </div>
           <div className="text-sm text-muted-foreground">
-            © {new Date().getFullYear()} {tenantName || "MarginPlant Broker"} · All rights reserved
+            © {new Date().getFullYear()}{" "}
+            {branding === null ? (
+              <span className="inline-block h-4 w-32 animate-pulse rounded bg-muted/30 align-middle" />
+            ) : (
+              tenantName || "MarginPlant Broker"
+            )}{" "}
+            · All rights reserved
           </div>
         </div>
-        <div className="flex flex-col items-center justify-start p-6 pt-10 lg:justify-center lg:pt-6">
-          {/* Mobile-only branded header — desktop already has the full
-              brand panel on the left, but on phones the form used to
-              start cold with no logo or welcome text. User asked:
-              "login page mobile view me logo and branding kar do".
-              Compact (~120 px), centred, gradient backdrop tile around
-              the icon so the brand mark reads even on a light theme.
-              The smaller duplicate-icon row (BrandLogo size="md") was
-              removed per follow-up ask: "es chhota vala logo remove
-              kar do" — we now show the tile icon + a plain text
-              wordmark, not two stacked sprout icons. */}
+        <div className="flex flex-col items-center justify-center p-6 lg:pt-6">
+          {/* Mobile-only branded header — shows the tenant logo + name
+              on phones (desktop has the full brand panel on the left).
+              While branding is still loading (branding === null), we
+              render a subtle shimmer placeholder instead of the platform
+              default. This eliminates the "MarginPlant Broker flashes
+              for 1 second on custom domains" issue — users on
+              stockcafe.live never see the wrong brand name. */}
           <div className="mb-6 flex w-full flex-col items-center gap-2 text-center lg:hidden">
-            <div className="rounded-2xl bg-gradient-to-br from-primary/20 via-primary/10 to-transparent p-3">
-              <BrandLogo href={null} size="lg" iconOnly />
-            </div>
-            <span className="text-lg font-semibold tracking-tight">
-              {tenantName ? (
-                <span className="text-foreground">{tenantName}</span>
-              ) : (
-                <>
-                  <span className="text-primary">MarginPlant</span>
-                  <span className="text-foreground"> Broker</span>
-                </>
-              )}
-            </span>
-            <p className="max-w-xs text-xs text-muted-foreground">
-              Trade Indian markets — fast, fair, focused.
-            </p>
+            {branding === null ? (
+              /* Branding still loading — shimmer placeholder */
+              <>
+                <div className="h-16 w-16 animate-pulse rounded-2xl bg-muted/50" />
+                <div className="h-5 w-28 animate-pulse rounded bg-muted/50" />
+                <div className="h-3 w-44 animate-pulse rounded bg-muted/30" />
+              </>
+            ) : (
+              /* Branding resolved (or confirmed as platform default) */
+              <>
+                <div className="rounded-2xl bg-gradient-to-br from-primary/20 via-primary/10 to-transparent p-3">
+                  <BrandLogo href={null} size="lg" iconOnly />
+                </div>
+                <span className="text-lg font-semibold tracking-tight">
+                  {tenantName ? (
+                    <span className="text-foreground">{tenantName}</span>
+                  ) : (
+                    <>
+                      <span className="text-primary">MarginPlant</span>
+                      <span className="text-foreground"> Broker</span>
+                    </>
+                  )}
+                </span>
+                <p className="max-w-xs text-xs text-muted-foreground">
+                  Trade Indian markets — fast, fair, focused.
+                </p>
+              </>
+            )}
           </div>
           <div className="w-full max-w-md">{children}</div>
         </div>
