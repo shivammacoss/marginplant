@@ -218,21 +218,6 @@ export default function AdminUsersPage() {
       },
     },
     {
-      key: "margin",
-      header: "MARGIN",
-      align: "right",
-      render: (r: any) => {
-        const m = pickMargin(r);
-        return m > 0 ? (
-          <span className="text-sm font-semibold tabular-nums text-foreground/90">
-            ₹{m.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-          </span>
-        ) : (
-          <span className="text-sm text-muted-foreground">₹0.00</span>
-        );
-      },
-    },
-    {
       key: "settlement",
       header: "Settlement",
       align: "right",
