@@ -254,8 +254,27 @@ async def accounts_summary(
     grand_total = await _aggregate_for_users(all_ids, start_utc=start_utc, end_utc=end_utc)
 
     if scope == "all_users":
-        # Just grand total — no entity breakdown
-        pass
+        # Per-user breakdown for every trading user in scope
+        async def _do_user(u: User) -> dict[str, Any]:
+            agg = await _aggregate_for_users([u.id], start_utc=start_utc, end_utc=end_utc)
+            owner_label = ""
+            if u.assigned_broker_id:
+                broker = await User.get(u.assigned_broker_id)
+                owner_label = (broker.full_name or broker.user_code or "Broker") if broker else ""
+            elif u.assigned_admin_id:
+                adm = await User.get(u.assigned_admin_id)
+                owner_label = (adm.full_name or adm.user_code or "Admin") if adm else ""
+            return {
+                "id": str(u.id),
+                "name": u.full_name or u.user_code or "User",
+                "user_code": u.user_code,
+                "role": u.role.value if hasattr(u.role, "value") else str(u.role),
+                "owner": owner_label,
+                **agg,
+            }
+
+        results = await asyncio.gather(*[_do_user(u) for u in all_users], return_exceptions=True)
+        entities.extend(r for r in results if isinstance(r, dict))
 
     elif scope == "admins" and admin.role == UserRole.SUPER_ADMIN:
         # Super-admin's direct users

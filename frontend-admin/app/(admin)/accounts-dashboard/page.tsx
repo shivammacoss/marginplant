@@ -215,7 +215,14 @@ export default function AccountsDashboardPage() {
 
       {/* ── Animated Summary Tiles ───────────────────────────── */}
       {gt && (
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+          <SummaryTile
+            icon={<Users className="size-4" />}
+            label="Total Users"
+            value={gt.user_count ?? 0}
+            color="text-purple-400"
+            decimals={0}
+          />
           <SummaryTile
             icon={<ArrowDownRight className="size-4" />}
             label="Deposits"
