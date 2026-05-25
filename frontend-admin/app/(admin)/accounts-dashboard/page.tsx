@@ -378,16 +378,7 @@ export default function AccountsDashboardPage() {
         </div>
       )}
 
-      <div className="space-y-3">
-        {entities.map((entity) => (
-          <EntityCard key={entity.id} entity={entity} />
-        ))}
-        {entities.length === 0 && data && (
-          <div className="py-8 text-center text-sm text-muted-foreground">
-            No entities found.
-          </div>
-        )}
-      </div>
+      <PaginatedEntities entities={entities} />
 
       {data && (
         <div className="text-xs text-muted-foreground">
@@ -445,6 +436,49 @@ function ChartCard({ title, icon, children }: {
         {title}
       </div>
       {children}
+    </div>
+  );
+}
+
+const PAGE_SIZE = 15;
+
+function PaginatedEntities({ entities }: { entities: AccountEntity[] }) {
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(entities.length / PAGE_SIZE));
+  const safeP = Math.min(page, totalPages);
+  const sliced = entities.slice((safeP - 1) * PAGE_SIZE, safeP * PAGE_SIZE);
+
+  // Reset to page 1 when entities change (search/tab switch)
+  const prevLen = useRef(entities.length);
+  useEffect(() => {
+    if (entities.length !== prevLen.current) { setPage(1); prevLen.current = entities.length; }
+  }, [entities.length]);
+
+  if (!entities.length) return (
+    <div className="py-8 text-center text-sm text-muted-foreground">No entities found.</div>
+  );
+
+  return (
+    <div className="space-y-3">
+      {sliced.map((entity) => (
+        <EntityCard key={entity.id} entity={entity} />
+      ))}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between rounded-lg border border-border/60 bg-card/40 px-4 py-2.5">
+          <span className="text-xs text-muted-foreground">
+            Showing {(safeP - 1) * PAGE_SIZE + 1}–{Math.min(safeP * PAGE_SIZE, entities.length)} of {entities.length}
+          </span>
+          <div className="flex gap-1.5">
+            <Button variant="outline" size="sm" disabled={safeP <= 1} onClick={() => setPage(safeP - 1)}>
+              Prev
+            </Button>
+            <span className="flex items-center px-2 text-xs font-medium">{safeP} / {totalPages}</span>
+            <Button variant="outline" size="sm" disabled={safeP >= totalPages} onClick={() => setPage(safeP + 1)}>
+              Next
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
