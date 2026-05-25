@@ -389,8 +389,10 @@ async def tradebook_pdf(
 
     pdf_bytes = report_pdf_service.build_full_tradebook_pdf(user, payload)
     stamp = now.strftime("%Y%m%d")
+    user_name = (getattr(user, "full_name", "") or "").strip().replace(" ", "_")
     code = getattr(user, "user_code", "") or "user"
-    filename = f"tradebook_{code}_{stamp}.pdf"
+    admin_name = (admin_brand_name or getattr(admin, "full_name", "") or "").strip().replace(" ", "_")
+    filename = f"tradebook_{user_name}_{code}_{admin_name}_{stamp}.pdf"
 
     return StreamingResponse(
         iter([pdf_bytes]),
