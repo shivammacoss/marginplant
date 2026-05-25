@@ -85,12 +85,11 @@ export async function GET(req: NextRequest) {
         : ext === "svg" ? "image/svg+xml"
         : ext === "webp" ? "image/webp"
         : "image/png";
-      const brandedIcons = logo
-        ? [
-            { src: proxyIcon, sizes: "512x512", type: mimeType, purpose: "any" },
-            { src: proxyIcon, sizes: "192x192", type: mimeType, purpose: "any" },
-          ]
-        : [];
+      const brandedIcons = [
+        { src: proxyIcon, sizes: "512x512", type: mimeType, purpose: "any" },
+        { src: proxyIcon, sizes: "192x192", type: mimeType, purpose: "any" },
+        { src: proxyIcon, sizes: "512x512", type: mimeType, purpose: "maskable" },
+      ];
       manifest = {
         ...PLATFORM_DEFAULT,
         id: `/?brand=${encodeURIComponent(userCode)}`,
@@ -98,7 +97,7 @@ export async function GET(req: NextRequest) {
         name,
         short_name: shortName,
         description: `${name} — trade Indian markets`,
-        icons: [...brandedIcons, ...PLATFORM_DEFAULT.icons],
+        icons: logo ? brandedIcons : PLATFORM_DEFAULT.icons,
       };
     }
   }
