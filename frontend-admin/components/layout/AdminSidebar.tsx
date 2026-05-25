@@ -21,6 +21,7 @@ import {
   Crown,
   Wallet,
   Handshake,
+  BarChart3,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { canSee, isSuperAdmin, type PermissionKey } from "@/lib/permissions";
@@ -54,7 +55,10 @@ type NavItem = {
 const groups: { title: string; items: NavItem[] }[] = [
   {
     title: "Overview",
-    items: [{ href: "/dashboard", label: "Dashboard", icon: Home }],
+    items: [
+      { href: "/dashboard", label: "Dashboard", icon: Home },
+      { href: "/accounts-dashboard", label: "Accounts", icon: BarChart3 },
+    ],
   },
   {
     title: "Users",

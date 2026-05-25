@@ -804,3 +804,52 @@ export const BrandingAPI = {
   disconnectDomain: () =>
     unwrap<BrandingPayload>(api.post("/admin/branding/domain/disconnect")),
 };
+
+// ── Accounts Dashboard ──────────────────────────────────────────
+
+export type AccountEntity = {
+  id: string;
+  name: string;
+  user_code?: string;
+  role: string;
+  broker_count?: number;
+  deposits: number;
+  withdrawals: number;
+  net_deposit: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  net_pnl: number;
+  brokerage: number;
+  total_trades: number;
+  profit_trades: number;
+  loss_trades: number;
+  win_rate: number;
+  volume: number;
+  balance: number;
+  equity: number;
+  open_positions: number;
+  settlement_outstanding: number;
+  user_count: number;
+};
+
+export type AccountsSummary = {
+  entities: AccountEntity[];
+  grand_total: AccountEntity;
+  filter: {
+    from_date: string | null;
+    to_date: string | null;
+    preset: string | null;
+    is_lifetime: boolean;
+  };
+};
+
+export const AccountsAPI = {
+  summary: (params?: {
+    from_date?: string;
+    to_date?: string;
+    preset?: string;
+  }) =>
+    unwrap<AccountsSummary>(
+      api.get("/admin/accounts/summary", { params }),
+    ),
+};
