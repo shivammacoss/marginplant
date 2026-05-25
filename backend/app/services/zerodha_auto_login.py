@@ -309,11 +309,30 @@ class ZerodhaAutoLoginService:
             )
 
         doc = await self._get_or_create()
+
+        # Stamp `last_attempt_at` as the FIRST thing we do — before any
+        # precheck / decrypt — so the scheduler can rely on it as a
+        # "fired today" marker that survives crashes and is set even on
+        # early-bail-out paths (missing credentials, decrypt failure,
+        # bad config). Without this stamp, an early-bail-out would leave
+        # `last_attempt_at` stuck at yesterday's value and the scheduler
+        # would re-fire on every 60-s tick all day long.
+        doc.last_attempt_at = now_utc()
+        doc.last_stage = "in_progress"
+        await doc.save()
+
         if not (
             doc.encrypted_username
             and doc.encrypted_password
             and doc.encrypted_totp_secret
         ):
+            await self._record_failure(
+                doc,
+                stage="precheck",
+                error="Credentials not configured.",
+                triggered_by=triggered_by,
+                actor_id=actor_id,
+            )
             await self._release_lock(lock_acquired)
             return {
                 "success": False,
