@@ -250,7 +250,7 @@ export default function AccountsDashboardPage() {
                 <YAxis dataKey="name" type="category" width={90} tick={{ fill: "#888", fontSize: 11 }} />
                 <Tooltip
                   contentStyle={{ background: "#1a1a1a", border: "1px solid #333", borderRadius: 8 }}
-                  formatter={(v: number) => [`₹${v.toLocaleString("en-IN")}`, "P&L"]}
+                  formatter={(v) => [`₹${Number(v ?? 0).toLocaleString("en-IN")}`, "P&L"]}
                 />
                 <Bar dataKey="PnL" animationDuration={1000}>
                   {entities.map((e, i) => (
@@ -273,7 +273,7 @@ export default function AccountsDashboardPage() {
                 <YAxis dataKey="name" type="category" width={90} tick={{ fill: "#888", fontSize: 11 }} />
                 <Tooltip
                   contentStyle={{ background: "#1a1a1a", border: "1px solid #333", borderRadius: 8 }}
-                  formatter={(v: number) => [`₹${v.toLocaleString("en-IN")}`, "Brokerage"]}
+                  formatter={(v) => [`₹${Number(v ?? 0).toLocaleString("en-IN")}`, "Brokerage"]}
                 />
                 <Bar dataKey="Brokerage" fill={CHART_BLUE} radius={[0, 4, 4, 0]} animationDuration={1000} />
               </BarChart>
