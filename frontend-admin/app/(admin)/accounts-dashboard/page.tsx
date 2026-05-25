@@ -258,17 +258,18 @@ export default function AccountsDashboardPage() {
         </div>
       )}
 
-      {/* ── Charts Row (only when entities exist) ────────────── */}
-      {gt && entities.length > 0 && (
+      {/* ── Charts Row ───────────────────────────────────────── */}
+      {gt && (() => {
+        // When entities is empty (All Users tab), use grand_total as single data point
+        const chartData = entities.length > 0
+          ? entities.map((e) => ({ name: (e.name || "").slice(0, 12), Deposits: e.deposits, Withdrawals: e.withdrawals, PnL: e.net_pnl, Brokerage: e.brokerage }))
+          : [{ name: "All Users", Deposits: gt.deposits, Withdrawals: gt.withdrawals, PnL: gt.net_pnl, Brokerage: gt.brokerage }];
+        return (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           {/* Deposits vs Withdrawals Bar */}
           <ChartCard title="Deposits vs Withdrawals" icon={<BarChart3 className="size-4" />}>
             <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={entities.map((e) => ({
-                name: (e.name || "").slice(0, 12),
-                Deposits: e.deposits,
-                Withdrawals: e.withdrawals,
-              }))}>
+              <BarChart data={chartData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#333" />
                 <XAxis dataKey="name" tick={{ fill: "#888", fontSize: 11 }} />
                 <YAxis tick={{ fill: "#888", fontSize: 11 }} />
@@ -329,10 +330,7 @@ export default function AccountsDashboardPage() {
           {/* P&L per Entity Bar */}
           <ChartCard title="P&L per Pool" icon={<TrendingUp className="size-4" />}>
             <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={entities.map((e) => ({
-                name: (e.name || "").slice(0, 12),
-                PnL: e.net_pnl,
-              }))} layout="vertical">
+              <BarChart data={chartData} layout="vertical">
                 <CartesianGrid strokeDasharray="3 3" stroke="#333" />
                 <XAxis type="number" tick={{ fill: "#888", fontSize: 11 }} />
                 <YAxis dataKey="name" type="category" width={90} tick={{ fill: "#888", fontSize: 11 }} />
@@ -341,8 +339,8 @@ export default function AccountsDashboardPage() {
                   formatter={(v) => [`₹${Number(v ?? 0).toLocaleString("en-IN")}`, "P&L"]}
                 />
                 <Bar dataKey="PnL" animationDuration={1000}>
-                  {entities.map((e, i) => (
-                    <Cell key={i} fill={e.net_pnl >= 0 ? CHART_GREEN : CHART_RED} />
+                  {chartData.map((e, i) => (
+                    <Cell key={i} fill={(e.PnL ?? 0) >= 0 ? CHART_GREEN : CHART_RED} />
                   ))}
                 </Bar>
               </BarChart>
@@ -352,10 +350,7 @@ export default function AccountsDashboardPage() {
           {/* Brokerage per Entity */}
           <ChartCard title="Brokerage Revenue" icon={<DollarSign className="size-4" />}>
             <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={entities.map((e) => ({
-                name: (e.name || "").slice(0, 12),
-                Brokerage: e.brokerage,
-              }))} layout="vertical">
+              <BarChart data={chartData} layout="vertical">
                 <CartesianGrid strokeDasharray="3 3" stroke="#333" />
                 <XAxis type="number" tick={{ fill: "#888", fontSize: 11 }} />
                 <YAxis dataKey="name" type="category" width={90} tick={{ fill: "#888", fontSize: 11 }} />
@@ -368,7 +363,8 @@ export default function AccountsDashboardPage() {
             </ResponsiveContainer>
           </ChartCard>
         </div>
-      )}
+        );
+      })()}
 
       {/* ── Entity Cards ─────────────────────────────────────── */}
       {isFetching && !data && (
