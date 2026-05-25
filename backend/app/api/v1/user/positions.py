@@ -467,17 +467,10 @@ async def squareoff(
     if p.status != PositionStatus.OPEN or p.quantity == 0:
         raise HTTPException(status_code=400, detail="Position already closed")
 
-    # ── Market-hours guard ──────────────────────────────────────────
-    # Defence-in-depth: the apk already blocks the tap when the segment
-    # market is closed, but the web can also call this endpoint and an
-    # attacker could bypass the client guard with a direct curl. Only
-    # admin force-close (admin trading.py:admin_squareoff) should be
-    # able to flatten positions outside trading hours.
-    if not _is_segment_market_open_now(p.segment_type):
-        raise HTTPException(
-            status_code=400,
-            detail=f"{_segment_market_label(p.segment_type)} market is closed — try during trading hours.",
-        )
+    # Market-hours guard REMOVED for position close. B-Book platform:
+    # users must always be able to exit positions regardless of market
+    # hours. Market-hours validation still applies to NEW order placement
+    # (order_validator.py). Closing is risk-reducing — never block it.
 
     # ── Risk: hold-time minimum ─────────────────────────────────────
     # Admin's Risk Management page sets a floor on how quickly a profitable

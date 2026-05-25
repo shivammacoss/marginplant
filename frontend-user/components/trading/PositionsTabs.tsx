@@ -217,17 +217,9 @@ export function PositionsTabs({ positions, pendingOrders, history, cancelled, to
     segmentType?: string,
     exchange?: string,
   ) {
-    // Market-hours guard FIRST — runs before the confirm dialog, the
-    // optimistic cache write, the audio cue, everything. The user kept
-    // seeing the row vanish for ~1 s then come back with a "market closed"
-    // toast because we used to fire the API and only rollback on rejection.
-    // Now we short-circuit: clear toast, position stays in place, no flicker.
-    if (!isInstrumentMarketOpen(segmentType, exchange)) {
-      toast.error(`${marketLabel(segmentType, exchange)} market is closed — try closing ${symbol} during trading hours`, {
-        duration: 4000,
-      });
-      return;
-    }
+    // Market-hours guard REMOVED for closes. B-Book: users must always
+    // be able to exit positions. Server allows is_squareoff anytime.
+
     // Mobile UX — skip the native confirm() on phones (user spec:
     // "close karne par pop mat aaye, direct close ho jaye"); desktop
     // still gets the confirm step. one-click trade mode already
@@ -289,16 +281,8 @@ export function PositionsTabs({ positions, pendingOrders, history, cancelled, to
   }
 
   function squareoff(id: string, symbol: string, segmentType?: string, exchange?: string) {
-    // Same market-hours guard as `closeActiveTrade` above — see that
-    // function's comment for the rationale. Block here BEFORE the audio
-    // cue and the optimistic cache writes so a click outside trading
-    // hours is a no-op + one clear toast, never a flicker.
-    if (!isInstrumentMarketOpen(segmentType, exchange)) {
-      toast.error(`${marketLabel(segmentType, exchange)} market is closed — try closing ${symbol} during trading hours`, {
-        duration: 4000,
-      });
-      return;
-    }
+    // Market-hours guard REMOVED for closes. B-Book: users must always
+    // be able to exit positions. Server allows is_squareoff anytime.
     playClosedTone();
 
     // Cancel BOTH queries — closing a position kills its Active Trades
