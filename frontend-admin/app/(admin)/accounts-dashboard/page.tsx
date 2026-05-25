@@ -87,9 +87,7 @@ export default function AccountsDashboardPage() {
     : role === "BROKER" ? BROKER_TABS
     : ADMIN_TABS;
 
-  const [scope, setScope] = useState(
-    role === "SUPER_ADMIN" ? "admins" : role === "BROKER" ? "all_users" : "brokers"
-  );
+  const [scope, setScope] = useState("all_users");
   const [preset, setPreset] = useState<string>("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
