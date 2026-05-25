@@ -210,21 +210,14 @@ async def tradebook_pdf(
     money_txs = await WalletTransaction.find(tx_q).sort("+created_at").to_list()
 
     closed_rows: list[dict[str, Any]] = []
+    sum_brokerage_from_trades = 0.0
 
     for t in trades:
         pnl = _d128(t.pnl_inr) if t.pnl_inr else 0.0
-        commission = _d128(t.total_charges)
-        open_price = _d128(t.price)
-
-        order = await Order.get(t.order_id) if t.order_id else None
-        open_time = ""
-        close_price = ""
-        sl_comment = ""
-
-        if order:
-            open_time = _fmt_dt(order.created_at)
-            if order.average_price:
-                close_price = f"{_d128(order.average_price):,.2f}"
+        brokerage = _d128(t.brokerage)
+        total_charges = _d128(t.total_charges)
+        trade_price = _d128(t.price)
+        sum_brokerage_from_trades += brokerage
 
         closed_rows.append({
             "time": _fmt_dt(t.executed_at),
@@ -233,13 +226,14 @@ async def tradebook_pdf(
             "script": t.instrument.symbol,
             "amount": f"{t.quantity:,.2f}",
             "type_detail": t.action.value,
-            "open_time": open_time,
-            "open_price": f"{open_price:,.2f}",
-            "close_price": close_price or f"{open_price:,.2f}",
+            "open_time": _fmt_dt(t.executed_at),
+            "open_price": f"{trade_price:,.2f}",
+            "close_price": f"{trade_price:,.2f}",
             "dp_wd_aj": "",
-            "commission": commission,
-            "open_com": commission,
-            "total_pnl": pnl - (commission * 2),
+            "brokerage": brokerage,
+            "commission": total_charges,
+            "open_com": total_charges,
+            "total_pnl": pnl,
             "comment": "",
         })
 
@@ -257,6 +251,7 @@ async def tradebook_pdf(
             "open_price": "",
             "close_price": "",
             "dp_wd_aj": f"{amt:,.2f}",
+            "brokerage": 0,
             "commission": 0,
             "open_com": 0,
             "total_pnl": 0,
@@ -367,7 +362,7 @@ async def tradebook_pdf(
     }
 
     # ── 6. Brokerage total + admin branding ──────────────────
-    total_brokerage = _d128(wallet.total_brokerage) if wallet else 0.0
+    total_brokerage = sum_brokerage_from_trades
 
     admin_brand_name = ""
     if admin.brand_name:

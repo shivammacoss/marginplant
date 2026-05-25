@@ -649,24 +649,24 @@ def build_full_tradebook_pdf(user, payload: dict) -> bytes:
 
     ct_headers = [
         "Time", "Type", "Ticket Id", "Script", "Amt",
-        "Side", "Open Time", "Open Price", "Close Price",
-        "DP/WD/AJ", "Commission", "Open Com.", "Total PnL", "Comment",
+        "Side", "Open Price", "Close Price",
+        "DP/WD/AJ", "Brokerage", "Commission", "Total PnL",
     ]
-    # 14 cols, proportional to page_w so table fills full width
-    _ct = [7.5, 3.5, 7, 8.5, 4, 3.5, 7.5, 6.5, 6.5, 6, 6, 5.5, 6.5, 5]
+    # 12 cols, proportional to page_w — fills entire page
+    _ct = [8, 3.5, 7, 9, 4, 3.5, 7, 7, 7, 6, 6, 7]
     _ct_sum = sum(_ct)
     ct_widths = [page_w * w / _ct_sum for w in _ct]
 
     ct_rows: list[list[str]] = []
+    total_brokerage_col = 0.0
     total_commission = 0.0
-    total_open_com = 0.0
     total_pnl = 0.0
     for tx in closed:
+        brokerage = float(tx.get("brokerage") or 0)
         commission = float(tx.get("commission") or 0)
-        open_com = float(tx.get("open_com") or 0)
         pnl = float(tx.get("total_pnl") or 0)
+        total_brokerage_col += brokerage
         total_commission += commission
-        total_open_com += open_com
         total_pnl += pnl
 
         pnl_str = f"{pnl:,.2f}" if pnl else ""
@@ -681,20 +681,18 @@ def build_full_tradebook_pdf(user, payload: dict) -> bytes:
             tx.get("script", ""),
             str(tx.get("amount", "")),
             tx.get("type_detail", ""),
-            tx.get("open_time", ""),
             tx.get("open_price", ""),
             tx.get("close_price", ""),
             str(dp_wd),
+            f"{brokerage:,.2f}" if brokerage else "0.00",
             f"{commission:,.2f}" if commission else "0.00",
-            f"{open_com:,.2f}" if open_com else "0.00",
             pnl_str,
-            tx.get("comment", ""),
         ])
 
     totals_row = [
-        "", "", "", "", "Totals", "", "", "", "",
-        "", f"{total_commission:,.2f}", f"{total_open_com:,.2f}",
-        f"{total_pnl:,.2f}", "",
+        "", "", "", "", "Totals", "", "", "",
+        "", f"{total_brokerage_col:,.2f}", f"{total_commission:,.2f}",
+        f"{total_pnl:,.2f}",
     ]
 
     if ct_rows:
