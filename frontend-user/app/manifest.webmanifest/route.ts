@@ -70,18 +70,22 @@ export async function GET(req: NextRequest) {
       const name = brand.brand_name?.trim() || PLATFORM_DEFAULT.name;
       const shortName = (brand.brand_name?.trim() || PLATFORM_DEFAULT.short_name).slice(0, 12);
       const logo = brand.logo_url ? `${API_BASE}${brand.logo_url}` : null;
+      // CRITICAL: Chrome requires at least one SAME-ORIGIN icon for PWA
+      // installability. Branded logos are cross-origin (served from
+      // api.marginplant.com) — if we ONLY include those, Chrome blocks
+      // the install on custom domains (stockcafe.live ≠ api.marginplant.com).
+      // Fix: ALWAYS include the local platform icons first (same-origin,
+      // guaranteed installable), then append the branded logo as an extra
+      // icon for the OS launcher to pick up if it supports cross-origin.
+      const brandedIcons = logo
+        ? [{ src: logo, sizes: "512x512", type: "image/png", purpose: "any" }]
+        : [];
       manifest = {
         ...PLATFORM_DEFAULT,
         name,
         short_name: shortName,
         description: `${name} — trade Indian markets`,
-        icons: logo
-          ? [
-              { src: logo, sizes: "192x192", type: "image/png", purpose: "any" },
-              { src: logo, sizes: "512x512", type: "image/png", purpose: "any" },
-              { src: logo, sizes: "any", purpose: "any" },
-            ]
-          : PLATFORM_DEFAULT.icons,
+        icons: [...PLATFORM_DEFAULT.icons, ...brandedIcons],
       };
     }
   }

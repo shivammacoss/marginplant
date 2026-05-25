@@ -85,14 +85,18 @@ export function InstallPwaButton({
           setInstalled(true);
           return;
         }
+        // User DISMISSED the native prompt — show manual instructions
+        // as fallback (Chrome won't re-fire beforeinstallprompt for weeks)
+        (window as any).__mpInstallPrompt = null;
+        setHasNativePrompt(false);
+        setShowFallback(true);
+        return;
       } catch {
-        // Browser rejected the prompt (already dismissed, expired, etc.)
+        // Browser rejected the prompt (expired, already used, etc.)
       }
     }
-    // Native prompt not available or failed — show manual instructions
-    if (!evt) {
-      setShowFallback(true);
-    }
+    // Native prompt not available OR prompt() threw — always show fallback
+    setShowFallback(true);
   }
 
   const isAndroid =
