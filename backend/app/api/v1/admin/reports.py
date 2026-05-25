@@ -366,6 +366,15 @@ async def tradebook_pdf(
         "margin_level": f"{margin_level:.2f}%",
     }
 
+    # ── 6. Brokerage total + admin branding ──────────────────
+    total_brokerage = _d128(wallet.total_brokerage) if wallet else 0.0
+
+    admin_brand_name = ""
+    if admin.brand_name:
+        admin_brand_name = admin.brand_name
+    elif hasattr(admin, "full_name") and admin.full_name:
+        admin_brand_name = admin.full_name
+
     # ── Assemble payload ───────────────────────────────────────
     from_label = from_date.strftime("%Y-%m-%d") if from_date else "Beginning"
     to_label = to_date.strftime("%Y-%m-%d") if to_date else "Now"
@@ -379,6 +388,8 @@ async def tradebook_pdf(
         "opened_deals": opened_deals,
         "pending_orders": pending_orders,
         "financial": financial,
+        "total_brokerage": total_brokerage,
+        "admin_brand_name": admin_brand_name,
     }
 
     pdf_bytes = report_pdf_service.build_full_tradebook_pdf(user, payload)

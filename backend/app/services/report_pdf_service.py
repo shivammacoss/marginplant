@@ -517,75 +517,90 @@ def build_tax_pdf(user, payload: dict) -> bytes:
 
 
 def build_full_tradebook_pdf(user, payload: dict) -> bytes:
-    """ARK Trader-style comprehensive tradebook PDF.
+    """ARK Trader-style comprehensive tradebook PDF (landscape A4).
 
-    Sections: Header → Closed Transactions → Money Totals →
+    Sections: Branded Header → Closed Transactions → Money Totals →
     Opened Deals → Pending Orders → Financial Standings.
     """
+    from reportlab.lib.pagesizes import landscape
+
     ARK_GREEN = rl_colors.HexColor("#2E7D32")
     ARK_GREEN_SOFT = rl_colors.HexColor("#E8F5E9")
     ARK_GREEN_DARK = rl_colors.HexColor("#1B5E20")
     WHITE = rl_colors.white
+    FONT_SZ = 6
+    HDR_SZ = 6
 
     styles = _styles()
-    doc, buf = _doc()
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=landscape(A4),
+        leftMargin=10 * mm, rightMargin=10 * mm,
+        topMargin=12 * mm, bottomMargin=12 * mm,
+        title="Trade Book",
+    )
+    page_w = landscape(A4)[0] - 20 * mm
 
     code = getattr(user, "user_code", None) or ""
-    name = getattr(user, "full_name", None) or ""
-    account_label = f"{code}: {name}" if code and name else code or name or "Trader"
+    uname = getattr(user, "full_name", None) or ""
+    account_label = f"{code}: {uname}" if code and uname else code or uname or "Trader"
 
+    admin_brand = payload.get("admin_brand_name", "") or ""
     rng_from = payload.get("from_label", "Beginning")
     rng_to = payload.get("to_label", "Now")
     generated_at = payload.get("generated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    total_brokerage = float(payload.get("total_brokerage", 0))
 
-    # ── Header banner ──────────────────────────────────────────────
+    # ── Branded header ─────────────────────────────────────────────
+    brand_name = admin_brand or "MarginPlant Broker"
     header_data = [
         [
             Paragraph(
-                f"<font name='{_FONT_BOLD}' size='10' color='#2E7D32'>Tradebook</font>",
+                f"<font name='{_FONT_BOLD}' size='12' color='#2E7D32'>{brand_name}</font>",
                 styles["title"],
             ),
             Paragraph(
-                f"<font name='{_FONT_BOLD}' size='18' color='#1B5E20'>Trade Book</font>",
+                f"<font name='{_FONT_BOLD}' size='16' color='#1B5E20'>Trade Book</font>",
                 styles["title"],
             ),
-            Paragraph("", styles["title"]),
+            Paragraph(
+                f"<font size='8' color='#64748B'>Account Statement</font>",
+                styles["subtitle"],
+            ),
         ],
     ]
-    header_tbl = Table(header_data, colWidths=[40 * mm, 100 * mm, 40 * mm])
+    header_tbl = Table(header_data, colWidths=[page_w * 0.35, page_w * 0.35, page_w * 0.30])
     header_tbl.setStyle(TableStyle([
         ("ALIGN", (0, 0), (0, 0), "LEFT"),
         ("ALIGN", (1, 0), (1, 0), "CENTER"),
         ("ALIGN", (2, 0), (2, 0), "RIGHT"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("LINEBELOW", (0, 0), (-1, -1), 2, ARK_GREEN),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
     ]))
 
     meta_style = ParagraphStyle(
         "ark_meta", parent=styles["subtitle"],
-        fontName=_FONT_NAME, fontSize=9, textColor=TEXT, alignment=1,
+        fontName=_FONT_NAME, fontSize=8, textColor=TEXT, alignment=1,
     )
     elems: list = [
         header_tbl,
-        Spacer(1, 6),
-        Paragraph(f"Account Statement - {account_label}", meta_style),
-        Spacer(1, 2),
-        Paragraph(f"<b>From:</b> {rng_from}  <b>To:</b> {rng_to}", meta_style),
-        Paragraph(f"<b>Time:</b> {generated_at}", meta_style),
-        Spacer(1, 10),
+        Spacer(1, 4),
+        Paragraph(f"<b>{account_label}</b>", meta_style),
+        Paragraph(f"<b>From:</b> {rng_from}  <b>To:</b> {rng_to}  |  <b>Time:</b> {generated_at}", meta_style),
+        Spacer(1, 8),
     ]
 
-    # ── Helper: green-header table ─────────────────────────────────
+    # ── Helper: green-header table (6pt font, no wrapping) ─────────
     base_ss = getSampleStyleSheet()
 
-    def _ark_cell_style(bold: bool = False, size: int = 7) -> ParagraphStyle:
+    def _ark_cell_style(bold: bool = False, size: int = FONT_SZ, color=None) -> ParagraphStyle:
         return ParagraphStyle(
-            f"ark_{'th' if bold else 'td'}_{size}",
+            f"ark_{'th' if bold else 'td'}_{size}_{id(color)}",
             parent=base_ss["Normal"],
             fontName=_FONT_BOLD if bold else _FONT_NAME,
             fontSize=size, leading=size + 2,
-            textColor=WHITE if bold else TEXT,
+            textColor=color or (WHITE if bold else TEXT),
             wordWrap="CJK",
         )
 
@@ -595,17 +610,16 @@ def build_full_tradebook_pdf(user, payload: dict) -> bytes:
         col_widths: list[float],
         totals_row: list[str] | None = None,
     ) -> Table:
-        th = _ark_cell_style(bold=True, size=7)
-        td = _ark_cell_style(bold=False, size=7)
+        th = _ark_cell_style(bold=True, size=HDR_SZ)
+        td = _ark_cell_style(bold=False, size=FONT_SZ)
 
         data: list[list] = [[Paragraph(h, th) for h in headers]]
         for r in rows:
             data.append([Paragraph(str(c), td) for c in r])
 
         if totals_row:
-            td_bold = _ark_cell_style(bold=False, size=7)
-            td_bold.fontName = _FONT_BOLD
-            data.append([Paragraph(str(c), td_bold) for c in totals_row])
+            td_b = _ark_cell_style(bold=True, size=FONT_SZ, color=TEXT)
+            data.append([Paragraph(str(c), td_b) for c in totals_row])
 
         t = Table(data, colWidths=col_widths, hAlign="LEFT", repeatRows=1)
         style_cmds: list = [
@@ -613,36 +627,36 @@ def build_full_tradebook_pdf(user, payload: dict) -> bytes:
             ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
             ("ALIGN", (0, 0), (-1, -1), "LEFT"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("GRID", (0, 0), (-1, -1), 0.3, GRID),
-            ("LEFTPADDING", (0, 0), (-1, -1), 3),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("GRID", (0, 0), (-1, -1), 0.25, GRID),
+            ("LEFTPADDING", (0, 0), (-1, -1), 2),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
         ]
         for i in range(1, len(data)):
             if i % 2 == 0:
-                style_cmds.append(("BACKGROUND", (0, i), (-1, i), rl_colors.HexColor("#F5F5F5")))
+                style_cmds.append(("BACKGROUND", (0, i), (-1, i), rl_colors.HexColor("#FAFAFA")))
         if totals_row:
             last = len(data) - 1
             style_cmds.append(("BACKGROUND", (0, last), (-1, last), ARK_GREEN_SOFT))
-            style_cmds.append(("LINEABOVE", (0, last), (-1, last), 1, ARK_GREEN))
+            style_cmds.append(("LINEABOVE", (0, last), (-1, last), 0.75, ARK_GREEN))
         t.setStyle(TableStyle(style_cmds))
         return t
 
     # ── Section 1: Closed Transactions ─────────────────────────────
     closed = payload.get("closed_transactions", [])
     elems.append(Paragraph("<b>Closed Transactions</b>", styles["h2"]))
-    elems.append(Spacer(1, 4))
 
     ct_headers = [
-        "Time", "Type", "Ticket Id", "Script", "Amount",
-        "Type Detail", "Open Time", "Open Price", "Close Price",
+        "Time", "Type", "Ticket Id", "Script", "Amt",
+        "Side", "Open Time", "Open Price", "Close Price",
         "DP/WD/AJ", "Commission", "Open Com.", "Total PnL", "Comment",
     ]
+    # landscape A4 = ~277mm usable. 14 cols.
     ct_widths = [
-        16 * mm, 8 * mm, 14 * mm, 18 * mm, 10 * mm,
-        10 * mm, 16 * mm, 12 * mm, 12 * mm,
-        14 * mm, 13 * mm, 12 * mm, 14 * mm, 14 * mm,
+        20 * mm, 9 * mm, 16 * mm, 22 * mm, 11 * mm,
+        9 * mm, 20 * mm, 16 * mm, 16 * mm,
+        16 * mm, 16 * mm, 15 * mm, 16 * mm, 16 * mm,
     ]
 
     ct_rows: list[list[str]] = []
@@ -689,15 +703,15 @@ def build_full_tradebook_pdf(user, payload: dict) -> bytes:
         elems.append(_ark_table(ct_headers, ct_rows, ct_widths, totals_row))
     else:
         elems.append(Paragraph("No closed transactions in this period.", styles["subtitle"]))
-    elems.append(Spacer(1, 10))
+    elems.append(Spacer(1, 8))
 
-    # ── Section 2: Money Totals ────────────────────────────────────
+    # ── Section 2: Money Totals + Brokerage ────────────────────────
     money = payload.get("money_totals", {})
     elems.append(Paragraph("<b>Money Totals</b>", styles["h2"]))
-    elems.append(Spacer(1, 4))
 
-    money_headers = ["CreditIn", "CreditOut", "Deposit", "Withdraw", "Adjustment", "Bonus"]
-    money_widths = [30 * mm] * 6
+    money_headers = ["CreditIn", "CreditOut", "Deposit", "Withdraw", "Adjustment", "Bonus", "Total Brokerage"]
+    mw = page_w / 7
+    money_widths = [mw] * 7
     money_row = [
         f"{float(money.get('credit_in', 0)):,.2f}",
         f"{float(money.get('credit_out', 0)):,.2f}",
@@ -705,24 +719,24 @@ def build_full_tradebook_pdf(user, payload: dict) -> bytes:
         f"{float(money.get('withdraw', 0)):,.2f}",
         f"{float(money.get('adjustment', 0)):,.2f}",
         f"{float(money.get('bonus', 0)):,.2f}",
+        f"{total_brokerage:,.2f}",
     ]
     elems.append(_ark_table(money_headers, [money_row], money_widths))
-    elems.append(Spacer(1, 10))
+    elems.append(Spacer(1, 8))
 
     # ── Section 3: Opened Deals ────────────────────────────────────
     opened = payload.get("opened_deals", [])
     elems.append(Paragraph("<b>Opened Deals</b>", styles["h2"]))
-    elems.append(Spacer(1, 4))
 
     od_headers = [
-        "Ticket Id", "Time", "Type Detail", "Amount", "Script",
+        "Ticket Id", "Time", "Side", "Amt", "Script",
         "Price", "SL", "TP", "Current Price",
-        "Commission", "Total PnL", "Value", "Comment",
+        "Commission", "Total PnL", "Value",
     ]
     od_widths = [
-        14 * mm, 18 * mm, 12 * mm, 10 * mm, 18 * mm,
-        14 * mm, 12 * mm, 12 * mm, 14 * mm,
-        13 * mm, 14 * mm, 16 * mm, 14 * mm,
+        16 * mm, 22 * mm, 10 * mm, 12 * mm, 24 * mm,
+        18 * mm, 16 * mm, 16 * mm, 18 * mm,
+        16 * mm, 18 * mm, 22 * mm,
     ]
     od_rows: list[list[str]] = []
     od_total_amt = 0.0
@@ -751,26 +765,25 @@ def build_full_tradebook_pdf(user, payload: dict) -> bytes:
             f"{com:,.2f}",
             f"{pnl:,.2f}",
             f"{val:,.2f}",
-            d.get("comment", ""),
         ])
 
     od_totals = [
         "", "", "Totals", f"{od_total_amt:,.2f}", "", "", "", "", "",
-        f"{od_total_com:,.2f}", f"{od_total_pnl:,.2f}", f"{od_total_val:,.2f}", "",
+        f"{od_total_com:,.2f}", f"{od_total_pnl:,.2f}", f"{od_total_val:,.2f}",
     ]
     if od_rows:
         elems.append(_ark_table(od_headers, od_rows, od_widths, od_totals))
     else:
         elems.append(Paragraph("No open deals.", styles["subtitle"]))
-    elems.append(Spacer(1, 10))
+    elems.append(Spacer(1, 8))
 
     # ── Section 4: Pending Orders ──────────────────────────────────
     pending = payload.get("pending_orders", [])
     elems.append(Paragraph("<b>Pending Orders</b>", styles["h2"]))
-    elems.append(Spacer(1, 4))
 
-    po_headers = ["Order Id", "Type", "Type Detail", "Amount", "Script", "Price", "SL", "TP", "Time", "Comment"]
-    po_widths = [16 * mm, 12 * mm, 14 * mm, 12 * mm, 22 * mm, 16 * mm, 14 * mm, 14 * mm, 24 * mm, 16 * mm]
+    po_headers = ["Order Id", "Type", "Side", "Amt", "Script", "Price", "SL", "TP", "Time"]
+    pw = page_w / 9
+    po_widths = [pw] * 9
     po_rows: list[list[str]] = []
     for o in pending:
         po_rows.append([
@@ -783,18 +796,16 @@ def build_full_tradebook_pdf(user, payload: dict) -> bytes:
             str(o.get("sl", "")),
             str(o.get("tp", "")),
             o.get("time", ""),
-            o.get("comment", ""),
         ])
     if po_rows:
         elems.append(_ark_table(po_headers, po_rows, po_widths))
     else:
         elems.append(Paragraph("No pending orders.", styles["subtitle"]))
-    elems.append(Spacer(1, 10))
+    elems.append(Spacer(1, 8))
 
     # ── Section 5: Financial Standings ─────────────────────────────
     fin = payload.get("financial", {})
     elems.append(Paragraph("<b>Financial Standings</b>", styles["h2"]))
-    elems.append(Spacer(1, 4))
 
     fin_items = [
         ("Balance", f"{_rupee()}{float(fin.get('balance', 0)):,.2f}"),
@@ -805,44 +816,46 @@ def build_full_tradebook_pdf(user, payload: dict) -> bytes:
         ("Holding Margin", f"{_rupee()}{float(fin.get('holding_margin', 0)):,.2f}"),
         ("Free Margin", f"{_rupee()}{float(fin.get('free_margin', 0)):,.2f}"),
         ("Margin Level", fin.get("margin_level", "0.00%")),
+        ("Brokerage Paid", f"{_rupee()}{total_brokerage:,.2f}"),
     ]
 
-    fin_data: list[list] = []
-    fin_row: list = []
     td_fin = ParagraphStyle(
         "ark_fin", parent=base_ss["Normal"],
-        fontName=_FONT_NAME, fontSize=9, leading=12, textColor=TEXT,
+        fontName=_FONT_NAME, fontSize=8, leading=11, textColor=TEXT,
     )
+    fin_data: list[list] = []
+    fin_row: list = []
     for label, value in fin_items:
         cell = Paragraph(
-            f"<font color='#64748B' size='8'><b>{label}</b></font><br/>"
-            f"<font name='{_FONT_BOLD}' size='11'>{value}</font>",
+            f"<font color='#64748B' size='7'><b>{label}</b></font><br/>"
+            f"<font name='{_FONT_BOLD}' size='10'>{value}</font>",
             td_fin,
         )
         fin_row.append(cell)
-        if len(fin_row) == 4:
+        if len(fin_row) == 5:
             fin_data.append(fin_row)
             fin_row = []
     if fin_row:
-        while len(fin_row) < 4:
+        while len(fin_row) < 5:
             fin_row.append(Paragraph("", td_fin))
         fin_data.append(fin_row)
 
-    fin_tbl = Table(fin_data, colWidths=[45 * mm] * 4)
+    cw = page_w / 5
+    fin_tbl = Table(fin_data, colWidths=[cw] * 5)
     fin_tbl.setStyle(TableStyle([
         ("LEFTPADDING", (0, 0), (-1, -1), 4),
         ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
         ("BOX", (0, 0), (-1, -1), 0.5, ARK_GREEN),
-        ("INNERGRID", (0, 0), (-1, -1), 0.3, GRID),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, GRID),
         ("BACKGROUND", (0, 0), (-1, -1), ARK_GREEN_SOFT),
     ]))
     elems.append(fin_tbl)
 
-    elems.append(Spacer(1, 14))
+    elems.append(Spacer(1, 10))
     elems.append(Paragraph(
-        f"Generated on {datetime.now().strftime('%d %b %Y, %H:%M IST')}",
+        f"{brand_name}  |  Generated on {datetime.now().strftime('%d %b %Y, %H:%M IST')}",
         styles["footer"],
     ))
     doc.build(elems)
