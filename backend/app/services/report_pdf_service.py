@@ -650,23 +650,20 @@ def build_full_tradebook_pdf(user, payload: dict) -> bytes:
     ct_headers = [
         "Time", "Type", "Ticket Id", "Script", "Amt",
         "Side", "Open Price", "Close Price",
-        "DP/WD/AJ", "Brokerage", "Commission", "Total PnL",
+        "DP/WD/AJ", "Brokerage", "Total PnL",
     ]
-    # 12 cols, proportional to page_w — fills entire page
-    _ct = [8, 3.5, 7, 9, 4, 3.5, 7, 7, 7, 6, 6, 7]
+    # 11 cols, proportional to page_w — fills entire page
+    _ct = [8, 3.5, 7, 9, 4, 3.5, 7, 7, 7, 6, 7]
     _ct_sum = sum(_ct)
     ct_widths = [page_w * w / _ct_sum for w in _ct]
 
     ct_rows: list[list[str]] = []
     total_brokerage_col = 0.0
-    total_commission = 0.0
     total_pnl = 0.0
     for tx in closed:
         brokerage = float(tx.get("brokerage") or 0)
-        commission = float(tx.get("commission") or 0)
         pnl = float(tx.get("total_pnl") or 0)
         total_brokerage_col += brokerage
-        total_commission += commission
         total_pnl += pnl
 
         pnl_str = f"{pnl:,.2f}" if pnl else ""
@@ -685,13 +682,12 @@ def build_full_tradebook_pdf(user, payload: dict) -> bytes:
             tx.get("close_price", ""),
             str(dp_wd),
             f"{brokerage:,.2f}" if brokerage else "0.00",
-            f"{commission:,.2f}" if commission else "0.00",
             pnl_str,
         ])
 
     totals_row = [
         "", "", "", "", "Totals", "", "", "",
-        "", f"{total_brokerage_col:,.2f}", f"{total_commission:,.2f}",
+        "", f"{total_brokerage_col:,.2f}",
         f"{total_pnl:,.2f}",
     ]
 
