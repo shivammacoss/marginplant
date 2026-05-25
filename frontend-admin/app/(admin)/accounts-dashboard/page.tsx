@@ -8,7 +8,7 @@ import {
 } from "recharts";
 import {
   ArrowDownRight, ArrowUpRight, BarChart3, Briefcase, Calendar,
-  ChevronRight, Crown, DollarSign, Filter, Loader2, PieChartIcon,
+  ChevronRight, Crown, DollarSign, Download, Filter, Loader2, PieChartIcon,
   RefreshCw, TrendingUp, Trophy, UserPlus, Users, X,
 } from "lucide-react";
 import { AccountsAPI, type AccountEntity, type AccountsSummary } from "@/lib/api";
@@ -50,6 +50,36 @@ const BROKER_TABS: TabDef[] = [
   { value: "sub_brokers", label: "Sub-Brokers", icon: <UserPlus className="size-3.5" /> },
 ];
 
+function downloadCSV(entities: AccountEntity[], grandTotal?: AccountEntity) {
+  const rows = grandTotal ? [{ ...grandTotal, name: "GRAND TOTAL", role: "TOTAL" }, ...entities] : entities;
+  if (!rows.length) return;
+  const headers = [
+    "Name", "Role", "Users", "Deposits", "Withdrawals", "Net Deposit",
+    "Realized P&L", "Unrealized P&L", "Net P&L", "Brokerage",
+    "Total Trades", "Profit Trades", "Loss Trades", "Win Rate %",
+    "Volume", "Balance", "Equity", "Open Positions", "Settlement",
+  ];
+  const csvRows = [
+    headers.join(","),
+    ...rows.map((e) =>
+      [
+        `"${e.name || ""}"`, e.role, e.user_count, e.deposits, e.withdrawals,
+        e.net_deposit, e.realized_pnl, e.unrealized_pnl, e.net_pnl,
+        e.brokerage, e.total_trades, e.profit_trades, e.loss_trades,
+        e.win_rate, e.volume, e.balance, e.equity, e.open_positions,
+        e.settlement_outstanding,
+      ].join(",")
+    ),
+  ];
+  const blob = new Blob([csvRows.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `accounts_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export default function AccountsDashboardPage() {
   const admin = useAdminAuthStore((s) => s.admin);
   const role = admin?.role;
@@ -57,7 +87,9 @@ export default function AccountsDashboardPage() {
     : role === "BROKER" ? BROKER_TABS
     : ADMIN_TABS;
 
-  const [scope, setScope] = useState("all_users");
+  const [scope, setScope] = useState(
+    role === "SUPER_ADMIN" ? "admins" : role === "BROKER" ? "all_users" : "brokers"
+  );
   const [preset, setPreset] = useState<string>("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
@@ -90,14 +122,24 @@ export default function AccountsDashboardPage() {
         title="Accounts Dashboard"
         description="Financial overview across all pools"
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => refetch()}
-            disabled={isFetching}
-          >
-            <RefreshCw className={`size-4 ${isFetching ? "animate-spin" : ""}`} />
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => downloadCSV(entities, data?.grand_total)}
+              disabled={!data}
+            >
+              <Download className="size-4 mr-1" /> CSV
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => refetch()}
+              disabled={isFetching}
+            >
+              <RefreshCw className={`size-4 ${isFetching ? "animate-spin" : ""}`} />
+            </Button>
+          </div>
         }
       />
 
@@ -216,8 +258,8 @@ export default function AccountsDashboardPage() {
         </div>
       )}
 
-      {/* ── Charts Row ───────────────────────────────────────── */}
-      {gt && (
+      {/* ── Charts Row (only when entities exist) ────────────── */}
+      {gt && entities.length > 0 && (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           {/* Deposits vs Withdrawals Bar */}
           <ChartCard title="Deposits vs Withdrawals" icon={<BarChart3 className="size-4" />}>
