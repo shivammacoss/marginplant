@@ -70,22 +70,29 @@ export async function GET(req: NextRequest) {
       const name = brand.brand_name?.trim() || PLATFORM_DEFAULT.name;
       const shortName = (brand.brand_name?.trim() || PLATFORM_DEFAULT.short_name).slice(0, 12);
       const logo = brand.logo_url ? `${API_BASE}${brand.logo_url}` : null;
-      // CRITICAL: Chrome requires at least one SAME-ORIGIN icon for PWA
-      // installability. Branded logos are cross-origin (served from
-      // api.marginplant.com) — if we ONLY include those, Chrome blocks
-      // the install on custom domains (stockcafe.live ≠ api.marginplant.com).
-      // Fix: ALWAYS include the local platform icons first (same-origin,
-      // guaranteed installable), then append the branded logo as an extra
-      // icon for the OS launcher to pick up if it supports cross-origin.
+      // Chrome requires at least one same-origin icon for installability.
+      // Branded logos live on api.marginplant.com (cross-origin). We keep
+      // platform icons as fallback but put the branded icon FIRST so the
+      // OS launcher picks the admin's logo, not the platform default.
+      //
+      // `id` field: Chrome uses manifest `id` to distinguish PWAs on the
+      // same origin. Without it, installing admin-A's PWA replaces
+      // admin-B's because Chrome sees them as the same app. With a
+      // unique `id` per admin, both can coexist on the same phone.
       const brandedIcons = logo
-        ? [{ src: logo, sizes: "512x512", type: "image/png", purpose: "any" }]
+        ? [
+            { src: logo, sizes: "512x512", type: "image/png", purpose: "any" },
+            { src: logo, sizes: "192x192", type: "image/png", purpose: "any" },
+          ]
         : [];
       manifest = {
         ...PLATFORM_DEFAULT,
+        id: `/?brand=${encodeURIComponent(userCode)}`,
+        start_url: `/?ref=${encodeURIComponent(userCode)}`,
         name,
         short_name: shortName,
         description: `${name} — trade Indian markets`,
-        icons: [...PLATFORM_DEFAULT.icons, ...brandedIcons],
+        icons: [...brandedIcons, ...PLATFORM_DEFAULT.icons],
       };
     }
   }
