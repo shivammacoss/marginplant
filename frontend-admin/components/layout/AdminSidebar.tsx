@@ -9,6 +9,7 @@ import {
   ClipboardList,
   Cog,
   DatabaseBackup,
+  FileText,
   Layers,
   History,
   Home,
@@ -95,6 +96,7 @@ const groups: { title: string; items: NavItem[] }[] = [
       { href: "/reports/users", label: "User reports", icon: Users, perm: "reports" },
       { href: "/reports/financial", label: "Financial", icon: Banknote, perm: "reports" },
       { href: "/reports/trades", label: "Trades", icon: ClipboardList, perm: "reports" },
+      { href: "/reports/tradebook", label: "Tradebook PDF", icon: FileText, perm: "reports" },
     ],
   },
   {

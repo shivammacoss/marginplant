@@ -465,6 +465,20 @@ export const ReportsAdminAPI = {
   financial: () => unwrap<any>(api.get("/admin/reports/financial")),
   trades: () => unwrap<any>(api.get("/admin/reports/trades")),
   compliance: () => unwrap<any>(api.get("/admin/reports/compliance")),
+  tradebookPdf: async (
+    userId: string,
+    fromDate?: string,
+    toDate?: string,
+  ): Promise<Blob> => {
+    const params: Record<string, string> = { user_id: userId };
+    if (fromDate) params.from_date = fromDate;
+    if (toDate) params.to_date = toDate;
+    const res = await api.get("/admin/reports/tradebook/pdf", {
+      params,
+      responseType: "blob",
+    });
+    return res.data;
+  },
 };
 
 export const ZerodhaAPI = {
