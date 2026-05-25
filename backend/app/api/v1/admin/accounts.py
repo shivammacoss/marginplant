@@ -1,24 +1,12 @@
-"""Accounts Dashboard — per-admin/per-broker aggregated financial summary.
+"""Accounts Dashboard — per-admin/per-broker/per-sub-broker financial summary.
 
-Super-admin sees every admin's pool as a single aggregated card.
-Admin sees their brokers' pools + their direct users.
-All numbers are verified-correct per the calculation spec:
+Scope parameter controls grouping:
+  all_users    → grand total only (one card, fastest)
+  admins       → per-admin breakdown (super-admin only)
+  brokers      → per-broker breakdown
+  sub_brokers  → per-sub-broker breakdown
 
-  Deposits     → WalletTransaction type=DEPOSIT (date-filtered)
-                 OR wallet.total_deposits (lifetime)
-  Withdrawals  → WalletTransaction type=WITHDRAWAL (date-filtered)
-                 OR wallet.total_withdrawals (lifetime)
-  Realized P&L → Position.realized_pnl (CLOSED, closed_at in range)
-                 Already NET of brokerage, already INR for USD segments.
-  Brokerage    → Trade.brokerage (date-filtered by executed_at)
-  Trade counts → Trade.pnl_inr (only set on closing trades)
-                 > 0 = win, < 0 = loss. Always INR.
-  Volume       → Trade.value (qty × price)
-  Balance      → wallet.available_balance + wallet.used_margin (current)
-  Equity       → Balance + Σ unrealized_pnl on OPEN positions (current)
-
-Week calculation: Mon 00:00 IST to Sun 23:59:59 IST (ISO week).
-All IST dates converted to UTC before MongoDB queries.
+All calculations verified per spec — see docstring at module top.
 """
 
 from __future__ import annotations
@@ -45,7 +33,6 @@ router = APIRouter(prefix="/accounts", tags=["admin-accounts"])
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# Precomputed week/month boundaries for the "Select Week" dropdown.
 _WEEK_PRESETS = {
     "current_week": lambda now: (
         (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0),
@@ -65,16 +52,16 @@ _WEEK_PRESETS = {
     ),
 }
 
+TRADING_ROLES = [UserRole.CLIENT.value, UserRole.DEALER.value, UserRole.MASTER.value]
+
 
 def _to_utc(dt_ist: datetime) -> datetime:
-    """Convert an IST-aware datetime to UTC for MongoDB queries."""
     if dt_ist.tzinfo is None:
         dt_ist = dt_ist.replace(tzinfo=IST)
     return dt_ist.astimezone(timezone.utc)
 
 
 def _d(val: Any) -> float:
-    """Safely convert Decimal128 / str / None to float."""
     if val is None:
         return 0.0
     try:
@@ -89,64 +76,45 @@ async def _aggregate_for_users(
     start_utc: datetime | None = None,
     end_utc: datetime | None = None,
 ) -> dict[str, Any]:
-    """Compute the full financial aggregate for a set of user IDs.
-
-    When start_utc/end_utc are None → lifetime totals from Wallet
-    (pre-aggregated, fast). When provided → date-filtered queries
-    against WalletTransaction / Position / Trade collections.
-    """
     if not user_ids:
-        return _empty_aggregate()
+        return _empty()
 
     is_lifetime = start_utc is None and end_utc is None
 
-    # ── Current state (always live, no date filter) ──────────────
     wallets = await Wallet.find({"user_id": {"$in": user_ids}}).to_list()
-    wallet_map = {str(w.user_id): w for w in wallets}
 
-    total_balance = 0.0
-    total_used_margin = 0.0
-    for w in wallets:
-        total_balance += _d(w.available_balance) + _d(w.used_margin)
-        total_used_margin += _d(w.used_margin)
+    total_balance = sum(_d(w.available_balance) + _d(w.used_margin) for w in wallets)
+    total_used_margin = sum(_d(w.used_margin) for w in wallets)
 
-    # Unrealized P&L from OPEN positions
     open_positions = await Position.find(
         {"user_id": {"$in": user_ids}, "status": PositionStatus.OPEN.value}
     ).to_list()
     total_unrealized = sum(_d(p.unrealized_pnl) for p in open_positions)
     open_count = len(open_positions)
-
     total_equity = total_balance + total_unrealized
     total_settlement = sum(_d(w.settlement_outstanding) for w in wallets)
 
     if is_lifetime:
-        # ── Lifetime from pre-aggregated Wallet fields (fast) ────
         deposits = sum(_d(w.total_deposits) for w in wallets)
         withdrawals = sum(_d(w.total_withdrawals) for w in wallets)
         brokerage = sum(_d(w.total_brokerage) for w in wallets)
         realized_pnl = sum(_d(w.realized_pnl) for w in wallets)
 
-        # Trade counts — need DB query even for lifetime
-        trade_filter: dict[str, Any] = {
+        all_closing_trades = await Trade.find({
             "user_id": {"$in": user_ids},
             "pnl_inr": {"$ne": None},
-        }
-        all_closing_trades = await Trade.find(trade_filter).to_list()
+        }).to_list()
         total_trades = len(all_closing_trades)
         profit_trades = sum(1 for t in all_closing_trades if _d(t.pnl_inr) > 0)
         loss_trades = sum(1 for t in all_closing_trades if _d(t.pnl_inr) < 0)
         volume = sum(_d(t.value) for t in all_closing_trades)
-
     else:
-        # ── Date-filtered queries ────────────────────────────────
         date_filter = {}
         if start_utc:
             date_filter["$gte"] = start_utc
         if end_utc:
             date_filter["$lte"] = end_utc
 
-        # Deposits
         dep_txns = await WalletTransaction.find({
             "user_id": {"$in": user_ids},
             "transaction_type": TransactionType.DEPOSIT.value,
@@ -154,7 +122,6 @@ async def _aggregate_for_users(
         }).to_list()
         deposits = sum(_d(t.amount) for t in dep_txns)
 
-        # Withdrawals (stored as negative, take abs)
         wd_txns = await WalletTransaction.find({
             "user_id": {"$in": user_ids},
             "transaction_type": TransactionType.WITHDRAWAL.value,
@@ -162,7 +129,6 @@ async def _aggregate_for_users(
         }).to_list()
         withdrawals = sum(abs(_d(t.amount)) for t in wd_txns)
 
-        # Realized P&L from CLOSED positions in date range
         closed_positions = await Position.find({
             "user_id": {"$in": user_ids},
             "status": PositionStatus.CLOSED.value,
@@ -170,7 +136,6 @@ async def _aggregate_for_users(
         }).to_list()
         realized_pnl = sum(_d(p.realized_pnl) for p in closed_positions)
 
-        # Trades in date range
         closing_trades = await Trade.find({
             "user_id": {"$in": user_ids},
             "pnl_inr": {"$ne": None},
@@ -180,13 +145,12 @@ async def _aggregate_for_users(
         profit_trades = sum(1 for t in closing_trades if _d(t.pnl_inr) > 0)
         loss_trades = sum(1 for t in closing_trades if _d(t.pnl_inr) < 0)
 
-        # Brokerage from trades in date range
-        all_trades_in_range = await Trade.find({
+        all_trades = await Trade.find({
             "user_id": {"$in": user_ids},
             "executed_at": date_filter,
         }).to_list()
-        brokerage = sum(_d(t.brokerage) for t in all_trades_in_range)
-        volume = sum(_d(t.value) for t in all_trades_in_range)
+        brokerage = sum(_d(t.brokerage) for t in all_trades)
+        volume = sum(_d(t.value) for t in all_trades)
 
     net_deposit = deposits - withdrawals
     win_rate = round((profit_trades / total_trades) * 100, 1) if total_trades > 0 else 0.0
@@ -213,7 +177,7 @@ async def _aggregate_for_users(
     }
 
 
-def _empty_aggregate() -> dict[str, Any]:
+def _empty() -> dict[str, Any]:
     return {
         "deposits": 0, "withdrawals": 0, "net_deposit": 0,
         "realized_pnl": 0, "unrealized_pnl": 0, "net_pnl": 0,
@@ -224,25 +188,38 @@ def _empty_aggregate() -> dict[str, Any]:
     }
 
 
+async def _make_entity(
+    entity_user: User,
+    pool_ids: list[PydanticObjectId],
+    role_label: str,
+    start_utc: datetime | None,
+    end_utc: datetime | None,
+    **extra: Any,
+) -> dict[str, Any]:
+    agg = await _aggregate_for_users(pool_ids, start_utc=start_utc, end_utc=end_utc)
+    return {
+        "id": str(entity_user.id),
+        "name": entity_user.full_name or entity_user.user_code or role_label,
+        "user_code": entity_user.user_code,
+        "role": role_label,
+        **extra,
+        **agg,
+    }
+
+
 @router.get("/summary")
 async def accounts_summary(
     admin: CurrentAdmin,
-    from_date: str | None = Query(default=None, description="YYYY-MM-DD IST"),
-    to_date: str | None = Query(default=None, description="YYYY-MM-DD IST"),
-    preset: str | None = Query(default=None, description="current_week|last_week|this_month|last_month"),
+    scope: str = Query(default="all_users", description="all_users|admins|brokers|sub_brokers"),
+    from_date: str | None = Query(default=None),
+    to_date: str | None = Query(default=None),
+    preset: str | None = Query(default=None),
     _: None = Depends(require_perm("users", "read")),
 ) -> APIResponse:
-    """Aggregated financial summary grouped by admin/pool.
-
-    Super-admin: one entity per admin + one for super-admin's direct users.
-    Admin: one entity per broker + one for direct (no-broker) users.
-    """
     now_ist = datetime.now(IST)
 
-    # ── Parse date range ─────────────────────────────────────────
     start_utc: datetime | None = None
     end_utc: datetime | None = None
-
     if preset and preset in _WEEK_PRESETS:
         s, e = _WEEK_PRESETS[preset](now_ist)
         start_utc = _to_utc(s)
@@ -250,152 +227,98 @@ async def accounts_summary(
     elif from_date or to_date:
         try:
             if from_date:
-                s = datetime.strptime(from_date, "%Y-%m-%d").replace(tzinfo=IST)
-                start_utc = _to_utc(s)
+                start_utc = _to_utc(datetime.strptime(from_date, "%Y-%m-%d").replace(tzinfo=IST))
             if to_date:
-                e = datetime.strptime(to_date, "%Y-%m-%d").replace(
-                    hour=23, minute=59, second=59, tzinfo=IST
-                )
-                end_utc = _to_utc(e)
+                end_utc = _to_utc(datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=IST))
         except ValueError:
             pass
 
-    # ── Build entity list based on admin's role ──────────────────
     entities: list[dict[str, Any]] = []
-    trading_roles = [UserRole.CLIENT.value, UserRole.DEALER.value, UserRole.MASTER.value]
+    admin_scope = scoped_admin_filter(admin)
 
+    # Collect ALL user ids in scope for grand total
+    all_scope_query: dict[str, Any] = {
+        "role": {"$in": TRADING_ROLES},
+        "status": {"$ne": UserStatus.CLOSED.value},
+    }
     if admin.role == UserRole.SUPER_ADMIN:
-        # 1. Super-admin's direct users (assigned_admin_id is None)
-        direct_users = await User.find({
-            "assigned_admin_id": None,
-            "role": {"$in": trading_roles},
-            "status": {"$ne": UserStatus.CLOSED.value},
-        }).to_list()
-        if direct_users:
-            direct_ids = [u.id for u in direct_users]
-            agg = await _aggregate_for_users(direct_ids, start_utc=start_utc, end_utc=end_utc)
-            entities.append({
-                "id": str(admin.id),
-                "name": "Direct Users",
-                "role": "SUPER_ADMIN_DIRECT",
-                **agg,
-            })
+        all_users = await User.find(all_scope_query).to_list()
+    else:
+        all_users = await User.find({**all_scope_query, **admin_scope}).to_list()
 
-        # 2. One entity per admin
-        all_admins = await User.find({
+    all_ids = [u.id for u in all_users]
+    grand_total = await _aggregate_for_users(all_ids, start_utc=start_utc, end_utc=end_utc)
+
+    if scope == "all_users":
+        # Just grand total — no entity breakdown
+        pass
+
+    elif scope == "admins" and admin.role == UserRole.SUPER_ADMIN:
+        # Super-admin's direct users
+        direct = [u for u in all_users if u.assigned_admin_id is None]
+        if direct:
+            agg = await _aggregate_for_users([u.id for u in direct], start_utc=start_utc, end_utc=end_utc)
+            entities.append({"id": str(admin.id), "name": "Direct Users", "role": "DIRECT", **agg})
+
+        # Per admin
+        admins = await User.find({
             "role": UserRole.ADMIN.value,
             "status": {"$ne": UserStatus.CLOSED.value},
         }).to_list()
 
-        async def _admin_entity(adm: User) -> dict[str, Any]:
-            pool_users = await User.find({
-                "assigned_admin_id": adm.id,
-                "role": {"$in": trading_roles},
-                "status": {"$ne": UserStatus.CLOSED.value},
-            }).to_list()
-            pool_ids = [u.id for u in pool_users]
-            # Count brokers under this admin
-            broker_count = await User.find({
-                "assigned_admin_id": adm.id,
-                "role": UserRole.BROKER.value,
-            }).count()
-            agg = await _aggregate_for_users(pool_ids, start_utc=start_utc, end_utc=end_utc)
-            return {
-                "id": str(adm.id),
-                "name": adm.full_name or adm.user_code or "Admin",
-                "user_code": adm.user_code,
-                "role": "ADMIN",
-                "broker_count": broker_count,
-                **agg,
-            }
+        async def _do_admin(adm: User) -> dict[str, Any]:
+            pool = [u.id for u in all_users if u.assigned_admin_id == adm.id]
+            broker_count = sum(1 for u in await User.find({"assigned_admin_id": adm.id, "role": UserRole.BROKER.value}).to_list())
+            return await _make_entity(adm, pool, "ADMIN", start_utc, end_utc, broker_count=broker_count)
 
-        admin_results = await asyncio.gather(
-            *[_admin_entity(a) for a in all_admins],
-            return_exceptions=True,
-        )
-        for r in admin_results:
-            if isinstance(r, dict):
-                entities.append(r)
+        results = await asyncio.gather(*[_do_admin(a) for a in admins], return_exceptions=True)
+        entities.extend(r for r in results if isinstance(r, dict))
 
-    else:
-        # Admin view: one entity per broker + direct users
-        scope = scoped_admin_filter(admin)
-
-        # Direct users (no broker)
-        direct_query = {
-            **scope,
-            "role": {"$in": trading_roles},
-            "status": {"$ne": UserStatus.CLOSED.value},
-            "assigned_broker_id": None,
-        }
-        direct_users = await User.find(direct_query).to_list()
-        if direct_users:
-            direct_ids = [u.id for u in direct_users]
-            agg = await _aggregate_for_users(direct_ids, start_utc=start_utc, end_utc=end_utc)
-            entities.append({
-                "id": str(admin.id),
-                "name": "Direct Users",
-                "role": "DIRECT",
-                **agg,
-            })
-
-        # Per-broker entities
-        brokers = await User.find({
-            **scope,
+    elif scope == "brokers":
+        # Per-broker (works for both super-admin and admin)
+        broker_query: dict[str, Any] = {
             "role": UserRole.BROKER.value,
             "status": {"$ne": UserStatus.CLOSED.value},
-        }).to_list()
+        }
+        if admin.role != UserRole.SUPER_ADMIN:
+            broker_query.update(admin_scope)
+        brokers = await User.find(broker_query).to_list()
 
-        async def _broker_entity(broker: User) -> dict[str, Any]:
-            broker_users = await User.find({
-                "assigned_broker_id": broker.id,
-                "role": {"$in": trading_roles},
-                "status": {"$ne": UserStatus.CLOSED.value},
-            }).to_list()
-            pool_ids = [u.id for u in broker_users]
-            agg = await _aggregate_for_users(pool_ids, start_utc=start_utc, end_utc=end_utc)
-            return {
-                "id": str(broker.id),
-                "name": broker.full_name or broker.user_code or "Broker",
-                "user_code": broker.user_code,
-                "role": "BROKER",
-                **agg,
-            }
+        # Direct users (no broker)
+        direct = [u for u in all_users if u.assigned_broker_id is None]
+        if direct:
+            agg = await _aggregate_for_users([u.id for u in direct], start_utc=start_utc, end_utc=end_utc)
+            entities.append({"id": "direct", "name": "Direct Users (No Broker)", "role": "DIRECT", **agg})
 
-        broker_results = await asyncio.gather(
-            *[_broker_entity(b) for b in brokers],
-            return_exceptions=True,
-        )
-        for r in broker_results:
-            if isinstance(r, dict):
-                entities.append(r)
+        async def _do_broker(b: User) -> dict[str, Any]:
+            pool = [u.id for u in all_users if u.assigned_broker_id == b.id]
+            return await _make_entity(b, pool, "BROKER", start_utc, end_utc)
 
-    # ── Grand total (all entities combined) ──────────────────────
-    all_user_ids: list[PydanticObjectId] = []
-    scope_filter = scoped_admin_filter(admin)
-    all_scoped = await User.find({
-        **scope_filter,
-        "role": {"$in": trading_roles},
-        "status": {"$ne": UserStatus.CLOSED.value},
-    }).to_list()
-    # For super-admin, also include direct users
-    if admin.role == UserRole.SUPER_ADMIN:
-        direct = await User.find({
-            "assigned_admin_id": None,
-            "role": {"$in": trading_roles},
+        results = await asyncio.gather(*[_do_broker(b) for b in brokers], return_exceptions=True)
+        entities.extend(r for r in results if isinstance(r, dict))
+
+    elif scope == "sub_brokers":
+        # Sub-brokers = BROKER users who themselves have a parent broker
+        sub_query: dict[str, Any] = {
+            "role": UserRole.BROKER.value,
             "status": {"$ne": UserStatus.CLOSED.value},
-        }).to_list()
-        all_user_ids = [u.id for u in all_scoped] + [u.id for u in direct]
-    else:
-        all_user_ids = [u.id for u in all_scoped]
+            "assigned_broker_id": {"$ne": None},
+        }
+        if admin.role != UserRole.SUPER_ADMIN:
+            sub_query.update(admin_scope)
+        sub_brokers = await User.find(sub_query).to_list()
 
-    grand_total = await _aggregate_for_users(
-        list(set(all_user_ids)), start_utc=start_utc, end_utc=end_utc
-    )
+        async def _do_sub(sb: User) -> dict[str, Any]:
+            pool = [u.id for u in all_users if u.assigned_broker_id == sb.id]
+            return await _make_entity(sb, pool, "SUB_BROKER", start_utc, end_utc)
+
+        results = await asyncio.gather(*[_do_sub(sb) for sb in sub_brokers], return_exceptions=True)
+        entities.extend(r for r in results if isinstance(r, dict))
 
     return APIResponse(data={
         "entities": entities,
         "grand_total": grand_total,
+        "scope": scope,
         "filter": {
             "from_date": from_date,
             "to_date": to_date,

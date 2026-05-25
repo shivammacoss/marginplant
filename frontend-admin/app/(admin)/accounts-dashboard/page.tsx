@@ -7,14 +7,15 @@ import {
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from "recharts";
 import {
-  ArrowDownRight, ArrowUpRight, BarChart3, Calendar,
-  ChevronRight, DollarSign, Filter, Loader2, PieChartIcon,
-  RefreshCw, TrendingUp, Trophy, Users, X,
+  ArrowDownRight, ArrowUpRight, BarChart3, Briefcase, Calendar,
+  ChevronRight, Crown, DollarSign, Filter, Loader2, PieChartIcon,
+  RefreshCw, TrendingUp, Trophy, UserPlus, Users, X,
 } from "lucide-react";
 import { AccountsAPI, type AccountEntity, type AccountsSummary } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/common/PageHeader";
+import { useAdminAuthStore } from "@/stores/authStore";
 
 const PRESETS = [
   { value: "", label: "All time" },
@@ -30,16 +31,43 @@ const CHART_BLUE = "#3b82f6";
 const CHART_YELLOW = "#f59e0b";
 const CHART_MUTED = "#6b7280";
 
+// Role-based tab config. Each role sees different scope tabs.
+type TabDef = { value: string; label: string; icon: React.ReactNode };
+
+const SUPER_ADMIN_TABS: TabDef[] = [
+  { value: "all_users", label: "All Users", icon: <Users className="size-3.5" /> },
+  { value: "admins", label: "Admins", icon: <Crown className="size-3.5" /> },
+  { value: "brokers", label: "Brokers", icon: <Briefcase className="size-3.5" /> },
+  { value: "sub_brokers", label: "Sub-Brokers", icon: <UserPlus className="size-3.5" /> },
+];
+const ADMIN_TABS: TabDef[] = [
+  { value: "all_users", label: "All Users", icon: <Users className="size-3.5" /> },
+  { value: "brokers", label: "Brokers", icon: <Briefcase className="size-3.5" /> },
+  { value: "sub_brokers", label: "Sub-Brokers", icon: <UserPlus className="size-3.5" /> },
+];
+const BROKER_TABS: TabDef[] = [
+  { value: "all_users", label: "All Users", icon: <Users className="size-3.5" /> },
+  { value: "sub_brokers", label: "Sub-Brokers", icon: <UserPlus className="size-3.5" /> },
+];
+
 export default function AccountsDashboardPage() {
+  const admin = useAdminAuthStore((s) => s.admin);
+  const role = admin?.role;
+  const tabs = role === "SUPER_ADMIN" ? SUPER_ADMIN_TABS
+    : role === "BROKER" ? BROKER_TABS
+    : ADMIN_TABS;
+
+  const [scope, setScope] = useState("all_users");
   const [preset, setPreset] = useState<string>("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [search, setSearch] = useState("");
 
   const { data, isFetching, refetch } = useQuery<AccountsSummary>({
-    queryKey: ["admin", "accounts", "summary", preset, fromDate, toDate],
+    queryKey: ["admin", "accounts", "summary", scope, preset, fromDate, toDate],
     queryFn: () =>
       AccountsAPI.summary({
+        scope,
         preset: preset || undefined,
         from_date: fromDate || undefined,
         to_date: toDate || undefined,
@@ -72,6 +100,24 @@ export default function AccountsDashboardPage() {
           </Button>
         }
       />
+
+      {/* ── Scope Tabs ──────────────────────────────────────── */}
+      <div className="flex gap-1.5">
+        {tabs.map((t) => (
+          <button
+            key={t.value}
+            onClick={() => setScope(t.value)}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-semibold transition-colors ${
+              scope === t.value
+                ? "bg-primary text-primary-foreground shadow-sm"
+                : "bg-card/60 text-muted-foreground hover:bg-card hover:text-foreground border border-border/60"
+            }`}
+          >
+            {t.icon}
+            {t.label}
+          </button>
+        ))}
+      </div>
 
       {/* ── Filters ──────────────────────────────────────────── */}
       <div className="flex flex-wrap items-end gap-3 rounded-lg border border-border/60 bg-card/40 p-4">

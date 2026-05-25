@@ -845,6 +845,7 @@ export type AccountsSummary = {
 
 export const AccountsAPI = {
   summary: (params?: {
+    scope?: string;
     from_date?: string;
     to_date?: string;
     preset?: string;
