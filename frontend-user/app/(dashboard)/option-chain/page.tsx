@@ -53,7 +53,7 @@ export default function OptionChainPage() {
   const { data, isFetching } = useQuery({
     queryKey: ["option-chain", underlying, expiry],
     queryFn: () => OptionChainAPI.fetch(underlying, expiry),
-    refetchInterval: 2500,
+    refetchInterval: 1000,
   });
 
   const expiries: string[] = data?.expiries ?? [];

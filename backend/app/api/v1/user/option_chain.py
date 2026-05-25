@@ -60,7 +60,7 @@ _SETTINGS_TTL = 60.0
 # Full-response cache (2.5s) — sized just above the picker's 2s polling
 # cadence so each request lands a hit on the next poll.
 _CHAIN_CACHE: dict[str, tuple[dict[str, Any], float]] = {}
-_CHAIN_TTL = 2.5
+_CHAIN_TTL = 1.0
 
 # Catalog filter cache (5 min) — the heavy 50k-row scan. CSV doesn't change
 # intraday so this can sit much longer than the price cache.

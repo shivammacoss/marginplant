@@ -39,7 +39,7 @@ export type MarketQuote = {
  * at 0 ms. The WS itself still receives every upstream tick at full
  * rate so data freshness is preserved.
  */
-const DISPLAY_THROTTLE_MS = 200;
+const DISPLAY_THROTTLE_MS = 100;
 
 export function useMarketStream(tokens: string[]): Map<string, MarketQuote> {
   const [quotes, setQuotes] = useState<Map<string, MarketQuote>>(new Map());
