@@ -251,7 +251,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     market_tick_task: _asyncio.Task = _asyncio.create_task(
         _supervise(
             "market_tick",
-            _partial(market_data_service.tick_loop, interval_sec=0.25),
+            _partial(market_data_service.tick_loop, interval_sec=0.1),
         )
     )
     # Keep reference on the app so it isn't GC'd and can be cancelled cleanly on shutdown

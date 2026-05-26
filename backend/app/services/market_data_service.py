@@ -33,6 +33,45 @@ _state: dict[str, dict[str, Any]] = {}
 _subscribed: set[str] = set()
 _running: bool = False
 
+# In-memory token → symbol cache (avoids MongoDB lookup on every tick)
+_token_symbol_cache: dict[str, str | None] = {}
+_TOKEN_CACHE_WARM = False
+
+
+async def _warm_token_symbol_cache() -> None:
+    """Pre-load token→symbol mapping from Instrument collection once."""
+    global _TOKEN_CACHE_WARM
+    if _TOKEN_CACHE_WARM:
+        return
+    try:
+        instruments = await Instrument.find_all().to_list()
+        for instr in instruments:
+            if instr.token and instr.symbol:
+                _token_symbol_cache[str(instr.token)] = instr.symbol.upper()
+        _TOKEN_CACHE_WARM = True
+        logger.info("token_symbol_cache_warmed count=%d", len(_token_symbol_cache))
+    except Exception:
+        logger.exception("token_symbol_cache_warm_failed")
+
+
+def _get_cached_symbol(token: str) -> str | None:
+    """O(1) in-memory lookup. Returns None if not cached."""
+    return _token_symbol_cache.get(token)
+
+
+async def _resolve_symbol(token: str) -> str | None:
+    """Resolve token to Infoway symbol. Uses in-memory cache first, falls back to MongoDB."""
+    cached = _token_symbol_cache.get(token)
+    if cached is not None:
+        return cached
+    instr = await Instrument.find_one(Instrument.token == token)
+    if instr is None or not instr.symbol:
+        _token_symbol_cache[token] = None  # type: ignore[assignment]
+        return None
+    sym = instr.symbol.upper()
+    _token_symbol_cache[token] = sym
+    return sym
+
 
 def _empty_quote(token: str) -> dict[str, Any]:
     """Zero-valued quote skeleton. Overlays (Zerodha / Infoway) fill in
@@ -258,10 +297,9 @@ async def _infoway_overlay(token: str, base_quote: dict[str, Any]) -> dict[str, 
     try:
         from app.services.infoway_service import infoway
 
-        instr = await Instrument.find_one(Instrument.token == token)
-        if instr is None or not instr.symbol:
+        sym = await _resolve_symbol(token)
+        if not sym:
             return base_quote
-        sym = instr.symbol.upper()
         live = infoway.get_tick(sym) or infoway.get_tick(sym + "T")
         if not live:
             return base_quote
@@ -571,6 +609,7 @@ async def tick_loop(interval_sec: float = 1.0) -> None:
         return
     _running = True
     logger.info("market_tick_loop_started")
+    await _warm_token_symbol_cache()
     try:
         import time
 
