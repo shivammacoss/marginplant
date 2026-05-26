@@ -145,17 +145,14 @@ async def compute_broker_totals(
         for p in positions:
             net_client_pnl += _realised_inr(p, fallback_usd_inr)
 
-        # Brokerage transactions in window
-        bkg_query: dict[str, Any] = {
-            "user_id": {"$in": user_ids},
-            "transaction_type": TransactionType.BROKERAGE.value,
-        }
+        # Brokerage from trades (wallet.total_brokerage is often 0 because
+        # brokerage is tracked per-trade, not as a separate wallet txn)
+        bkg_trade_q: dict[str, Any] = {"user_id": {"$in": user_ids}}
         if date_filter:
-            bkg_query["created_at"] = date_filter
-
-        bkg_txns = await WalletTransaction.find(bkg_query).to_list()
-        for t in bkg_txns:
-            net_client_bkg += abs(to_decimal(t.amount))
+            bkg_trade_q["executed_at"] = date_filter
+        bkg_trades = await Trade.find(bkg_trade_q).to_list()
+        for t in bkg_trades:
+            net_client_bkg += abs(to_decimal(t.brokerage))
 
         # Deposits in window
         dep_query: dict[str, Any] = {
@@ -257,15 +254,29 @@ async def get_entity_users(
     if entity_role in (UserRole.BROKER.value, "BROKER"):
         user_query["assigned_broker_id"] = entity_id
     elif entity_role in (UserRole.ADMIN.value, "ADMIN"):
-        user_query["assigned_admin_id"] = entity_id
+        # Include direct users + users under admin's brokers
+        broker_ids = [
+            b["_id"] async for b in User.get_motor_collection().find(
+                {"assigned_admin_id": entity_id, "role": UserRole.BROKER.value},
+                {"_id": 1},
+            )
+        ]
+        scope_filter = [{"assigned_admin_id": entity_id}]
+        if broker_ids:
+            scope_filter.append({"assigned_broker_id": {"$in": broker_ids}})
+        user_query["$or"] = scope_filter
 
     if search and search.strip():
         import re
         escaped = re.escape(search.strip())
-        user_query["$or"] = [
+        search_filter = [
             {"user_code": {"$regex": escaped, "$options": "i"}},
             {"full_name": {"$regex": escaped, "$options": "i"}},
         ]
+        if "$or" in user_query:
+            user_query = {"$and": [user_query, {"$or": search_filter}]}
+        else:
+            user_query["$or"] = search_filter
 
     total = await User.find(user_query).count()
     total_pages = max(1, (total + page_size - 1) // page_size)
