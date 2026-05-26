@@ -208,35 +208,56 @@ async def _enforce_for_user(user: User) -> None:
         ltp_map[tok] = None if isinstance(res, BaseException) else res
 
     # Fallback: for tokens with LTP=0/None, try Kite REST quote directly.
-    # This covers the case where the WS ticker is down or not delivering data.
+    # Uses KiteConnect + Motor (no Beanie) so it works even when the
+    # zerodha_service's WS ticker pool is broken.
     zero_tokens = [tok for tok, v in ltp_map.items() if v is None or (v is not None and float(str(v)) <= 0)]
     if zero_tokens:
-        tok_to_instr = {p.instrument.token: p.instrument for p in open_positions}
+        tok_to_pos = {p.instrument.token: p for p in open_positions}
         try:
-            from app.services.zerodha_service import zerodha
-            for tok in zero_tokens:
-                instr = tok_to_instr.get(tok)
-                if not instr:
-                    continue
-                exchange = getattr(instr, "exchange", None) or "MCX"
-                symbol = getattr(instr, "symbol", None)
-                if not symbol:
-                    continue
-                try:
-                    snap = await asyncio.wait_for(
-                        zerodha.get_quote_snapshot(str(exchange), str(symbol)),
-                        timeout=3.0,
-                    )
-                    if snap and float(snap.get("ltp") or 0) > 0:
-                        ltp_map[tok] = to_decimal(snap["ltp"])
-                        logger.info(
-                            "risk_ltp_rest_fallback",
-                            extra={"token": tok, "symbol": symbol, "ltp": snap["ltp"]},
-                        )
-                except Exception:
-                    pass
-        except Exception:
-            pass
+            from kiteconnect import KiteConnect as _KC
+            from app.core.config import settings as _cfg
+            from motor.motor_asyncio import AsyncIOMotorClient as _MC
+
+            _client = _MC(str(_cfg.MONGODB_URL))
+            _db = _client[_cfg.MONGODB_DB_NAME]
+            zs = await _db.zerodha_settings.find_one({})
+            if zs and zs.get("accessToken") and zs.get("apiKey"):
+                kc = _KC(api_key=zs["apiKey"])
+                kc.set_access_token(zs["accessToken"])
+                # Build Kite instrument keys for all zero-LTP tokens
+                kite_keys = []
+                tok_key_map = {}
+                for tok in zero_tokens:
+                    p = tok_to_pos.get(tok)
+                    if not p:
+                        continue
+                    sym = getattr(p.instrument, "symbol", None) or ""
+                    seg = getattr(p, "segment_type", None) or getattr(p.instrument, "segment", None) or ""
+                    seg_str = seg.value if hasattr(seg, "value") else str(seg)
+                    if "MCX" in seg_str:
+                        ex = "MCX"
+                    elif "BSE" in seg_str or "BFO" in seg_str:
+                        ex = "BSE"
+                    elif "CDS" in seg_str:
+                        ex = "CDS"
+                    else:
+                        ex = "NSE"
+                    key = f"{ex}:{sym}"
+                    kite_keys.append(key)
+                    tok_key_map[key] = tok
+                if kite_keys:
+                    try:
+                        data = await asyncio.to_thread(kc.quote, kite_keys)
+                        for key, snap in (data or {}).items():
+                            ltp_val = float(snap.get("last_price") or 0)
+                            if ltp_val > 0 and key in tok_key_map:
+                                ltp_map[tok_key_map[key]] = to_decimal(ltp_val)
+                                logger.info("risk_ltp_rest_fallback", extra={"key": key, "ltp": ltp_val})
+                    except Exception as e:
+                        logger.warning("risk_rest_fallback_failed", extra={"error": str(e)})
+            _client.close()
+        except Exception as e:
+            logger.warning("risk_rest_fallback_init_failed", extra={"error": str(e)})
 
     # Refresh LTP + run bracket SL/TP checks per position. Bracket legs on
     # open positions don't live in the pending-order book, so this is where
