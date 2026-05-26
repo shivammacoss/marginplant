@@ -699,26 +699,20 @@ function AdminPositionsInner() {
       ),
     },
     {
-      // Net P&L — the bottom-line number the admin actually cares
-      // about: gross realised minus brokerage / other charges. Lives
-      // right after the Brokerage column so the math
-      //     REALIZED − BROKERAGE = NET P&L
-      // reads left-to-right on a single row. Same definition the
-      // PnlCard tiles above use, so per-row sums reconcile against
-      // the "This Week's Net P&L" total without an explanation.
       key: "net_pnl",
       header: "Net P&L",
       align: "right" as const,
       render: (r: any) => {
-        const gross = Number(r.realized_pnl ?? 0);
-        const charges = Number(r.charges ?? 0);
-        const net = gross - charges;
+        const isOpen = r.status === "OPEN";
+        const pnl = isOpen
+          ? Number(r.unrealized_pnl ?? 0)
+          : Number(r.realized_pnl ?? 0);
         return (
           <span
-            className={`${pnlColor(net)} font-semibold`}
-            title={`Realized ${formatINR(gross)} − Brokerage ${formatINR(charges)}`}
+            className={`${pnlColor(pnl)} font-semibold`}
+            title={isOpen ? "Unrealized P&L" : "Realized P&L"}
           >
-            {formatINR(net)}
+            {formatINR(pnl)}
           </span>
         );
       },
