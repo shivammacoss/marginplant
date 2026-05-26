@@ -207,6 +207,37 @@ async def _enforce_for_user(user: User) -> None:
     for tok, res in zip(unique_tokens, ltp_results):
         ltp_map[tok] = None if isinstance(res, BaseException) else res
 
+    # Fallback: for tokens with LTP=0/None, try Kite REST quote directly.
+    # This covers the case where the WS ticker is down or not delivering data.
+    zero_tokens = [tok for tok, v in ltp_map.items() if v is None or (v is not None and float(str(v)) <= 0)]
+    if zero_tokens:
+        tok_to_instr = {p.instrument.token: p.instrument for p in open_positions}
+        try:
+            from app.services.zerodha_service import zerodha
+            for tok in zero_tokens:
+                instr = tok_to_instr.get(tok)
+                if not instr:
+                    continue
+                exchange = getattr(instr, "exchange", None) or "MCX"
+                symbol = getattr(instr, "symbol", None)
+                if not symbol:
+                    continue
+                try:
+                    snap = await asyncio.wait_for(
+                        zerodha.get_quote_snapshot(str(exchange), str(symbol)),
+                        timeout=3.0,
+                    )
+                    if snap and float(snap.get("ltp") or 0) > 0:
+                        ltp_map[tok] = to_decimal(snap["ltp"])
+                        logger.info(
+                            "risk_ltp_rest_fallback",
+                            extra={"token": tok, "symbol": symbol, "ltp": snap["ltp"]},
+                        )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     # Refresh LTP + run bracket SL/TP checks per position. Bracket legs on
     # open positions don't live in the pending-order book, so this is where
     # they fire.
