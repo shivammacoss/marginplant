@@ -571,41 +571,37 @@ async def _enforce_for_user(user: User) -> None:
                 extra={"user_id": str(user.id), "position_id": str(p.id)},
             )
 
-    # Bal-protection stop-out semantics.
+    # Margin-level stop-out semantics (industry standard).
     #
-    #   loss_pct = (floating_loss + estimated_close_brokerage) / bal × 100
+    #   equity = balance + total_unrealised - estimated_close_brokerage
+    #   used_margin = wallet.used_margin
+    #   margin_level = (equity / used_margin) × 100
     #
-    # Where bal = wallet wealth at rest (available + used_margin). This is
-    # NOT the CFD "Margin Level" gauge — it's a "% of MAIN BALANCE the user
-    # is about to lose" gauge. Fire when loss_pct ≥ stopOutPercent. Keeps
-    # the main balance from going negative: at stopOutPercent = 100% the
-    # auto-close fires the instant projected loss equals the entire bal,
-    # i.e. bal touches zero AT MOST. Setting stopOutPercent below 100%
-    # (e.g. 80%) closes positions BEFORE bal is fully wiped — preserving a
-    # cushion as the user explicitly asked: "main wallet kabhi negative
-    # nahi jana chahiye, stop-out apne se sab close kar de".
-    #
-    # `balance` already includes credit_limit (see _wallet_balance) so a
-    # user with extended credit gets that buffer too — the gauge measures
-    # against the total "money the broker has on the line for this user".
+    # Fire when margin_level drops BELOW stopOutPercent. Example: admin
+    # sets 90% → stop-out fires when equity < 90% of used_margin.
+    # This matches what CFD/forex brokers use: when equity can no longer
+    # support the margin requirement, positions are auto-closed.
     user_id_str = str(user.id)
+    used_margin = to_decimal(wallet.used_margin) if wallet.used_margin else Decimal("0")
+    equity = balance + total_unrealised - estimated_close_brokerage
+    margin_level = float(equity / used_margin * Decimal(100)) if used_margin > 0 else 999.0
+    # For backward compat: also compute old loss_pct for warning messages
     floating_loss = (-total_unrealised) if total_unrealised < 0 else Decimal("0")
-    projected_loss = floating_loss + estimated_close_brokerage
-    loss_pct = (
-        float(projected_loss / balance * Decimal(100)) if projected_loss > 0 else 0.0
-    )
+    loss_pct = margin_level  # reuse variable for warning logic below
 
-    # 1) Stop-out — force-close EVERYTHING when projected loss reaches the
-    # configured % of main balance. Done before the warning check because
-    # hitting stop-out implicitly crossed the warning too.
-    if stop_pct > 0 and loss_pct >= stop_pct:
+    # 1) Stop-out — force-close EVERYTHING when margin level drops below
+    # the configured %. Done before the warning check because hitting
+    # stop-out implicitly crossed the warning too.
+    if stop_pct > 0 and used_margin > 0 and margin_level <= stop_pct:
         logger.warning(
             "stop_out_triggered",
             extra={
                 "user_id": user_id_str,
-                "loss_pct": round(loss_pct, 2),
+                "margin_level": round(margin_level, 2),
                 "threshold_pct": stop_pct,
-                "floating_loss": float(floating_loss),
+                "equity": float(equity),
+                "used_margin": float(used_margin),
+                "unrealised": float(total_unrealised),
                 "bal": float(balance),
             },
         )
@@ -613,7 +609,7 @@ async def _enforce_for_user(user: User) -> None:
             await _squareoff_position(
                 user,
                 p,
-                f"stop_out_loss_pct_{loss_pct:.2f}>={stop_pct}",
+                f"stop_out_margin_level_{margin_level:.2f}<={stop_pct}",
             )
         _warning_armed[user_id_str] = True
         return
