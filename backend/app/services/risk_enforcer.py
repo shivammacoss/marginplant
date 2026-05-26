@@ -571,23 +571,20 @@ async def _enforce_for_user(user: User) -> None:
                 extra={"user_id": str(user.id), "position_id": str(p.id)},
             )
 
-    # Stop-out: floating loss as % of available balance.
+    # Stop-out: floating loss as % of total balance.
     #
-    #   loss_pct = (floating_loss + close_brokerage) / available_balance × 100
+    #   loss_pct = (floating_loss + close_brokerage) / balance × 100
+    #   balance  = available + used_margin + credit_limit
     #
-    # Admin sets 90% → stop-out fires when floating loss eats 90% of
-    # the user's available cash. Example: user has ₹25K available,
-    # 90% = stop when loss reaches ₹22,500.
+    # Admin sets 90% → stop-out fires when floating loss reaches 90%
+    # of the user's total balance. Example: balance ₹48K, 90% = stop
+    # when loss reaches ₹43.3K.
     user_id_str = str(user.id)
-    available = to_decimal(wallet.available_balance) if wallet.available_balance else Decimal("0")
     floating_loss = (-total_unrealised) if total_unrealised < 0 else Decimal("0")
     projected_loss = floating_loss + estimated_close_brokerage
-    if available > 0:
-        loss_pct = float(projected_loss / available * Decimal(100))
-    elif projected_loss > 0:
-        loss_pct = 999.0
-    else:
-        loss_pct = 0.0
+    loss_pct = (
+        float(projected_loss / balance * Decimal(100)) if balance > 0 and projected_loss > 0 else 0.0
+    )
 
     # 1) Stop-out — force-close EVERYTHING when loss % crosses threshold.
     if stop_pct > 0 and loss_pct >= stop_pct:
@@ -598,7 +595,7 @@ async def _enforce_for_user(user: User) -> None:
                 "loss_pct": round(loss_pct, 2),
                 "threshold_pct": stop_pct,
                 "floating_loss": float(floating_loss),
-                "available": float(available),
+                "balance": float(balance),
                 "unrealised": float(total_unrealised),
             },
         )
