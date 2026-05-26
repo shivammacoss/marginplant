@@ -131,15 +131,17 @@ async def compute_broker_totals(
             if end_utc:
                 date_filter["$lte"] = end_utc
 
-        # Closed positions in window
-        pos_query: dict[str, Any] = {
-            "user_id": {"$in": user_ids},
-            "status": PositionStatus.CLOSED.value,
-        }
+        # Realized PNL — ALL positions (open with partial close PNL + closed)
         if date_filter:
-            pos_query["closed_at"] = date_filter
+            pos_query: dict[str, Any] = {
+                "user_id": {"$in": user_ids},
+                "status": PositionStatus.CLOSED.value,
+                "closed_at": date_filter,
+            }
+            positions = await Position.find(pos_query).to_list()
+        else:
+            positions = await Position.find({"user_id": {"$in": user_ids}}).to_list()
 
-        positions = await Position.find(pos_query).to_list()
         for p in positions:
             net_client_pnl += _realised_inr(p, fallback_usd_inr)
 
@@ -286,17 +288,22 @@ async def get_entity_users(
     items = []
 
     for u in users:
-        # Realized PNL
-        pos_q: dict[str, Any] = {
-            "user_id": u.id,
-            "status": PositionStatus.CLOSED.value,
-        }
-        if has_date:
-            pos_q["closed_at"] = date_filter
-        positions = await Position.find(pos_q).to_list()
+        # Realized PNL — include ALL positions (open with partial close PNL + closed)
         net_pnl = Decimal("0")
-        for p in positions:
-            net_pnl += _realised_inr(p, fallback_usd_inr)
+        if has_date:
+            # Date-filtered: only closed positions in window
+            closed_q: dict[str, Any] = {
+                "user_id": u.id,
+                "status": PositionStatus.CLOSED.value,
+                "closed_at": date_filter,
+            }
+            for p in await Position.find(closed_q).to_list():
+                net_pnl += _realised_inr(p, fallback_usd_inr)
+        else:
+            # Lifetime: sum realized_pnl from ALL positions (open + closed)
+            all_pos = await Position.find({"user_id": u.id}).to_list()
+            for p in all_pos:
+                net_pnl += _realised_inr(p, fallback_usd_inr)
 
         # Brokerage from trades
         trade_q: dict[str, Any] = {"user_id": u.id}
