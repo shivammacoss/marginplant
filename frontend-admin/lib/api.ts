@@ -857,6 +857,45 @@ export type AccountsSummary = {
   };
 };
 
+export type WeekOption = {
+  label: string;
+  start: string;
+  end: string;
+};
+
+export type BrokerTotals = {
+  net_client_pnl: string;
+  net_client_bkg: string;
+  total_of_both: string;
+  settlement: string;
+  actual_pnl: string;
+  sharing_pnl: string;
+  sharing_bkg: string;
+  total_deposits: string;
+  total_withdrawals: string;
+  share_pct: string;
+  agreement_type: string | null;
+  client_count: number;
+};
+
+export type EntityUserRow = {
+  user_id: string;
+  user_code: string;
+  username: string;
+  net_pnl: string;
+  net_bkg: string;
+  total_pnl: string;
+  settlement: string;
+  pnl_minus_settlement: string;
+};
+
+export type EntityUsersResponse = {
+  items: EntityUserRow[];
+  meta: { page: number; page_size: number; total: number; total_pages: number };
+};
+
+type DateParams = { from_date?: string; to_date?: string; preset?: string };
+
 export const AccountsAPI = {
   summary: (params?: {
     scope?: string;
@@ -867,4 +906,54 @@ export const AccountsAPI = {
     unwrap<AccountsSummary>(
       api.get("/admin/accounts/summary", { params }),
     ),
+
+  weeks: (numWeeks?: number) =>
+    unwrap<WeekOption[]>(
+      api.get("/admin/accounts/weeks", { params: numWeeks ? { num_weeks: numWeeks } : undefined }),
+    ),
+
+  brokerTotals: (entityId: string, params?: DateParams) =>
+    unwrap<BrokerTotals>(
+      api.get(`/admin/accounts/broker-totals/${entityId}`, { params }),
+    ),
+
+  entityUsers: (
+    entityId: string,
+    params?: DateParams & { page?: number; page_size?: number; search?: string },
+  ) =>
+    unwrap<EntityUsersResponse>(
+      api.get(`/admin/accounts/entity-users/${entityId}`, { params }),
+    ),
+
+  exportEntityUsersExcel: async (entityId: string, params?: DateParams): Promise<Blob> => {
+    const res = await api.get(`/admin/accounts/entity-users/${entityId}/export/excel`, {
+      params,
+      responseType: "blob",
+    });
+    return res.data;
+  },
+
+  exportEntityUsersPdf: async (entityId: string, params?: DateParams): Promise<Blob> => {
+    const res = await api.get(`/admin/accounts/entity-users/${entityId}/export/pdf`, {
+      params,
+      responseType: "blob",
+    });
+    return res.data;
+  },
+
+  exportBrokerTotalsExcel: async (entityId: string, params?: DateParams): Promise<Blob> => {
+    const res = await api.get(`/admin/accounts/broker-totals/${entityId}/export/excel`, {
+      params,
+      responseType: "blob",
+    });
+    return res.data;
+  },
+
+  exportBrokerTotalsPdf: async (entityId: string, params?: DateParams): Promise<Blob> => {
+    const res = await api.get(`/admin/accounts/broker-totals/${entityId}/export/pdf`, {
+      params,
+      responseType: "blob",
+    });
+    return res.data;
+  },
 };

@@ -14,11 +14,13 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from io import BytesIO
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from beanie import PydanticObjectId
 from fastapi import APIRouter, Depends, Query
+from starlette.responses import StreamingResponse
 
 from app.core.dependencies import CurrentAdmin, require_perm, scoped_admin_filter
 from app.models.position import Position, PositionStatus
@@ -27,6 +29,7 @@ from app.models.transaction import TransactionType, WalletTransaction
 from app.models.user import User, UserRole, UserStatus
 from app.models.wallet import Wallet
 from app.schemas.common import APIResponse
+from app.services import accounts_dashboard_service as ads
 from app.utils.decimal_utils import to_decimal
 
 router = APIRouter(prefix="/accounts", tags=["admin-accounts"])
@@ -349,3 +352,211 @@ async def accounts_summary(
             "is_lifetime": start_utc is None,
         },
     })
+
+
+# ── Shared date-parsing helper ───────────────────────────────────────
+def _parse_dates(
+    from_date: str | None, to_date: str | None, preset: str | None,
+) -> tuple[datetime | None, datetime | None]:
+    now_ist = datetime.now(IST)
+    start_utc: datetime | None = None
+    end_utc: datetime | None = None
+    if preset and preset in _WEEK_PRESETS:
+        s, e = _WEEK_PRESETS[preset](now_ist)
+        start_utc = _to_utc(s)
+        end_utc = _to_utc(e)
+    elif from_date or to_date:
+        try:
+            if from_date:
+                start_utc = _to_utc(datetime.strptime(from_date, "%Y-%m-%d").replace(tzinfo=IST))
+            if to_date:
+                end_utc = _to_utc(datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=IST))
+        except ValueError:
+            pass
+    return start_utc, end_utc
+
+
+def _period_label(from_date: str | None, to_date: str | None, preset: str | None) -> str:
+    if preset:
+        return preset.replace("_", " ").title()
+    if from_date and to_date:
+        return f"{from_date} to {to_date}"
+    if from_date:
+        return f"From {from_date}"
+    if to_date:
+        return f"Until {to_date}"
+    return "All time"
+
+
+# ── Week options ─────────────────────────────────────────────────────
+@router.get("/weeks")
+async def accounts_weeks(
+    admin: CurrentAdmin,
+    num_weeks: int = Query(default=16, ge=4, le=52),
+    _: None = Depends(require_perm("users", "read")),
+) -> APIResponse:
+    return APIResponse(data=ads.generate_week_options(num_weeks))
+
+
+# ── Broker totals (PNL sharing snapshot) ─────────────────────────────
+@router.get("/broker-totals/{entity_id}")
+async def broker_totals(
+    entity_id: str,
+    admin: CurrentAdmin,
+    from_date: str | None = Query(default=None),
+    to_date: str | None = Query(default=None),
+    preset: str | None = Query(default=None),
+    _: None = Depends(require_perm("users", "read")),
+) -> APIResponse:
+    eid = PydanticObjectId(entity_id)
+    entity = await User.get(eid)
+    if not entity:
+        return APIResponse(data=ads._empty_broker_totals(), message="Entity not found")
+
+    # Scope check
+    admin_scope = scoped_admin_filter(admin)
+    if admin.role != UserRole.SUPER_ADMIN:
+        if admin.role == UserRole.ADMIN:
+            if entity.assigned_admin_id != admin.id and entity.id != admin.id:
+                return APIResponse(data=ads._empty_broker_totals(), message="Not in scope")
+        elif admin.role == UserRole.BROKER:
+            if entity.id != admin.id and getattr(entity, "assigned_broker_id", None) != admin.id:
+                return APIResponse(data=ads._empty_broker_totals(), message="Not in scope")
+
+    start_utc, end_utc = _parse_dates(from_date, to_date, preset)
+    result = await ads.compute_broker_totals(eid, start_utc, end_utc)
+    return APIResponse(data=result)
+
+
+# ── Entity users (paginated per-user PNL) ────────────────────────────
+@router.get("/entity-users/{entity_id}")
+async def entity_users(
+    entity_id: str,
+    admin: CurrentAdmin,
+    from_date: str | None = Query(default=None),
+    to_date: str | None = Query(default=None),
+    preset: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=15, ge=1, le=100),
+    search: str | None = Query(default=None),
+    _: None = Depends(require_perm("users", "read")),
+) -> APIResponse:
+    eid = PydanticObjectId(entity_id)
+    entity = await User.get(eid)
+    if not entity:
+        return APIResponse(data={"items": [], "meta": {"page": 1, "page_size": page_size, "total": 0, "total_pages": 0}})
+
+    entity_role = entity.role.value if hasattr(entity.role, "value") else str(entity.role)
+    start_utc, end_utc = _parse_dates(from_date, to_date, preset)
+    result = await ads.get_entity_users(eid, entity_role, start_utc, end_utc, page, page_size, search)
+    return APIResponse(data=result)
+
+
+# ── Export: all users of entity as Excel ─────────────────────────────
+@router.get("/entity-users/{entity_id}/export/excel")
+async def export_entity_users_excel(
+    entity_id: str,
+    admin: CurrentAdmin,
+    from_date: str | None = Query(default=None),
+    to_date: str | None = Query(default=None),
+    preset: str | None = Query(default=None),
+    _: None = Depends(require_perm("users", "read")),
+) -> StreamingResponse:
+    eid = PydanticObjectId(entity_id)
+    entity = await User.get(eid)
+    entity_name = (entity.full_name or entity.user_code or entity_id) if entity else entity_id
+    entity_role = (entity.role.value if hasattr(entity.role, "value") else str(entity.role)) if entity else "BROKER"
+
+    start_utc, end_utc = _parse_dates(from_date, to_date, preset)
+    users_data = await ads.get_all_entity_users(eid, entity_role, start_utc, end_utc)
+    label = _period_label(from_date, to_date, preset)
+    data = ads.render_entity_users_excel(entity_name, users_data, label)
+    filename = f"pnl_{entity_name}_{from_date or 'all'}_{to_date or 'time'}.xlsx"
+
+    return StreamingResponse(
+        BytesIO(data),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── Export: all users of entity as PDF ───────────────────────────────
+@router.get("/entity-users/{entity_id}/export/pdf")
+async def export_entity_users_pdf(
+    entity_id: str,
+    admin: CurrentAdmin,
+    from_date: str | None = Query(default=None),
+    to_date: str | None = Query(default=None),
+    preset: str | None = Query(default=None),
+    _: None = Depends(require_perm("users", "read")),
+) -> StreamingResponse:
+    eid = PydanticObjectId(entity_id)
+    entity = await User.get(eid)
+    entity_name = (entity.full_name or entity.user_code or entity_id) if entity else entity_id
+    entity_role = (entity.role.value if hasattr(entity.role, "value") else str(entity.role)) if entity else "BROKER"
+
+    start_utc, end_utc = _parse_dates(from_date, to_date, preset)
+    users_data = await ads.get_all_entity_users(eid, entity_role, start_utc, end_utc)
+    label = _period_label(from_date, to_date, preset)
+    data = ads.render_entity_users_pdf(entity_name, users_data, label)
+    filename = f"pnl_{entity_name}_{from_date or 'all'}_{to_date or 'time'}.pdf"
+
+    return StreamingResponse(
+        BytesIO(data),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── Export: broker totals as Excel ───────────────────────────────────
+@router.get("/broker-totals/{entity_id}/export/excel")
+async def export_broker_totals_excel(
+    entity_id: str,
+    admin: CurrentAdmin,
+    from_date: str | None = Query(default=None),
+    to_date: str | None = Query(default=None),
+    preset: str | None = Query(default=None),
+    _: None = Depends(require_perm("users", "read")),
+) -> StreamingResponse:
+    eid = PydanticObjectId(entity_id)
+    entity = await User.get(eid)
+    entity_name = (entity.full_name or entity.user_code or entity_id) if entity else entity_id
+
+    start_utc, end_utc = _parse_dates(from_date, to_date, preset)
+    totals = await ads.compute_broker_totals(eid, start_utc, end_utc)
+    label = _period_label(from_date, to_date, preset)
+    data = ads.render_broker_totals_excel(totals, entity_name, label)
+    filename = f"broker_summary_{entity_name}_{from_date or 'all'}_{to_date or 'time'}.xlsx"
+
+    return StreamingResponse(
+        BytesIO(data),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── Export: broker totals as PDF ─────────────────────────────────────
+@router.get("/broker-totals/{entity_id}/export/pdf")
+async def export_broker_totals_pdf(
+    entity_id: str,
+    admin: CurrentAdmin,
+    from_date: str | None = Query(default=None),
+    to_date: str | None = Query(default=None),
+    preset: str | None = Query(default=None),
+    _: None = Depends(require_perm("users", "read")),
+) -> StreamingResponse:
+    eid = PydanticObjectId(entity_id)
+    entity = await User.get(eid)
+    entity_name = (entity.full_name or entity.user_code or entity_id) if entity else entity_id
+
+    start_utc, end_utc = _parse_dates(from_date, to_date, preset)
+    totals = await ads.compute_broker_totals(eid, start_utc, end_utc)
+    label = _period_label(from_date, to_date, preset)
+    data = ads.render_broker_totals_pdf(totals, entity_name, label)
+    filename = f"broker_summary_{entity_name}_{from_date or 'all'}_{to_date or 'time'}.pdf"
+
+    return StreamingResponse(
+        BytesIO(data),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
