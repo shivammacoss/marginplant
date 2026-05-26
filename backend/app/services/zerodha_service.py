@@ -1763,7 +1763,7 @@ class ZerodhaService:
         # was too tight; ~3 minutes is enough for every real-world case.
         last_error: Exception | None = None
         last_close_reason: str = ""
-        for attempt, wait in enumerate((0, 10, 25, 45, 70)):
+        for attempt, wait in enumerate((0, 10, 20, 35, 50, 70, 90, 120)):
             if wait:
                 logger.info(
                     "zerodha_ws_retry_backoff",
@@ -1893,7 +1893,7 @@ class ZerodhaService:
     _self_heal_paused: bool = False
     _self_heal_running: bool = False
 
-    async def ws_self_heal_loop(self, interval_sec: float = 60.0) -> None:
+    async def ws_self_heal_loop(self, interval_sec: float = 30.0) -> None:
         """Background task — periodically nudge a stuck WebSocket back
         online. Skipped when:
           - admin explicitly disconnected (`_self_heal_paused` flag)
