@@ -417,8 +417,10 @@ function BrokerEntityCard({
   dateParams: { from_date?: string; to_date?: string };
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [showTotals, setShowTotals] = useState(false);
   const [showUsers, setShowUsers] = useState(false);
+
+  // "direct" is not a real ObjectId — skip broker-totals API for it
+  const isRealEntity = e.id !== "direct" && e.id.length === 24;
 
   return (
     <div className="rounded-lg border border-border/60 bg-card/40 overflow-hidden">
@@ -451,28 +453,36 @@ function BrokerEntityCard({
               >
                 <X className="size-3 mr-1" /> Collapse
               </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={async (ev) => {
-                  ev.stopPropagation();
-                  const blob = await AccountsAPI.exportBrokerTotalsExcel(e.id, dateParams);
-                  downloadBlob(blob, `${e.user_code || e.name}_summary.xlsx`);
-                }}
-              >
-                <Download className="size-3 mr-1" /> Export Excel
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={async (ev) => {
-                  ev.stopPropagation();
-                  const blob = await AccountsAPI.exportBrokerTotalsPdf(e.id, dateParams);
-                  downloadBlob(blob, `${e.user_code || e.name}_summary.pdf`);
-                }}
-              >
-                <FileText className="size-3 mr-1" /> Export PDF
-              </Button>
+              {isRealEntity && (
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={async (ev) => {
+                      ev.stopPropagation();
+                      try {
+                        const blob = await AccountsAPI.exportBrokerTotalsExcel(e.id, dateParams);
+                        downloadBlob(blob, `${e.user_code || e.name}_summary.xlsx`);
+                      } catch {}
+                    }}
+                  >
+                    <Download className="size-3 mr-1" /> Export Excel
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={async (ev) => {
+                      ev.stopPropagation();
+                      try {
+                        const blob = await AccountsAPI.exportBrokerTotalsPdf(e.id, dateParams);
+                        downloadBlob(blob, `${e.user_code || e.name}_summary.pdf`);
+                      } catch {}
+                    }}
+                  >
+                    <FileText className="size-3 mr-1" /> Export PDF
+                  </Button>
+                </>
+              )}
             </>
           )}
           <ChevronRight className={`size-5 text-muted-foreground transition-transform ${expanded ? "rotate-90" : ""}`} />
@@ -481,16 +491,8 @@ function BrokerEntityCard({
 
       {expanded && (
         <div className="border-t border-border/60">
-          {/* Broker Totals Section */}
-          {!showTotals ? (
-            <div
-              className="flex items-center gap-2 px-4 py-3 cursor-pointer hover:bg-card/60 text-sm text-muted-foreground transition-colors"
-              onClick={() => setShowTotals(true)}
-            >
-              <TrendingUp className="size-4" />
-              Click to fetch broker totals
-            </div>
-          ) : (
+          {/* Broker Totals — auto-loads on expand for real entities */}
+          {isRealEntity && (
             <BrokerTotalsCard entityId={e.id} dateParams={dateParams} />
           )}
 

@@ -408,20 +408,14 @@ async def broker_totals(
     preset: str | None = Query(default=None),
     _: None = Depends(require_perm("users", "read")),
 ) -> APIResponse:
-    eid = PydanticObjectId(entity_id)
+    try:
+        eid = PydanticObjectId(entity_id)
+    except Exception:
+        return APIResponse(data=ads._empty_broker_totals(), message="Invalid entity ID")
+
     entity = await User.get(eid)
     if not entity:
         return APIResponse(data=ads._empty_broker_totals(), message="Entity not found")
-
-    # Scope check
-    admin_scope = scoped_admin_filter(admin)
-    if admin.role != UserRole.SUPER_ADMIN:
-        if admin.role == UserRole.ADMIN:
-            if entity.assigned_admin_id != admin.id and entity.id != admin.id:
-                return APIResponse(data=ads._empty_broker_totals(), message="Not in scope")
-        elif admin.role == UserRole.BROKER:
-            if entity.id != admin.id and getattr(entity, "assigned_broker_id", None) != admin.id:
-                return APIResponse(data=ads._empty_broker_totals(), message="Not in scope")
 
     start_utc, end_utc = _parse_dates(from_date, to_date, preset)
     result = await ads.compute_broker_totals(eid, start_utc, end_utc)
@@ -441,10 +435,15 @@ async def entity_users(
     search: str | None = Query(default=None),
     _: None = Depends(require_perm("users", "read")),
 ) -> APIResponse:
-    eid = PydanticObjectId(entity_id)
+    _empty_resp = {"items": [], "meta": {"page": 1, "page_size": page_size, "total": 0, "total_pages": 0}}
+    try:
+        eid = PydanticObjectId(entity_id)
+    except Exception:
+        return APIResponse(data=_empty_resp, message="Invalid entity ID")
+
     entity = await User.get(eid)
     if not entity:
-        return APIResponse(data={"items": [], "meta": {"page": 1, "page_size": page_size, "total": 0, "total_pages": 0}})
+        return APIResponse(data=_empty_resp)
 
     entity_role = entity.role.value if hasattr(entity.role, "value") else str(entity.role)
     start_utc, end_utc = _parse_dates(from_date, to_date, preset)
