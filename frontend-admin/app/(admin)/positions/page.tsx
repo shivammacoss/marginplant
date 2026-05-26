@@ -704,15 +704,17 @@ function AdminPositionsInner() {
       align: "right" as const,
       render: (r: any) => {
         const isOpen = r.status === "OPEN";
-        const pnl = isOpen
+        const gross = isOpen
           ? Number(r.unrealized_pnl ?? 0)
           : Number(r.realized_pnl ?? 0);
+        const charges = Number(r.charges ?? 0);
+        const net = gross - charges;
         return (
           <span
-            className={`${pnlColor(pnl)} font-semibold`}
-            title={isOpen ? "Unrealized P&L" : "Realized P&L"}
+            className={`${pnlColor(net)} font-semibold`}
+            title={isOpen ? `M2M ${formatINR(gross)} − Bkg ${formatINR(charges)}` : `Realized ${formatINR(gross)} − Bkg ${formatINR(charges)}`}
           >
-            {formatINR(pnl)}
+            {formatINR(net)}
           </span>
         );
       },
