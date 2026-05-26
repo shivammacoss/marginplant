@@ -571,45 +571,42 @@ async def _enforce_for_user(user: User) -> None:
                 extra={"user_id": str(user.id), "position_id": str(p.id)},
             )
 
-    # Margin-level stop-out semantics (industry standard).
+    # Stop-out: floating loss as % of available balance.
     #
-    #   equity = balance + total_unrealised - estimated_close_brokerage
-    #   used_margin = wallet.used_margin
-    #   margin_level = (equity / used_margin) × 100
+    #   loss_pct = (floating_loss + close_brokerage) / available_balance × 100
     #
-    # Fire when margin_level drops BELOW stopOutPercent. Example: admin
-    # sets 90% → stop-out fires when equity < 90% of used_margin.
-    # This matches what CFD/forex brokers use: when equity can no longer
-    # support the margin requirement, positions are auto-closed.
+    # Admin sets 90% → stop-out fires when floating loss eats 90% of
+    # the user's available cash. Example: user has ₹25K available,
+    # 90% = stop when loss reaches ₹22,500.
     user_id_str = str(user.id)
-    used_margin = to_decimal(wallet.used_margin) if wallet.used_margin else Decimal("0")
-    equity = balance + total_unrealised - estimated_close_brokerage
-    margin_level = float(equity / used_margin * Decimal(100)) if used_margin > 0 else 999.0
-    # For backward compat: also compute old loss_pct for warning messages
+    available = to_decimal(wallet.available_balance) if wallet.available_balance else Decimal("0")
     floating_loss = (-total_unrealised) if total_unrealised < 0 else Decimal("0")
-    loss_pct = margin_level  # reuse variable for warning logic below
+    projected_loss = floating_loss + estimated_close_brokerage
+    if available > 0:
+        loss_pct = float(projected_loss / available * Decimal(100))
+    elif projected_loss > 0:
+        loss_pct = 999.0
+    else:
+        loss_pct = 0.0
 
-    # 1) Stop-out — force-close EVERYTHING when margin level drops below
-    # the configured %. Done before the warning check because hitting
-    # stop-out implicitly crossed the warning too.
-    if stop_pct > 0 and used_margin > 0 and margin_level <= stop_pct:
+    # 1) Stop-out — force-close EVERYTHING when loss % crosses threshold.
+    if stop_pct > 0 and loss_pct >= stop_pct:
         logger.warning(
             "stop_out_triggered",
             extra={
                 "user_id": user_id_str,
-                "margin_level": round(margin_level, 2),
+                "loss_pct": round(loss_pct, 2),
                 "threshold_pct": stop_pct,
-                "equity": float(equity),
-                "used_margin": float(used_margin),
+                "floating_loss": float(floating_loss),
+                "available": float(available),
                 "unrealised": float(total_unrealised),
-                "bal": float(balance),
             },
         )
         for p in open_positions:
             await _squareoff_position(
                 user,
                 p,
-                f"stop_out_margin_level_{margin_level:.2f}<={stop_pct}",
+                f"stop_out_loss_{loss_pct:.2f}>={stop_pct}",
             )
         _warning_armed[user_id_str] = True
         return
