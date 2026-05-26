@@ -1,15 +1,15 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from "recharts";
 import {
-  ArrowDownRight, ArrowUpRight, BarChart3, Briefcase, Calendar,
-  ChevronDown, ChevronRight, Crown, DollarSign, Download,
-  FileSpreadsheet, FileText, Filter, Loader2, PieChartIcon,
+  ArrowDownRight, ArrowUpRight, BarChart3, Briefcase,
+  ChevronRight, DollarSign, Download,
+  FileSpreadsheet, FileText, Loader2, PieChartIcon,
   RefreshCw, Search, TrendingUp, Trophy, UserPlus, Users, X,
 } from "lucide-react";
 import {
@@ -337,12 +337,12 @@ export default function AccountsDashboardPage() {
         </div>
       )}
 
-      {/* ── Entity Cards ──────────────────────────────────── */}
+      {/* ── Entity Cards / User Table ─────────────────────── */}
       {isBrokerScope ? (
         <BrokerEntities entities={entities} dateParams={dateParams} />
-      ) : (
-        <AllUsersEntities entities={entities} />
-      )}
+      ) : admin?.id ? (
+        <AllUsersTable adminId={admin.id} dateParams={dateParams} />
+      ) : null}
 
       {data && (
         <div className="text-xs text-muted-foreground">
@@ -643,9 +643,17 @@ function UserPnlTable({
     }),
   });
 
-  const handleDownloadAll = async () => {
-    const blob = await AccountsAPI.exportEntityUsersExcel(entityId, dateParams);
-    downloadBlob(blob, `pnl_all_${entityName}.xlsx`);
+  const handleDownloadExcel = async () => {
+    try {
+      const blob = await AccountsAPI.exportEntityUsersExcel(entityId, dateParams);
+      downloadBlob(blob, `pnl_all_${entityName}.xlsx`);
+    } catch {}
+  };
+  const handleDownloadPdf = async () => {
+    try {
+      const blob = await AccountsAPI.exportEntityUsersPdf(entityId, dateParams);
+      downloadBlob(blob, `pnl_all_${entityName}.pdf`);
+    } catch {}
   };
 
   const items = data?.items ?? [];
@@ -664,9 +672,14 @@ function UserPnlTable({
             className="pl-9"
           />
         </div>
-        <Button variant="outline" size="sm" onClick={handleDownloadAll}>
-          <Download className="size-3 mr-1" /> Download all PnL (Excel)
-        </Button>
+        <div className="flex gap-1.5">
+          <Button variant="outline" size="sm" onClick={handleDownloadExcel}>
+            <Download className="size-3 mr-1" /> Download all PnL (Excel)
+          </Button>
+          <Button variant="outline" size="sm" onClick={handleDownloadPdf}>
+            <FileText className="size-3 mr-1" /> Download PDF
+          </Button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -798,115 +811,18 @@ function UserPnlRow({
 
 
 /* ═══════════════════════════════════════════════════════════════════ */
-/* All Users Entity Cards (existing pattern, simplified)               */
+/* All Users — clean PNL table (same layout as broker user table)      */
 /* ═══════════════════════════════════════════════════════════════════ */
 
-const ALL_USERS_PAGE_SIZE = 15;
-
-function AllUsersEntities({ entities }: { entities: AccountEntity[] }) {
-  const [page, setPage] = useState(1);
-  const totalPages = Math.max(1, Math.ceil(entities.length / ALL_USERS_PAGE_SIZE));
-  const safeP = Math.min(page, totalPages);
-  const sliced = entities.slice((safeP - 1) * ALL_USERS_PAGE_SIZE, safeP * ALL_USERS_PAGE_SIZE);
-
-  const prevLen = useRef(entities.length);
-  useEffect(() => {
-    if (entities.length !== prevLen.current) { setPage(1); prevLen.current = entities.length; }
-  }, [entities.length]);
-
-  if (!entities.length) return (
-    <div className="py-8 text-center text-sm text-muted-foreground">No entities found.</div>
-  );
-
+function AllUsersTable({
+  adminId,
+  dateParams,
+}: {
+  adminId: string;
+  dateParams: { from_date?: string; to_date?: string };
+}) {
   return (
-    <div className="space-y-3">
-      {sliced.map((entity) => (
-        <EntityCard key={entity.id} entity={entity} />
-      ))}
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between rounded-lg border border-border/60 bg-card/40 px-4 py-2.5">
-          <span className="text-xs text-muted-foreground">
-            Showing {(safeP - 1) * ALL_USERS_PAGE_SIZE + 1}–{Math.min(safeP * ALL_USERS_PAGE_SIZE, entities.length)} of {entities.length}
-          </span>
-          <div className="flex gap-1.5">
-            <Button variant="outline" size="sm" disabled={safeP <= 1} onClick={() => setPage(safeP - 1)}>
-              Prev
-            </Button>
-            <span className="flex items-center px-2 text-xs font-medium">{safeP} / {totalPages}</span>
-            <Button variant="outline" size="sm" disabled={safeP >= totalPages} onClick={() => setPage(safeP + 1)}>
-              Next
-            </Button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function EntityCard({ entity: e }: { entity: AccountEntity }) {
-  const [expanded, setExpanded] = useState(false);
-
-  const roleBadge =
-    e.role === "ADMIN" ? "bg-blue-500/15 text-blue-300 border-blue-500/30" :
-    e.role === "BROKER" ? "bg-purple-500/15 text-purple-300 border-purple-500/30" :
-    e.role === "DIRECT" ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" :
-    "bg-muted/30 text-muted-foreground border-border";
-
-  return (
-    <div
-      className="cursor-pointer rounded-lg border border-border/60 bg-card/40 transition-all hover:border-border"
-      onClick={() => setExpanded((v) => !v)}
-    >
-      <div className="flex items-center gap-3 px-4 py-3">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10">
-          <Users className="size-4 text-primary" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold">{e.name}</span>
-            <span className={`rounded-full border px-1.5 py-0.5 text-[9px] font-medium uppercase ${roleBadge}`}>
-              {e.role === "DIRECT" ? "DIRECT USERS" : e.role}
-            </span>
-            {e.user_code && <span className="text-[10px] text-muted-foreground">{e.user_code}</span>}
-          </div>
-          <div className="mt-0.5 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-muted-foreground">
-            <span>{e.user_count} users</span>
-          </div>
-        </div>
-        <ChevronRight className={`size-4 text-muted-foreground transition-transform ${expanded ? "rotate-90" : ""}`} />
-      </div>
-
-      <div className="grid grid-cols-3 gap-px border-t border-border/60 bg-border/40 md:grid-cols-4 lg:grid-cols-8">
-        <MetricCell label="Deposits" value={e.deposits} prefix="₹" />
-        <MetricCell label="Withdrawals" value={e.withdrawals} prefix="₹" />
-        <MetricCell label="Net P&L" value={e.net_pnl} prefix="₹" pnl />
-        <MetricCell label="Brokerage" value={e.brokerage} prefix="₹" />
-        <MetricCell label="Trades" value={e.total_trades} />
-        <MetricCell
-          label="Win/Loss"
-          custom={
-            <span className="text-xs font-semibold">
-              <span className="text-emerald-400">{e.profit_trades}</span>
-              <span className="text-muted-foreground"> / </span>
-              <span className="text-destructive">{e.loss_trades}</span>
-            </span>
-          }
-        />
-        <MetricCell label="Win Rate" value={e.win_rate} suffix="%" pnl decimals={1} threshold={50} />
-        <MetricCell label="Balance" value={e.balance} prefix="₹" />
-      </div>
-
-      {expanded && (
-        <div className="grid grid-cols-3 gap-px border-t border-border/60 bg-border/40 md:grid-cols-4 lg:grid-cols-6">
-          <MetricCell label="Equity" value={e.equity} prefix="₹" pnl />
-          <MetricCell label="Unrealized" value={e.unrealized_pnl} prefix="₹" pnl />
-          <MetricCell label="Volume" value={e.volume} prefix="₹" />
-          <MetricCell label="Open Pos." value={e.open_positions} />
-          <MetricCell label="Net Deposit" value={e.net_deposit} prefix="₹" />
-          <MetricCell label="Settlement" value={e.settlement_outstanding} prefix="₹" danger />
-        </div>
-      )}
-    </div>
+    <UserPnlTable entityId={adminId} entityName="All Users" dateParams={dateParams} />
   );
 }
 
@@ -960,48 +876,6 @@ function ChartCard({ title, icon, children }: {
         {title}
       </div>
       {children}
-    </div>
-  );
-}
-
-function MetricCell({
-  label, value, prefix, suffix, pnl, danger, decimals = 2, custom, threshold = 0,
-}: {
-  label: string;
-  value?: number;
-  prefix?: string;
-  suffix?: string;
-  pnl?: boolean;
-  danger?: boolean;
-  decimals?: number;
-  custom?: React.ReactNode;
-  threshold?: number;
-}) {
-  const v = value ?? 0;
-  const colorClass = danger && v > 0
-    ? "text-destructive"
-    : pnl
-      ? v > threshold ? "text-emerald-400" : v < threshold ? "text-destructive" : "text-foreground/90"
-      : "text-foreground/90";
-
-  const formatted = custom ?? (
-    <span className={`text-xs font-semibold tabular-nums ${colorClass}`}>
-      {pnl && v > 0 ? "+" : ""}
-      {prefix}
-      {Math.abs(v).toLocaleString("en-IN", {
-        minimumFractionDigits: decimals,
-        maximumFractionDigits: decimals,
-      })}
-      {suffix}
-    </span>
-  );
-
-  return (
-    <div className="bg-card/40 px-3 py-2.5">
-      <div className="text-[9px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-        {label}
-      </div>
-      <div className="mt-0.5">{formatted}</div>
     </div>
   );
 }
