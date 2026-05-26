@@ -32,12 +32,15 @@ IST = ZoneInfo("Asia/Kolkata")
 
 
 def _next_kite_expiry_utc() -> datetime:
-    """Kite access tokens expire at 08:00 IST every day. Returns a timezone-
-    aware UTC datetime so comparisons with `now_utc()` never fail."""
+    """Kite access tokens expire at 08:00 IST every day.
+
+    A fresh token is valid until TOMORROW 08:00 IST regardless of when
+    generated. Old logic returned TODAY 08:00 for pre-8AM logins (e.g.
+    07:02 → expiry in 58 min), causing immediate "token expired" status.
+    """
     now_ist = datetime.now(IST)
-    target = now_ist.replace(hour=8, minute=0, second=0, microsecond=0)
-    if now_ist >= target:
-        target = target + timedelta(days=1)
+    tomorrow = now_ist + timedelta(days=1)
+    target = tomorrow.replace(hour=8, minute=0, second=0, microsecond=0)
     return target.astimezone(timezone.utc)
 
 
