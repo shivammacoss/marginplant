@@ -257,28 +257,20 @@ def _parse_hhmm(schedule_time_ist: str) -> tuple[int, int]:
 
 
 async def _already_fired_today(today_ist_date: str) -> bool:
-    """Authoritative "did we already fire today?" check.
+    """Did the SCHEDULER already fire today?
 
-    Reads `last_attempt_at` from the DB. Because
-    `ZerodhaAutoLoginService.refresh_now()` stamps that field at the
-    very TOP of the method (before precheck/decrypt/Playwright), it
-    is set on EVERY attempt regardless of how the attempt ended —
-    success, decrypt failure, lock collision, missing credentials.
-    That makes it a reliable "we ran today, don't run again" marker
-    that survives backend restarts.
+    Only counts scheduler-initiated attempts (last_attempt_source == "scheduler").
+    Manual "Test login now" clicks must NOT block the daily scheduler.
     """
     try:
         doc = await ZerodhaAutoLogin.find_one()
         if doc is None or doc.last_attempt_at is None:
             return False
+        if getattr(doc, "last_attempt_source", "") != "scheduler":
+            return False
         last_attempt_ist = doc.last_attempt_at.astimezone(IST).date()
         return last_attempt_ist.isoformat() == today_ist_date
     except Exception:
-        # Be safe — if the DB lookup fails for whatever reason, prefer
-        # firing again (the leader lock + Kite rate limits will still
-        # prevent a true concurrent double-fire). Worst case is one
-        # extra Playwright run in a day; the alternative (silent skip)
-        # is worse.
         logger.exception("zerodha_scheduler_last_attempt_lookup_failed")
         return False
 

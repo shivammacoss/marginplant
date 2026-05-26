@@ -319,6 +319,7 @@ class ZerodhaAutoLoginService:
         # would re-fire on every 60-s tick all day long.
         doc.last_attempt_at = now_utc()
         doc.last_stage = "in_progress"
+        doc.last_attempt_source = "scheduler" if "scheduler" in triggered_by else "manual"
         await doc.save()
 
         if not (

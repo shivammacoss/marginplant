@@ -34,6 +34,7 @@ class ZerodhaAutoLogin(TimestampMixin):
     last_attempt_at: datetime | None = None
     last_success_at: datetime | None = None
     last_status: str = ""  # "success" | "failed" | "" (never run)
+    last_attempt_source: str = ""  # "scheduler" | "manual" | ""
     last_error_detail: str | None = None
     consecutive_failures: int = 0
     last_duration_ms: int | None = None
