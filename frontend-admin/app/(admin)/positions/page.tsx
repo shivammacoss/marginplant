@@ -208,12 +208,12 @@ function AdminPositionsInner() {
       ),
     [openRows],
   );
-  // Only subscribe while the user is on the Open tab — Closed tab
-  // rows have frozen prices and the WS noise would be pure waste.
-  const liveQuotes = useMarketStream(tab === "open" ? openTokens : []);
+  // Always subscribe to open position tokens so the Open PNL summary
+  // card stays live even when the admin is on the Closed tab.
+  const liveQuotes = useMarketStream(openTokens);
 
   const openRowsLive = useMemo(() => {
-    if (tab !== "open" || liveQuotes.size === 0) return openRows;
+    if (liveQuotes.size === 0) return openRows;
     return (openRows ?? []).map((r: any) => {
       const tok = String(r.instrument_token ?? r.token ?? "");
       const live = tok ? liveQuotes.get(tok) : undefined;
