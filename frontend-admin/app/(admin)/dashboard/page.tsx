@@ -19,6 +19,58 @@ import { formatINR, formatINRCompact, formatNumber, pnlColor } from "@/lib/utils
 import { PageHeader } from "@/components/common/PageHeader";
 import { readDashboardSnapshot, writeDashboardSnapshot } from "@/lib/dashboardSnapshot";
 
+/**
+ * Tile palette. Each tone maps to:
+ *   - card: soft gradient bg + tinted ring (replaces the default flat
+ *     border so each tile has its own personality but the wall of
+ *     tiles still reads as one harmonious set)
+ *   - badge: filled icon chip in the top-right
+ *   - icon: stroke color inside the badge
+ *   - value: number color so the headline matches its tile family
+ *
+ * Tones use Tailwind palette suffixes that work in both light + dark
+ * mode (the project ships both themes).
+ */
+type ToneKey = "emerald" | "sky" | "violet" | "amber" | "rose" | "indigo";
+const TONES: Record<ToneKey, { card: string; badge: string; icon: string; value: string }> = {
+  emerald: {
+    card: "bg-gradient-to-br from-emerald-50 via-card to-card ring-1 ring-emerald-500/20 hover:ring-emerald-500/40 dark:from-emerald-500/10",
+    badge: "bg-emerald-500/15",
+    icon: "text-emerald-600 dark:text-emerald-400",
+    value: "text-emerald-700 dark:text-emerald-300",
+  },
+  sky: {
+    card: "bg-gradient-to-br from-sky-50 via-card to-card ring-1 ring-sky-500/20 hover:ring-sky-500/40 dark:from-sky-500/10",
+    badge: "bg-sky-500/15",
+    icon: "text-sky-600 dark:text-sky-400",
+    value: "text-sky-700 dark:text-sky-300",
+  },
+  violet: {
+    card: "bg-gradient-to-br from-violet-50 via-card to-card ring-1 ring-violet-500/20 hover:ring-violet-500/40 dark:from-violet-500/10",
+    badge: "bg-violet-500/15",
+    icon: "text-violet-600 dark:text-violet-400",
+    value: "text-violet-700 dark:text-violet-300",
+  },
+  amber: {
+    card: "bg-gradient-to-br from-amber-50 via-card to-card ring-1 ring-amber-500/20 hover:ring-amber-500/40 dark:from-amber-500/10",
+    badge: "bg-amber-500/15",
+    icon: "text-amber-600 dark:text-amber-400",
+    value: "text-amber-700 dark:text-amber-300",
+  },
+  rose: {
+    card: "bg-gradient-to-br from-rose-50 via-card to-card ring-1 ring-rose-500/20 hover:ring-rose-500/40 dark:from-rose-500/10",
+    badge: "bg-rose-500/15",
+    icon: "text-rose-600 dark:text-rose-400",
+    value: "text-rose-700 dark:text-rose-300",
+  },
+  indigo: {
+    card: "bg-gradient-to-br from-indigo-50 via-card to-card ring-1 ring-indigo-500/20 hover:ring-indigo-500/40 dark:from-indigo-500/10",
+    badge: "bg-indigo-500/15",
+    icon: "text-indigo-600 dark:text-indigo-400",
+    value: "text-indigo-700 dark:text-indigo-300",
+  },
+};
+
 export default function AdminDashboardPage() {
   // Initial render uses the last-known dashboard snapshot from localStorage
   // so the 10 stat cards never flash "0" between login and the first
@@ -49,19 +101,29 @@ export default function AdminDashboardPage() {
   // the full `formatINR` because it has its own column width budget.
   const inr = (v: number | null | undefined): string => (ready ? formatINRCompact(v) : "₹ —");
 
-  const cards = [
-    { label: "Total users", value: num(stats?.users?.total), hint: "All roles", icon: Users },
-    { label: "Active today", value: num(stats?.users?.active_today), hint: "Last 24h", icon: Activity },
-    // Tooltip on the money tiles shows the un-abbreviated number so admins
-    // can read the exact value on hover without leaving the dashboard.
-    { label: "Wallet balance", value: inr(stats?.money?.wallet_balance_total), title: formatINR(stats?.money?.wallet_balance_total), hint: "All users", icon: CircleDollarSign },
-    { label: "Margin used", value: inr(stats?.money?.margin_used_total), title: formatINR(stats?.money?.margin_used_total), hint: "Locked in trades", icon: Banknote },
-    { label: "Today's volume", value: inr(stats?.trading?.today_volume), title: formatINR(stats?.trading?.today_volume), hint: "Turnover", icon: TrendingUp },
-    { label: "Today's revenue", value: inr(stats?.trading?.today_revenue), title: formatINR(stats?.trading?.today_revenue), hint: "Brokerage", icon: Banknote },
-    { label: "Open positions", value: num(stats?.trading?.open_positions), hint: "Across users", icon: ListOrdered },
-    { label: "Pending orders", value: num(stats?.trading?.pending_orders), hint: "Awaiting fill", icon: ListOrdered },
-    { label: "Pending deposits", value: num(stats?.approvals?.pending_deposits), hint: "Approve in Money → Deposits", icon: ArrowDownToLine },
-    { label: "Pending withdrawals", value: num(stats?.approvals?.pending_withdrawals), hint: "Approve in Money → Withdrawals", icon: ArrowUpToLine },
+  // Each tile gets a `tone` to drive a soft gradient + coloured icon
+  // badge. We keep the palette deliberately tasteful: an emerald house
+  // accent on people / money inflow cards, blue on activity, amber on
+  // money outflow / pending work, rose for withdrawals. Pure UI flair,
+  // no business logic changes.
+  const cards: Array<{
+    label: string;
+    value: string;
+    hint?: string;
+    icon: any;
+    title?: string;
+    tone: ToneKey;
+  }> = [
+    { label: "Total users", value: num(stats?.users?.total), hint: "All roles", icon: Users, tone: "indigo" },
+    { label: "Active today", value: num(stats?.users?.active_today), hint: "Last 24h", icon: Activity, tone: "sky" },
+    { label: "Wallet balance", value: inr(stats?.money?.wallet_balance_total), title: formatINR(stats?.money?.wallet_balance_total), hint: "All users", icon: CircleDollarSign, tone: "emerald" },
+    { label: "Margin used", value: inr(stats?.money?.margin_used_total), title: formatINR(stats?.money?.margin_used_total), hint: "Locked in trades", icon: Banknote, tone: "amber" },
+    { label: "Today's volume", value: inr(stats?.trading?.today_volume), title: formatINR(stats?.trading?.today_volume), hint: "Turnover", icon: TrendingUp, tone: "violet" },
+    { label: "Today's revenue", value: inr(stats?.trading?.today_revenue), title: formatINR(stats?.trading?.today_revenue), hint: "Brokerage", icon: Banknote, tone: "emerald" },
+    { label: "Open positions", value: num(stats?.trading?.open_positions), hint: "Across users", icon: ListOrdered, tone: "sky" },
+    { label: "Pending orders", value: num(stats?.trading?.pending_orders), hint: "Awaiting fill", icon: ListOrdered, tone: "amber" },
+    { label: "Pending deposits", value: num(stats?.approvals?.pending_deposits), hint: "Approve in Money → Deposits", icon: ArrowDownToLine, tone: "emerald" },
+    { label: "Pending withdrawals", value: num(stats?.approvals?.pending_withdrawals), hint: "Approve in Money → Withdrawals", icon: ArrowUpToLine, tone: "rose" },
   ];
 
   return (
@@ -71,20 +133,41 @@ export default function AdminDashboardPage() {
       <section className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         {cards.map((c) => {
           const Icon = c.icon;
+          const t = TONES[c.tone];
           return (
-            <Card key={c.label}>
-              <CardHeader className="flex flex-row items-start justify-between pb-2">
-                <CardDescription>{c.label}</CardDescription>
-                <Icon className="size-4 text-muted-foreground" />
+            <Card
+              key={c.label}
+              className={`group relative overflow-hidden border-0 shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg ${t.card}`}
+            >
+              {/* Decorative blurred halo behind the icon — gives the
+                  tile depth without resorting to heavy 3-D shadows. */}
+              <span
+                className={`pointer-events-none absolute -right-6 -top-6 h-20 w-20 rounded-full opacity-50 blur-2xl ${t.badge}`}
+                aria-hidden
+              />
+              <CardHeader className="relative z-[1] flex flex-row items-start justify-between gap-2 pb-2">
+                <CardDescription className="font-medium text-foreground/70">
+                  {c.label}
+                </CardDescription>
+                <span
+                  className={`inline-flex size-8 shrink-0 items-center justify-center rounded-lg ring-1 ring-inset ring-border/40 ${t.badge}`}
+                  aria-hidden
+                >
+                  <Icon className={`size-4 ${t.icon}`} />
+                </span>
               </CardHeader>
-              <CardContent className="space-y-1">
+              <CardContent className="relative z-[1] space-y-1">
                 <div
-                  className="font-tabular text-xl font-semibold sm:text-2xl"
+                  className={`font-tabular text-xl font-bold tracking-tight sm:text-2xl ${t.value}`}
                   title={(c as { title?: string }).title}
                 >
                   {c.value}
                 </div>
-                {c.hint && <div className="text-[11px] text-muted-foreground">{c.hint}</div>}
+                {c.hint && (
+                  <div className="text-[11px] text-muted-foreground">
+                    {c.hint}
+                  </div>
+                )}
               </CardContent>
             </Card>
           );
@@ -103,7 +186,8 @@ export default function AdminDashboardPage() {
                 <ShieldAlert className="size-4" /> No risk alerts at the moment.
               </div>
             ) : (
-              <table className="w-full text-xs">
+              <div className="-mx-2 overflow-x-auto scrollbar-thin">
+              <table className="w-full min-w-[560px] text-xs">
                 <thead className="border-b border-border text-muted-foreground">
                   <tr>
                     <th className="px-2 py-1.5 text-left">User</th>
@@ -137,6 +221,7 @@ export default function AdminDashboardPage() {
                   ))}
                 </tbody>
               </table>
+              </div>
             )}
           </CardContent>
         </Card>

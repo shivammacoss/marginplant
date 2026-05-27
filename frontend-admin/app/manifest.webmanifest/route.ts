@@ -28,13 +28,24 @@ const PLATFORM_DEFAULT = {
   description: "Super-admin control panel for the MarginPlant Broker platform.",
   start_url: "/dashboard",
   scope: "/",
+  // Standalone gives the installed app its own window without browser
+  // chrome (no URL bar, no tabs) so it really feels like a native shell.
   display: "standalone",
+  // Fallback chain — some browsers (Samsung Internet) still honour
+  // display_override even when "standalone" is the primary value.
+  display_override: ["standalone", "minimal-ui"],
   orientation: "portrait" as const,
   background_color: "#0a0a0a",
   theme_color: "#0a0a0a",
   categories: ["finance", "business"],
+  // Multiple icon entries — the SVG handles any size losslessly (used
+  // by Chromium / Edge desktop), but Android home screens require a
+  // 192/512 raster declaration to pass the install criteria. Declaring
+  // the SVG at those sizes is valid and gets rasterised by the OS.
   icons: [
     { src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "any" },
+    { src: "/icon.svg", sizes: "192x192", type: "image/svg+xml", purpose: "any maskable" },
+    { src: "/icon.svg", sizes: "512x512", type: "image/svg+xml", purpose: "any maskable" },
   ],
 };
 

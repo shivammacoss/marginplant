@@ -213,7 +213,35 @@ export function DepositsPanel() {
           <option value="REJECTED">Rejected</option>
         </select>
       </div>
-      <DataTable columns={cols} rows={items} keyExtractor={(r) => r.id} loading={isFetching && !data} />
+      {/* Desktop: full table */}
+      <div className="hidden md:block">
+        <DataTable columns={cols} rows={items} keyExtractor={(r) => r.id} loading={isFetching && !data} />
+      </div>
+
+      {/* Mobile: stacked cards — same data, tap-friendly approve/reject */}
+      <div className="space-y-2 md:hidden">
+        {isFetching && !data && (
+          <div className="rounded-lg border border-border bg-card p-6 text-center text-sm text-muted-foreground">
+            Loading…
+          </div>
+        )}
+        {!isFetching && items.length === 0 && (
+          <div className="rounded-lg border border-dashed border-border bg-card p-6 text-center text-sm text-muted-foreground">
+            No data
+          </div>
+        )}
+        {items.map((r: any) => (
+          <DepositMobileCard
+            key={r.id}
+            r={r}
+            canMutate={canMutate}
+            onApprove={() => approve(r.id)}
+            onReject={() => setRejecting({ id: r.id, remark: "" })}
+            onPreview={() => r.screenshot_url && setPreviewUrl(r.screenshot_url)}
+            me={me}
+          />
+        ))}
+      </div>
 
       {/* Pagination — 15 rows per page (matches backend page_size).
           Hidden when there's only one page so the panel stays clean. */}
@@ -292,6 +320,162 @@ export function DepositsPanel() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────── */
+/* Mobile deposit card                                                  */
+/* ─────────────────────────────────────────────────────────────────── */
+
+/**
+ * Tap-friendly card view of a deposit row used on phones (<md). Lays
+ * out the same data the desktop table shows but in a 3-section card:
+ *   1. Header strip with status accent + amount headline
+ *   2. Meta rows (user / mode / UTR / remark)
+ *   3. Action footer (Approve / Reject / Proof)
+ *
+ * Approve / Reject only render for PENDING + when the operator has
+ * write permission, exactly matching the table's behaviour so there's
+ * no business-logic drift between the two views.
+ */
+function DepositMobileCard({
+  r,
+  canMutate,
+  onApprove,
+  onReject,
+  onPreview,
+  me,
+}: {
+  r: any;
+  canMutate: boolean;
+  onApprove: () => void;
+  onReject: () => void;
+  onPreview: () => void;
+  me: any;
+}) {
+  const isPending = r.status === "PENDING";
+  const isApproved = r.status === "APPROVED";
+  const isRejected = r.status === "REJECTED";
+  const settlement = Number(r.user_settlement_outstanding ?? 0);
+
+  // Color the left edge of the card by status so an operator can scan
+  // a long list and instantly spot PENDING vs APPROVED vs REJECTED.
+  const accent = isPending
+    ? "before:bg-amber-500"
+    : isApproved
+      ? "before:bg-emerald-500"
+      : isRejected
+        ? "before:bg-destructive"
+        : "before:bg-muted-foreground/30";
+
+  return (
+    <div
+      className={`relative overflow-hidden rounded-xl border border-border bg-gradient-to-br from-card to-card/60 p-3 pl-4 shadow-sm before:absolute before:inset-y-2 before:left-1 before:w-1 before:rounded-full ${accent}`}
+    >
+      {/* Top: status + when + amount */}
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <StatusPill status={r.status} />
+            <span className="text-[11px] text-muted-foreground">
+              {new Date(r.created_at).toLocaleString("en-IN", {
+                day: "2-digit",
+                month: "short",
+                hour: "2-digit",
+                minute: "2-digit",
+                hour12: true,
+              })}
+            </span>
+          </div>
+          <div className="mt-1 text-sm font-semibold leading-tight">
+            {r.user_name || "—"}
+          </div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
+            <span className="font-mono">{r.user_code || r.user_id?.slice(-8)}</span>
+            <OwnerBadge row={r} me={me} />
+          </div>
+        </div>
+        <div className="shrink-0 text-right">
+          <div className="font-tabular text-base font-bold text-emerald-600 dark:text-emerald-400">
+            {formatINR(r.amount)}
+          </div>
+          {settlement > 0 && (
+            <div
+              className="mt-0.5 text-[10px] text-amber-600 dark:text-amber-400"
+              title={`User has ₹${settlement.toFixed(2)} settlement on record (informational).`}
+            >
+              ⓘ ₹{settlement.toFixed(0)} settle
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Meta strip */}
+      <div className="mt-2.5 grid grid-cols-2 gap-2 rounded-lg bg-muted/30 p-2 text-[11px]">
+        <div className="min-w-0">
+          <div className="text-[9px] uppercase tracking-wider text-muted-foreground">
+            Mode
+          </div>
+          <div className="truncate font-medium">{r.payment_mode || "—"}</div>
+        </div>
+        <div className="min-w-0">
+          <div className="text-[9px] uppercase tracking-wider text-muted-foreground">
+            UTR
+          </div>
+          <div className="truncate font-mono text-[11px]" title={r.utr_number || "—"}>
+            {r.utr_number || "—"}
+          </div>
+        </div>
+        {r.user_remark && (
+          <div className="col-span-2 min-w-0">
+            <div className="text-[9px] uppercase tracking-wider text-muted-foreground">
+              Remark
+            </div>
+            <div className="truncate" title={r.user_remark}>
+              {r.user_remark}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Footer actions */}
+      <div className="mt-3 flex items-center gap-2">
+        {r.screenshot_url && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-9 flex-1"
+            onClick={onPreview}
+          >
+            <ImageIcon className="size-4" /> Proof
+          </Button>
+        )}
+        {isPending && (
+          <>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-9 flex-1 border-emerald-500/40 text-emerald-600 hover:bg-emerald-500 hover:text-white dark:text-emerald-400"
+              disabled={!canMutate}
+              onClick={onApprove}
+              title={canMutate ? "Approve deposit" : "View-only access"}
+            >
+              <Check className="size-4" /> Approve
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-9 flex-1 border-destructive/40 text-destructive hover:bg-destructive hover:text-destructive-foreground"
+              disabled={!canMutate}
+              onClick={onReject}
+              title={canMutate ? "Reject with reason" : "View-only access"}
+            >
+              <X className="size-4" /> Reject
+            </Button>
+          </>
+        )}
+      </div>
     </div>
   );
 }

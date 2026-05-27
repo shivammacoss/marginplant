@@ -5,6 +5,7 @@ import { useState } from "react";
 import { ThemeProvider, useTheme } from "next-themes";
 import { Toaster } from "sonner";
 import { AdminBrandingChrome } from "@/components/branding/AdminBrandingChrome";
+import { SessionKeepAlive } from "@/components/auth/SessionKeepAlive";
 
 function ThemedToaster() {
   const { resolvedTheme } = useTheme();
@@ -64,6 +65,10 @@ export function Providers({ children }: { children: React.ReactNode }) {
         {/* Tenant chrome (tab title + favicon) for ADMIN/BROKER. Renders
             null; pure side-effects keyed off the auth store. */}
         <AdminBrandingChrome />
+        {/* Keeps the access token rotated on tab focus / visibility
+            so admins reopening the PWA after a long break aren't
+            kicked back to /login. Renders nothing. */}
+        <SessionKeepAlive />
         {children}
         <ThemedToaster />
       </QueryClientProvider>

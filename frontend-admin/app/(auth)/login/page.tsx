@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { BrandLogo } from "@/components/layout/BrandLogo";
+import { InstallPWAButton } from "@/components/pwa/InstallPWAButton";
 
 const schema = z.object({
   identifier: z.string().min(3, "Enter your admin email or user code"),
@@ -76,6 +77,23 @@ export default function AdminLoginPage() {
               Activity is logged. IP allow-listing and rate-limiting are enforced server-side.
             </p>
           </form>
+
+          {/* Install web app — sits below the form so it doesn't compete
+              with the primary "Sign in" CTA. Only renders a real button
+              when the browser actually supports install (Chromium fires
+              `beforeinstallprompt`) or when the visitor is on iOS where
+              we surface a manual "Add to Home Screen" walkthrough. */}
+          <div className="mt-5 space-y-2 border-t border-border pt-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-xs font-semibold">Install MP Admin app</div>
+                <p className="text-[11px] leading-snug text-muted-foreground">
+                  One-tap home-screen launcher. Stays signed in like a native app.
+                </p>
+              </div>
+            </div>
+            <InstallPWAButton />
+          </div>
         </CardContent>
       </Card>
     </main>

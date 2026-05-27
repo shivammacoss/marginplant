@@ -138,9 +138,13 @@ export function AutoLoginPanel() {
 
   return (
     <section className="overflow-hidden rounded-lg border border-border/60 bg-card/40 shadow-sm">
-      {/* ── Top: title + countdown + token health in one tight row ── */}
+      {/* ── Top: title + countdown + token health.
+          Stacks vertically on phones (<sm) so the title block, the
+          countdown, and the token-health column don't collide on a
+          280-360 px column. From sm+ it returns to the original
+          three-column row layout. */}
       <div
-        className={`flex flex-wrap items-start gap-3 border-b border-border/60 px-4 py-3 ${heroBgClass(healthState)}`}
+        className={`flex flex-col gap-3 border-b border-border/60 px-4 py-3 sm:flex-row sm:flex-wrap sm:items-start ${heroBgClass(healthState)}`}
       >
         {/* Left: icon + heading + description */}
         <div className="flex min-w-0 flex-1 items-center gap-2.5">
@@ -149,66 +153,74 @@ export function AutoLoginPanel() {
           >
             <Repeat className={`h-3.5 w-3.5 ${heroIconColorClass(healthState)}`} />
           </div>
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <h3 className="text-sm font-semibold">Daily auto-login</h3>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-sm font-semibold leading-tight">Daily auto-login</h3>
               <HealthPill state={healthState} />
             </div>
-            <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+            <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground line-clamp-2 sm:truncate">
               Refreshes Kite token daily before market open · AES-256-GCM encrypted
             </p>
           </div>
         </div>
 
-        {/* Middle: countdown */}
-        <div className="flex min-w-[160px] flex-col items-end gap-0.5">
-          <div className="flex items-center gap-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-            <Timer className="h-2.5 w-2.5" />
-            Next run
-          </div>
-          <div
-            className={`font-mono text-base font-semibold tabular-nums leading-none ${
-              isEnabled && isConfigured ? "text-foreground" : "text-muted-foreground"
-            }`}
-          >
-            {isEnabled && isConfigured ? countdown.primary : "Paused"}
-          </div>
-          <div className="text-[10px] text-muted-foreground">
-            {isEnabled && isConfigured
-              ? `${schedule} IST · ${nextRun.dateLabel}`
-              : !isConfigured
-                ? "Not configured"
-                : "Scheduler off"}
-          </div>
-        </div>
+        {/* Mobile-only divider so the metric strip below feels separated. */}
+        <div className="-mx-4 h-px bg-border/40 sm:hidden" />
 
-        {/* Right: token health */}
-        <div className="flex min-w-[140px] flex-col items-end gap-0.5">
-          <div className="flex items-center gap-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-            <ShieldCheck className="h-2.5 w-2.5" />
-            Token health
+        {/* Middle + Right become a 2-up grid on phones so both metrics
+            sit side-by-side instead of stacking vertically and pushing
+            the controls way down the page. */}
+        <div className="grid grid-cols-2 gap-3 sm:contents">
+          {/* Middle: countdown */}
+          <div className="flex min-w-0 flex-col items-start gap-0.5 sm:min-w-[160px] sm:items-end">
+            <div className="flex items-center gap-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+              <Timer className="h-2.5 w-2.5" />
+              Next run
+            </div>
+            <div
+              className={`truncate font-mono text-base font-semibold tabular-nums leading-none ${
+                isEnabled && isConfigured ? "text-foreground" : "text-muted-foreground"
+              }`}
+            >
+              {isEnabled && isConfigured ? countdown.primary : "Paused"}
+            </div>
+            <div className="truncate text-[10px] text-muted-foreground">
+              {isEnabled && isConfigured
+                ? `${schedule} IST · ${nextRun.dateLabel}`
+                : !isConfigured
+                  ? "Not configured"
+                  : "Scheduler off"}
+            </div>
           </div>
-          <div
-            className={`text-base font-semibold leading-none ${
-              lastStatus === "success"
-                ? "text-emerald-400"
+
+          {/* Right: token health */}
+          <div className="flex min-w-0 flex-col items-start gap-0.5 sm:min-w-[140px] sm:items-end">
+            <div className="flex items-center gap-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+              <ShieldCheck className="h-2.5 w-2.5" />
+              Token health
+            </div>
+            <div
+              className={`truncate text-base font-semibold leading-none ${
+                lastStatus === "success"
+                  ? "text-emerald-400"
+                  : lastStatus === "failed"
+                    ? "text-destructive"
+                    : "text-muted-foreground"
+              }`}
+            >
+              {lastStatus === "success"
+                ? "Healthy"
                 : lastStatus === "failed"
-                  ? "text-destructive"
-                  : "text-muted-foreground"
-            }`}
-          >
-            {lastStatus === "success"
-              ? "Healthy"
-              : lastStatus === "failed"
-                ? "Attention"
-                : "Idle"}
-          </div>
-          <div className="text-[10px] text-muted-foreground">
-            {lastDurationSec && lastStatus === "success"
-              ? `${lastDurationSec}s · ${consecutiveFailures} fails`
-              : status?.last_attempt_at
-                ? formatTs(status.last_attempt_at)
-                : "Never run"}
+                  ? "Attention"
+                  : "Idle"}
+            </div>
+            <div className="truncate text-[10px] text-muted-foreground">
+              {lastDurationSec && lastStatus === "success"
+                ? `${lastDurationSec}s · ${consecutiveFailures} fails`
+                : status?.last_attempt_at
+                  ? formatTs(status.last_attempt_at)
+                  : "Never run"}
+            </div>
           </div>
         </div>
       </div>

@@ -291,13 +291,44 @@ export default function AdminUsersPage() {
         <LiveBadge fetching={liveStatsQuery.isFetching} />
       </div>
 
-      <DataTable
-        columns={columns}
-        rows={data?.items}
-        keyExtractor={(r) => r.id}
-        loading={isFetching && !data}
-        empty="No users match the current filters."
-      />
+      {/* Desktop: full data table. Hidden on phones because 14 columns
+          don't fit and the horizontal-scroll experience is awkward
+          (operator flagged: "kuch dikhta hi nahi"). */}
+      <div className="hidden md:block">
+        <DataTable
+          columns={columns}
+          rows={data?.items}
+          keyExtractor={(r) => r.id}
+          loading={isFetching && !data}
+          empty="No users match the current filters."
+        />
+      </div>
+
+      {/* Mobile: stacked card list — same data, tap-friendly layout. */}
+      <div className="space-y-2 md:hidden">
+        {isFetching && !data && (
+          <div className="rounded-lg border border-border bg-card p-6 text-center text-sm text-muted-foreground">
+            Loading…
+          </div>
+        )}
+        {!isFetching && (!data?.items || data.items.length === 0) && (
+          <div className="rounded-lg border border-dashed border-border bg-card p-6 text-center text-sm text-muted-foreground">
+            No users match the current filters.
+          </div>
+        )}
+        {data?.items?.map((r: any) => (
+          <UserMobileCard
+            key={r.id}
+            r={r}
+            me={me}
+            balance={pickBalance(r)}
+            openPnl={pickOpenPnl(r)}
+            equity={pickEquity(r)}
+            onLedger={() => setLedgerUser(r)}
+            onStats={() => setStatsUser(r)}
+          />
+        ))}
+      </div>
 
       {totalPages > 1 && (
         <div className="flex items-center justify-end gap-2 text-xs text-muted-foreground">
@@ -434,5 +465,159 @@ function LiveBadge({ fetching }: { fetching: boolean }) {
       </span>
       Live · {(LIVE_STATS_REFETCH_MS / 1000).toFixed(1)}s
     </span>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────── */
+/* Mobile user card                                                     */
+/* ─────────────────────────────────────────────────────────────────── */
+
+/**
+ * Compact card representation of a user row for phones (<md). Shows
+ * the essentials — identifier, contact, status, owner — plus the
+ * three live money metrics in a 3-up mini-grid, and surfaces the same
+ * L/S/P quick actions + UserActionMenu the table has on desktop.
+ *
+ * Reuses the exact same data picks the table does so values never
+ * drift between the two views.
+ */
+function UserMobileCard({
+  r,
+  me,
+  balance,
+  openPnl,
+  equity,
+  onLedger,
+  onStats,
+}: {
+  r: any;
+  me: any;
+  balance: number;
+  openPnl: number | null;
+  equity: number | null;
+  onLedger: () => void;
+  onStats: () => void;
+}) {
+  const settlement = Number(r.wallet?.settlement_outstanding ?? 0);
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-border bg-gradient-to-br from-card to-card/60 p-3 shadow-sm transition-shadow hover:shadow-md">
+      {/* Top row: code + name on the left, status + owner on the right */}
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="rounded-md bg-primary/10 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-primary">
+              {r.user_code}
+            </span>
+            <StatusPill status={r.status} />
+          </div>
+          <div className="mt-1.5 truncate text-sm font-semibold" title={r.full_name}>
+            {r.full_name || "—"}
+          </div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
+            {r.email && <span className="truncate">{r.email}</span>}
+            {r.mobile && (
+              <a
+                href={`tel:${r.mobile}`}
+                className="font-tabular text-primary"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {r.mobile}
+              </a>
+            )}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-start gap-1">
+          <OwnerBadge row={r} me={me} />
+          <UserActionMenu user={r} />
+        </div>
+      </div>
+
+      {/* Money strip — 3 live metrics in a single tight row */}
+      <div className="mt-3 grid grid-cols-3 gap-2 rounded-lg bg-muted/30 p-2">
+        <MoneyTile label="Balance" value={balance} tone="neutral" />
+        <MoneyTile label="Open P&L" value={openPnl} tone="pnl" />
+        <MoneyTile label="Equity" value={equity} tone="equity" base={balance} />
+      </div>
+
+      {/* Settlement outstanding — only render when non-zero */}
+      {settlement > 0 && (
+        <div className="mt-2 flex items-center justify-between rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-1.5 text-[11px] text-destructive">
+          <span>Settlement outstanding</span>
+          <span className="font-semibold tabular-nums">
+            ₹{settlement.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </span>
+        </div>
+      )}
+
+      {/* Quick actions row — same L / S / P as table desktop, but full
+          tap-target friendly with labels. */}
+      <div className="mt-3 grid grid-cols-3 gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-9 border-primary/40 text-primary hover:bg-primary hover:text-primary-foreground"
+          onClick={onLedger}
+        >
+          Ledger
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-9 border-info/40 text-info hover:bg-info hover:text-info-foreground"
+          onClick={onStats}
+        >
+          Stats
+        </Button>
+        <Button asChild size="sm" variant="outline" className="h-9 border-atm/40 text-atm hover:bg-atm hover:text-atm-foreground">
+          <Link href={`/positions?user_id=${r.id}`}>Positions</Link>
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Compact money tile used inside UserMobileCard's 3-up strip. Pure
+ * presentation — `tone` selects color tint, `base` lets the equity
+ * variant compare against the available balance to pick green/red.
+ */
+function MoneyTile({
+  label,
+  value,
+  tone,
+  base,
+}: {
+  label: string;
+  value: number | null;
+  tone: "neutral" | "pnl" | "equity";
+  base?: number;
+}) {
+  const display =
+    value == null
+      ? "—"
+      : `₹${value.toLocaleString("en-IN", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })}`;
+
+  let valueClass = "text-foreground";
+  if (tone === "pnl" && value != null && value !== 0) {
+    valueClass = value > 0 ? "text-emerald-500" : "text-destructive";
+  } else if (tone === "equity" && value != null && base != null) {
+    const delta = value - base;
+    valueClass =
+      delta > 0 ? "text-emerald-500" : delta < 0 ? "text-destructive" : "text-foreground";
+  }
+
+  return (
+    <div className="min-w-0">
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+        {label}
+      </div>
+      <div className={`mt-0.5 truncate font-tabular text-xs font-semibold ${valueClass}`} title={display}>
+        {display}
+      </div>
+    </div>
   );
 }

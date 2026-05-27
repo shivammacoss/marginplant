@@ -873,8 +873,17 @@ function AdminPositionsInner() {
         title="Position Management"
         description={`${openRows?.length ?? 0} open · Live M2M: ${formatINR(totalPnl)}`}
         actions={
-          <Button variant="destructive" onClick={emergencyAll}>
-            <AlertOctagon className="size-4" /> Emergency square-off all
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={emergencyAll}
+            className="h-8 px-2 text-xs sm:h-9 sm:px-3 sm:text-sm"
+            title="Emergency square-off all positions"
+          >
+            <AlertOctagon className="size-3.5 sm:size-4" />
+            {/* Compact label on phones — full text from sm+ */}
+            <span className="sm:hidden">Square-off</span>
+            <span className="hidden sm:inline">Emergency square-off all</span>
           </Button>
         }
       />
@@ -897,7 +906,10 @@ function AdminPositionsInner() {
       )}
 
       {/* ── PnL summary cards ─────────────────────────────────────── */}
-      <section className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      {/* 3-up even on phones — operator wants all three M2M figures
+          visible at a glance without scrolling. Cards become more
+          compact on <sm (see PnlCard styles). */}
+      <section className="grid grid-cols-3 gap-2 sm:gap-3">
         {/* Open PNL: use the live, filter-aware sum of the visible
             open-trade rows rather than the platform-wide summary
             endpoint. The summary endpoint sums ALL open positions
@@ -1200,16 +1212,36 @@ function PnlCard({
 }) {
   const n = Number(value ?? 0);
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-start justify-between pb-2">
-        <CardDescription>{label}</CardDescription>
-        {Icon && <Icon className={cn("size-4", pnlColor(n))} />}
+    // Tighter padding on mobile so three cards fit in a phone row;
+    // CardHeader + CardContent restore their default p-4 from sm+.
+    <Card className="min-w-0">
+      <CardHeader className="flex flex-row items-start justify-between gap-1 p-2.5 pb-1 sm:p-4 sm:pb-2">
+        <CardDescription className="text-[11px] leading-tight sm:text-sm">
+          {label}
+        </CardDescription>
+        {Icon && (
+          <Icon className={cn("hidden size-4 shrink-0 sm:block", pnlColor(n))} />
+        )}
       </CardHeader>
-      <CardContent className="space-y-1">
-        <div className={cn("font-tabular text-2xl font-semibold", pnlColor(n))}>
+      <CardContent className="space-y-1 p-2.5 pt-0 sm:p-4 sm:pt-0">
+        <div
+          className={cn(
+            // Truncate so a long ₹ value doesn't blow out the column
+            // width on a 360px screen.
+            "truncate font-tabular text-sm font-semibold sm:text-2xl",
+            pnlColor(n)
+          )}
+          title={formatINR(n)}
+        >
           {formatINR(n)}
         </div>
-        {hint && <div className="text-[11px] text-muted-foreground">{hint}</div>}
+        {/* Hint is informative but eats vertical space on phones — hide
+            until sm+ where there's room. */}
+        {hint && (
+          <div className="hidden text-[11px] text-muted-foreground sm:block">
+            {hint}
+          </div>
+        )}
       </CardContent>
     </Card>
   );

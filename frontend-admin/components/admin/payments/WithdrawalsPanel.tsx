@@ -264,7 +264,34 @@ export function WithdrawalsPanel() {
           <option value="REJECTED">Rejected</option>
         </select>
       </div>
-      <DataTable columns={cols} rows={items} keyExtractor={(r) => r.id} loading={isFetching && !data} />
+      {/* Desktop: full table with destination columns */}
+      <div className="hidden md:block">
+        <DataTable columns={cols} rows={items} keyExtractor={(r) => r.id} loading={isFetching && !data} />
+      </div>
+
+      {/* Mobile: stacked withdrawal cards */}
+      <div className="space-y-2 md:hidden">
+        {isFetching && !data && (
+          <div className="rounded-lg border border-border bg-card p-6 text-center text-sm text-muted-foreground">
+            Loading…
+          </div>
+        )}
+        {!isFetching && items.length === 0 && (
+          <div className="rounded-lg border border-dashed border-border bg-card p-6 text-center text-sm text-muted-foreground">
+            No data
+          </div>
+        )}
+        {items.map((r: any) => (
+          <WithdrawalMobileCard
+            key={r.id}
+            r={r}
+            me={me}
+            canMutate={canMutate}
+            onApprove={() => setApproving({ id: r.id, utr: "" })}
+            onReject={() => setRejecting({ id: r.id, reason: "" })}
+          />
+        ))}
+      </div>
 
       {totalPages > 1 && (
         <div className="flex items-center justify-end gap-2 text-xs">
@@ -345,6 +372,151 @@ export function WithdrawalsPanel() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────── */
+/* Mobile withdrawal card                                               */
+/* ────────────────────────────────────────────────────────────────── */
+
+/**
+ * Phone-friendly card for a withdrawal row. Bank / UPI destination
+ * fields each keep their inline copy button so the payout-operator
+ * workflow (copy holder → account → IFSC into their payment tool)
+ * still works on mobile. Only renders Approve / Reject for PENDING +
+ * when the caller has write permission — same gate the table uses.
+ */
+function WithdrawalMobileCard({
+  r,
+  me,
+  canMutate,
+  onApprove,
+  onReject,
+}: {
+  r: any;
+  me: any;
+  canMutate: boolean;
+  onApprove: () => void;
+  onReject: () => void;
+}) {
+  const isPending = r.status === "PENDING";
+  const isCompleted = r.status === "COMPLETED";
+  const isRejected = r.status === "REJECTED";
+  const accent = isPending
+    ? "before:bg-amber-500"
+    : isCompleted
+      ? "before:bg-emerald-500"
+      : isRejected
+        ? "before:bg-destructive"
+        : "before:bg-muted-foreground/30";
+
+  // Toggle which destination block we show — some users have only UPI,
+  // some only bank. Bank takes priority when both exist (matches the
+  // desktop column ordering: holder → account → IFSC → UPI).
+  const hasBank = !!(r.bank?.account_number || r.bank?.ifsc);
+  const hasUpi = !!r.bank?.upi_id;
+
+  return (
+    <div
+      className={`relative overflow-hidden rounded-xl border border-border bg-gradient-to-br from-card to-card/60 p-3 pl-4 shadow-sm before:absolute before:inset-y-2 before:left-1 before:w-1 before:rounded-full ${accent}`}
+    >
+      {/* Header */}
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <StatusPill status={r.status} />
+            <span className="text-[11px] text-muted-foreground">
+              {new Date(r.created_at).toLocaleString("en-IN", {
+                day: "2-digit",
+                month: "short",
+                hour: "2-digit",
+                minute: "2-digit",
+                hour12: true,
+              })}
+            </span>
+          </div>
+          <div className="mt-1 text-sm font-semibold leading-tight">
+            {r.user_name || "—"}
+          </div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
+            <span className="font-mono">{r.user_code || r.user_id?.slice(-8)}</span>
+            <OwnerBadge row={r} me={me} />
+          </div>
+        </div>
+        <div className="shrink-0 text-right">
+          <div className="font-tabular text-base font-bold text-rose-600 dark:text-rose-400">
+            {formatINR(r.amount)}
+          </div>
+        </div>
+      </div>
+
+      {/* Destination block */}
+      <div className="mt-2.5 space-y-1.5 rounded-lg bg-muted/30 p-2 text-[11px]">
+        {hasBank && (
+          <>
+            <Row label="Holder">
+              <CopyableField value={(r.bank?.holder || r.bank?.name) ?? null} label="Holder name" mono={false} />
+            </Row>
+            <Row label="Account">
+              <CopyableField value={r.bank?.account_number ?? null} label="Account number" />
+            </Row>
+            <Row label="IFSC">
+              <CopyableField value={r.bank?.ifsc ?? null} label="IFSC" uppercase />
+            </Row>
+          </>
+        )}
+        {hasUpi && (
+          <Row label="UPI">
+            <CopyableField value={r.bank?.upi_id ?? null} label="UPI ID" />
+          </Row>
+        )}
+        {r.utr_number && (
+          <Row label="UTR">
+            <CopyableField value={r.utr_number} label="UTR" />
+          </Row>
+        )}
+        {r.remarks && (
+          <Row label="Remarks">
+            <span className="truncate" title={r.remarks}>{r.remarks}</span>
+          </Row>
+        )}
+      </div>
+
+      {/* Footer actions */}
+      {isPending && (
+        <div className="mt-3 flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-9 flex-1 border-emerald-500/40 text-emerald-600 hover:bg-emerald-500 hover:text-white dark:text-emerald-400"
+            disabled={!canMutate}
+            onClick={onApprove}
+            title={canMutate ? "Approve withdrawal" : "View-only access"}
+          >
+            <Check className="size-4" /> Approve
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-9 flex-1 border-destructive/40 text-destructive hover:bg-destructive hover:text-destructive-foreground"
+            disabled={!canMutate}
+            onClick={onReject}
+            title={canMutate ? "Reject with reason" : "View-only access"}
+          >
+            <X className="size-4" /> Reject
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-start justify-between gap-2">
+      <span className="shrink-0 text-[9px] uppercase tracking-wider text-muted-foreground">{label}</span>
+      <span className="min-w-0 max-w-[65%] text-right">{children}</span>
     </div>
   );
 }

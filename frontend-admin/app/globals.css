@@ -2,6 +2,36 @@
 @tailwind components;
 @tailwind utilities;
 
+/* PWA hardening — these sit OUTSIDE @layer so they win regardless of
+   Tailwind's reset order. They make the installed admin app behave
+   like a native shell:
+     - No iOS "Aa" text-size override
+     - No double-tap zoom (we still let scrollers + inputs work)
+     - No system text-selection on chrome (toolbars / nav / pills) —
+       inputs / table cells / paragraphs opt back in explicitly. */
+html {
+  -webkit-text-size-adjust: 100%;
+  -ms-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  touch-action: manipulation;
+  overscroll-behavior-y: none;
+}
+body {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* Re-enable selection for typeable / readable surfaces so admins can
+   still copy values from tables, cells, paragraphs, and inputs. */
+input,
+textarea,
+select,
+[contenteditable="true"],
+p, span, td, th, code, pre, .selectable {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 @layer base {
   /* ── Light (default) ──────────────────────────────────────────── */
   :root {
@@ -87,4 +117,32 @@
     background: hsl(var(--border));
     border-radius: 3px;
   }
+
+  /* ── Mobile-responsive helpers ─────────────────────────────────── */
+  /* iOS safe-area aware bottom padding for bottom-fixed bars. */
+  .safe-area-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
+  .safe-area-pt { padding-top: env(safe-area-inset-top, 0px); }
+
+  /* Apple HIG / Material minimum tap target = 44px. */
+  .tap-target { min-height: 44px; min-width: 44px; }
+
+  /* Hide scrollbar but keep scrolling (used for chip rows / pill tabs). */
+  .no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+
+  /* Opt-in helper: makes the FIRST column of a <table> sticky-left so
+     the row identifier stays visible while a wide table scrolls
+     horizontally on mobile. Wrap the table in `overflow-x-auto` AND
+     give the parent `<table>` (or its container) the class. */
+  .table-sticky-first thead th:first-child,
+  .table-sticky-first tbody td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: hsl(var(--card));
+  }
+
+  /* Prevents horizontal page scroll if a child accidentally overflows
+     viewport (e.g. an off-canvas drawer mid-animation). */
+  .clip-x { overflow-x: clip; }
 }
