@@ -502,35 +502,44 @@ function UserMobileCard({
 
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-gradient-to-br from-card to-card/60 p-3 shadow-sm transition-shadow hover:shadow-md">
-      {/* Top row: code + name on the left, status + owner on the right */}
+      {/* Row 1: user_code + status pill on the left, action menu on the
+          right. Owner / Transferred chips moved to their own row below
+          (operator complaint: code + status + broker-name + transferred
+          + menu were colliding on 360 px screens — chips visually overlapped). */}
       <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="rounded-md bg-primary/10 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-primary">
-              {r.user_code}
-            </span>
-            <StatusPill status={r.status} />
-          </div>
-          <div className="mt-1.5 truncate text-sm font-semibold" title={r.full_name}>
-            {r.full_name || "—"}
-          </div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
-            {r.email && <span className="truncate">{r.email}</span>}
-            {r.mobile && (
-              <a
-                href={`tel:${r.mobile}`}
-                className="font-tabular text-primary"
-                onClick={(e) => e.stopPropagation()}
-              >
-                {r.mobile}
-              </a>
-            )}
-          </div>
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+          <span className="rounded-md bg-primary/10 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-primary">
+            {r.user_code}
+          </span>
+          <StatusPill status={r.status} />
         </div>
-        <div className="flex shrink-0 items-start gap-1">
-          <OwnerBadge row={r} me={me} />
+        <div className="shrink-0">
           <UserActionMenu user={r} />
         </div>
+      </div>
+
+      {/* Row 2: name + contact info */}
+      <div className="mt-1.5 truncate text-sm font-semibold" title={r.full_name}>
+        {r.full_name || "—"}
+      </div>
+      <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
+        {r.email && <span className="truncate">{r.email}</span>}
+        {r.mobile && (
+          <a
+            href={`tel:${r.mobile}`}
+            className="font-tabular text-primary"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {r.mobile}
+          </a>
+        )}
+      </div>
+
+      {/* Row 3: owner / transferred chips — own row so long broker
+          names ("Sub-broker shyamlal-trading") don't crash into the
+          status pill. Wraps gracefully when both chips are present. */}
+      <div className="mt-1.5 flex flex-wrap items-center gap-1.5 [&_span]:max-w-full [&_span]:truncate">
+        <OwnerBadge row={r} me={me} />
       </div>
 
       {/* Money strip — 3 live metrics in a single tight row */}
