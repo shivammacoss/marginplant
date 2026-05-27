@@ -988,20 +988,50 @@ function AdminPositionsInner() {
         )}
       </div>
 
-      <DataTable
-        columns={cols}
-        rows={pagedData}
-        keyExtractor={(r) => r.id}
-        loading={isFetching && !data}
-        onRowClick={(r: any) => setNettingId(String(r.id))}
-        rowClassName={(r) =>
-          tab === "open" && Number(r.unrealized_pnl) < -Number(r.margin_used) * 0.5
-            ? "bg-destructive/5"
-            : tab === "open" && Number(r.unrealized_pnl) < -Number(r.margin_used) * 0.25
-              ? "bg-atm/5"
-              : undefined
-        }
-      />
+      {/* Desktop: full data table */}
+      <div className="hidden md:block">
+        <DataTable
+          columns={cols}
+          rows={pagedData}
+          keyExtractor={(r) => r.id}
+          loading={isFetching && !data}
+          onRowClick={(r: any) => setNettingId(String(r.id))}
+          rowClassName={(r) =>
+            tab === "open" && Number(r.unrealized_pnl) < -Number(r.margin_used) * 0.5
+              ? "bg-destructive/5"
+              : tab === "open" && Number(r.unrealized_pnl) < -Number(r.margin_used) * 0.25
+                ? "bg-atm/5"
+                : undefined
+          }
+        />
+      </div>
+
+      {/* Mobile: stacked position cards — same data, tap-friendly */}
+      <div className="space-y-2 md:hidden">
+        {isFetching && !data && (
+          <div className="rounded-lg border border-border bg-card p-6 text-center text-sm text-muted-foreground">
+            Loading…
+          </div>
+        )}
+        {!isFetching && (!pagedData || pagedData.length === 0) && (
+          <div className="rounded-lg border border-dashed border-border bg-card p-6 text-center text-sm text-muted-foreground">
+            No positions to show.
+          </div>
+        )}
+        {pagedData?.map((r: any) => (
+          <PositionMobileCard
+            key={r.id}
+            r={r}
+            tab={tab}
+            me={me}
+            onOpenNetting={() => setNettingId(String(r.id))}
+            onEdit={() => setEditing(r)}
+            onClose={() => setCloseTarget(r)}
+            onReopen={() => reopen(r)}
+            onDelete={() => remove(r.id, r.symbol, r.status, r.quantity)}
+          />
+        ))}
+      </div>
 
       <Pagination
         page={page}
@@ -1244,6 +1274,259 @@ function PnlCard({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────── */
+/* Mobile position card                                                 */
+/* ─────────────────────────────────────────────────────────────────── */
+
+/**
+ * Phone-friendly card for a single position row. Compresses the 14
+ * columns the desktop table shows into a 4-section card layout:
+ *   1. Header strip — user + symbol + side + status pill
+ *   2. Price strip — Qty · Avg Price · LTP/Close (3-up)
+ *   3. P&L strip — Realized / M2M · Brokerage · Net P&L
+ *   4. Footer — opened/holding meta + per-status action buttons
+ *
+ * Status accent bar on the left edge mirrors the deposit/withdrawal
+ * cards for visual continuity across the admin panel.
+ */
+function PositionMobileCard({
+  r,
+  tab,
+  me,
+  onOpenNetting,
+  onEdit,
+  onClose,
+  onReopen,
+  onDelete,
+}: {
+  r: any;
+  tab: "open" | "closed";
+  me: any;
+  onOpenNetting: () => void;
+  onEdit: () => void;
+  onClose: () => void;
+  onReopen: () => void;
+  onDelete: () => void;
+}) {
+  const isOpen = r.status === "OPEN";
+  const isClosed = r.status === "CLOSED";
+
+  const rawSide = (r.opened_side || (Number(r.quantity) >= 0 ? "BUY" : "SELL"))
+    .toString()
+    .toUpperCase();
+  const isBuy = rawSide === "BUY";
+
+  const displayQty = isClosed
+    ? Math.abs(Number(r.opening_quantity ?? 0))
+    : Math.abs(Number(r.quantity));
+
+  const gross = isOpen
+    ? Number(r.unrealized_pnl ?? 0)
+    : Number(r.realized_pnl ?? 0);
+  const charges = Number(r.charges ?? 0);
+  const net = gross - charges;
+
+  // Risk tint reuses the same threshold the desktop row-highlight uses
+  // so the visual signal is consistent across viewports.
+  const margin = Number(r.margin_used || 0);
+  const danger = isOpen && Number(r.unrealized_pnl) < -margin * 0.5;
+  const warn = !danger && isOpen && Number(r.unrealized_pnl) < -margin * 0.25;
+
+  // Left accent — destructive on heavy loss, amber on mild loss,
+  // emerald on closed, primary on healthy open.
+  const accent = danger
+    ? "before:bg-destructive"
+    : warn
+      ? "before:bg-amber-500"
+      : isClosed
+        ? "before:bg-emerald-500"
+        : "before:bg-primary";
+
+  return (
+    <div
+      className={cn(
+        "relative overflow-hidden rounded-xl border border-border bg-gradient-to-br from-card to-card/60 p-3 pl-4 shadow-sm transition-shadow hover:shadow-md before:absolute before:inset-y-2 before:left-1 before:w-1 before:rounded-full",
+        accent,
+        danger && "bg-destructive/5",
+        warn && "bg-amber-500/5",
+      )}
+      role="button"
+      tabIndex={0}
+      onClick={onOpenNetting}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") onOpenNetting();
+      }}
+    >
+      {/* Top: user + symbol + side + status */}
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <StatusPill status={r.status} />
+            <span
+              className={cn(
+                "inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-bold",
+                isBuy
+                  ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                  : "bg-red-500/15 text-red-600 dark:text-red-400",
+              )}
+            >
+              {rawSide}
+            </span>
+            <OwnerBadge row={r} me={me} />
+          </div>
+          <div className="mt-1 truncate text-sm font-semibold leading-tight" title={r.symbol}>
+            {r.symbol}
+          </div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
+            <span className="truncate">{r.user_name || "—"}</span>
+            <span className="font-mono">{r.user_code || r.user_id?.slice(-6)}</span>
+            {r.exchange && (
+              <span className="rounded bg-muted/50 px-1 py-0.5 text-[9px] uppercase tracking-wider">
+                {r.exchange}
+              </span>
+            )}
+          </div>
+        </div>
+        {/* Net P&L headline — what the admin actually audits */}
+        <div className="shrink-0 text-right">
+          <div className="text-[9px] uppercase tracking-wider text-muted-foreground">
+            Net P&L
+          </div>
+          <div
+            className={cn("font-tabular text-base font-bold leading-tight", pnlColor(net))}
+            title={`${isOpen ? "M2M" : "Realized"} ${formatINR(gross)} − Bkg ${formatINR(charges)}`}
+          >
+            {formatINR(net)}
+          </div>
+        </div>
+      </div>
+
+      {/* Price strip */}
+      <div className="mt-2.5 grid grid-cols-3 gap-2 rounded-lg bg-muted/30 p-2 text-[11px]">
+        <div className="min-w-0">
+          <div className="text-[9px] uppercase tracking-wider text-muted-foreground">
+            Qty
+          </div>
+          <div className={cn("truncate font-tabular text-xs font-semibold", isBuy ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400")}>
+            {displayQty}
+          </div>
+        </div>
+        <div className="min-w-0">
+          <div className="text-[9px] uppercase tracking-wider text-muted-foreground">
+            Open
+          </div>
+          <div className="truncate font-tabular text-xs font-semibold" title={String(r.avg_price)}>
+            {fmtFeedPrice(r.avg_price, r.currency_quote)}
+          </div>
+        </div>
+        <div className="min-w-0">
+          <div className="text-[9px] uppercase tracking-wider text-muted-foreground">
+            {isClosed ? "Close" : "LTP"}
+          </div>
+          <div className="truncate font-tabular text-xs font-semibold" title={String(r.ltp)}>
+            {fmtFeedPrice(r.ltp, r.currency_quote)}
+          </div>
+        </div>
+      </div>
+
+      {/* P&L breakdown strip */}
+      <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
+        <div className="min-w-0">
+          <div className="text-[9px] uppercase tracking-wider text-muted-foreground">
+            {isOpen ? "M2M" : "Realized"}
+          </div>
+          <div className={cn("truncate font-tabular text-xs font-semibold", pnlColor(gross))}>
+            {formatINR(gross)}
+          </div>
+        </div>
+        <div className="min-w-0">
+          <div className="text-[9px] uppercase tracking-wider text-muted-foreground">
+            Brokerage
+          </div>
+          <div className="truncate font-tabular text-xs font-semibold">
+            {formatINR(charges)}
+          </div>
+        </div>
+        <div className="min-w-0">
+          <div className="text-[9px] uppercase tracking-wider text-muted-foreground">
+            Opened
+          </div>
+          <div className="truncate font-tabular text-[11px] text-muted-foreground">
+            {fmtOpenedAt(r.opened_at)}
+          </div>
+        </div>
+      </div>
+
+      {/* Closed-only meta: holding time + close reason chip */}
+      {isClosed && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+          <span title={r.closed_at ?? undefined}>
+            Held {fmtHoldingTime(r.opened_at, r.closed_at)}
+          </span>
+          {r.close_reason && <CloseReasonChip reason={r.close_reason} />}
+        </div>
+      )}
+
+      {/* Action footer — stops propagation so taps don't fire the
+          row-level netting drilldown the parent wraps in. */}
+      <div
+        className="mt-3 flex items-center gap-2"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {isOpen && (
+          <>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-9 flex-1 border-blue-500/40 text-blue-600 hover:bg-blue-600 hover:text-white dark:text-blue-400"
+              onClick={onEdit}
+            >
+              <Pencil className="size-3.5" /> Edit
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-9 flex-1 border-destructive/40 text-destructive hover:bg-destructive hover:text-destructive-foreground"
+              onClick={onClose}
+            >
+              <X className="size-3.5" /> Close
+            </Button>
+          </>
+        )}
+        {isClosed && (
+          <>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-9 flex-1 border-blue-500/40 text-blue-600 hover:bg-blue-600 hover:text-white dark:text-blue-400"
+              onClick={onEdit}
+            >
+              <Pencil className="size-3.5" /> Edit
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-9 flex-1 border-amber-500/40 text-amber-600 hover:bg-amber-600 hover:text-white dark:text-amber-400"
+              onClick={onReopen}
+            >
+              <RotateCcw className="size-3.5" /> Reopen
+            </Button>
+          </>
+        )}
+        <Button
+          size="sm"
+          variant="outline"
+          aria-label="Delete record"
+          className="h-9 w-9 shrink-0 border-destructive/30 p-0 text-destructive hover:bg-destructive hover:text-destructive-foreground"
+          onClick={onDelete}
+        >
+          <Trash2 className="size-3.5" />
+        </Button>
+      </div>
+    </div>
   );
 }
 

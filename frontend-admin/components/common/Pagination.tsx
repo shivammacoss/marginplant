@@ -25,15 +25,20 @@ export function Pagination({
   const end = Math.min(page * pageSize, total);
 
   return (
+    // Mobile (<sm) lays out as: "Showing X–Y of N" full-width, then
+    // a wrap-friendly button row underneath. First / Last hide on
+    // phones (`hidden sm:inline-flex`) because they always sit next
+    // to Prev / Next + the page count, and on a 360px screen they
+    // were pushing Last off the right edge (operator screenshot).
     <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-      <div>
+      <div className="basis-full sm:basis-auto">
         Showing{" "}
         <span className="font-medium text-foreground">
           {start}–{end}
         </span>{" "}
         of <span className="font-medium text-foreground">{total}</span>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-1.5">
         {onPageSizeChange && (
           <label className="flex items-center gap-1.5">
             <span>Rows</span>
@@ -53,12 +58,13 @@ export function Pagination({
             </select>
           </label>
         )}
-        <span>
+        <span className="whitespace-nowrap">
           Page {page} of {totalPages}
         </span>
         <Button
           variant="outline"
           size="sm"
+          className="hidden sm:inline-flex"
           disabled={page <= 1}
           onClick={() => onPageChange(1)}
         >
@@ -83,6 +89,7 @@ export function Pagination({
         <Button
           variant="outline"
           size="sm"
+          className="hidden sm:inline-flex"
           disabled={page >= totalPages}
           onClick={() => onPageChange(totalPages)}
         >
