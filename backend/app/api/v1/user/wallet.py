@@ -279,6 +279,23 @@ async def create_withdrawal(payload: WithdrawalCreate, user: CurrentUser):
         user_remark=payload.remarks,
     )
 
+    # Balance pre-check — reject immediately if user doesn't have
+    # enough available_balance.  Without this, requests would sit in
+    # the admin queue and only fail (or worse, book settlement
+    # outstanding) at approval time.
+    from app.models.wallet import Wallet
+    from app.utils.decimal_utils import to_decimal
+
+    wallet = await Wallet.find_one(Wallet.user_id == user.id)
+    if wallet:
+        avail = to_decimal(wallet.available_balance)
+        req_amt = to_decimal(payload.amount)
+        if avail < req_amt:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Insufficient balance: available ₹{avail:,.2f}, requested ₹{req_amt:,.2f}",
+            )
+
     b = payload.bank or {}
     upi_id = (b.get("upi_id") or "").strip()
     account_number = (b.get("account_number") or "").strip()

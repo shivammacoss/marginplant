@@ -454,6 +454,19 @@ async def list_withdrawals(
         .to_list()
     )
     owner_map = await build_owner_map([r.user_id for r in rows])
+
+    # Batch-lookup wallet balances so admin can see at approval time
+    # whether the user actually has enough funds to withdraw.
+    from app.models.wallet import Wallet
+
+    wd_user_ids = list({r.user_id for r in rows})
+    wd_wallets = (
+        await Wallet.find({"user_id": {"$in": wd_user_ids}}).to_list()
+        if wd_user_ids
+        else []
+    )
+    wd_wallet_map = {str(w.user_id): w for w in wd_wallets}
+
     return APIResponse(
         data={
             "items": [
@@ -468,6 +481,16 @@ async def list_withdrawals(
                     "rejection_reason": r.rejection_reason,
                     "created_at": r.created_at,
                     "processed_at": r.processed_at,
+                    "user_available_balance": (
+                        str(wd_wallet_map[str(r.user_id)].available_balance)
+                        if str(r.user_id) in wd_wallet_map
+                        else "0"
+                    ),
+                    "user_settlement_outstanding": (
+                        str(wd_wallet_map[str(r.user_id)].settlement_outstanding)
+                        if str(r.user_id) in wd_wallet_map
+                        else "0"
+                    ),
                     **owner_fields(owner_map.get(str(r.user_id))),
                 }
                 for r in rows
@@ -496,8 +519,25 @@ async def approve_withdrawal(
     if r.status != WithdrawalStatus.PENDING:
         raise HTTPException(status_code=400, detail="Already processed")
 
-    # Debit user wallet
+    # ── Balance pre-check ────────────────────────────────────────
+    from app.models.wallet import Wallet
+
     amount = to_decimal(r.amount)
+    wallet = await Wallet.find_one(Wallet.user_id == r.user_id)
+    if wallet is None:
+        raise HTTPException(status_code=400, detail="User wallet not found")
+    available = to_decimal(wallet.available_balance)
+    if available < amount:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Insufficient balance: user has ₹{available:,.2f} available "
+                f"but withdrawal is ₹{amount:,.2f}. "
+                f"Reject this request or wait for a deposit."
+            ),
+        )
+
+    # Debit user wallet
     await wallet_service.adjust(
         r.user_id,
         -amount,
