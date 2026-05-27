@@ -265,14 +265,22 @@ function AdminPositionsInner() {
     refetchInterval: 10000,
   });
 
-  async function squareoff(id: string) {
-    if (!confirm("Square off this position at market?")) return;
+  // ── Close / square-off confirmation dialog ────────────────────
+  const [closeTarget, setCloseTarget] = useState<any | null>(null);
+  const [closing, setClosing] = useState(false);
+
+  async function confirmSquareoff() {
+    if (!closeTarget) return;
+    setClosing(true);
     try {
-      await TradingAPI.squareoff(id);
+      await TradingAPI.squareoff(closeTarget.id);
       toast.success("Squared off");
       qc.invalidateQueries({ queryKey: ["admin", "positions"] });
+      setCloseTarget(null);
     } catch (e: any) {
       toast.error(e.message);
+    } finally {
+      setClosing(false);
     }
   }
 
@@ -791,7 +799,7 @@ function AdminPositionsInner() {
                 size="sm"
                 onClick={(e) => {
                   e.stopPropagation();
-                  squareoff(r.id);
+                  setCloseTarget(r);
                 }}
                 className="h-7 gap-1 rounded-md bg-destructive px-2.5 text-xs font-semibold text-destructive-foreground hover:bg-destructive/90"
               >
@@ -1000,22 +1008,79 @@ function AdminPositionsInner() {
         onClose={() => setNettingId(null)}
       />
 
+      {/* ── Close / Square-off confirmation dialog ─────────────── */}
+      <Dialog open={!!closeTarget} onOpenChange={(o) => !o && setCloseTarget(null)}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-destructive">
+              <AlertOctagon className="size-5" />
+              Close Position
+            </DialogTitle>
+            <DialogDescription asChild>
+              <div className="space-y-3 pt-2">
+                <p>Square off this position at current market price?</p>
+                {closeTarget && (
+                  <div className="rounded-lg border bg-muted/30 p-3 text-sm">
+                    <div className="grid grid-cols-2 gap-y-1.5">
+                      <span className="text-muted-foreground">Symbol</span>
+                      <span className="font-semibold">{closeTarget.symbol}</span>
+                      <span className="text-muted-foreground">Side</span>
+                      <span className={cn("font-semibold", Number(closeTarget.quantity) > 0 ? "text-emerald-500" : "text-red-500")}>
+                        {Number(closeTarget.quantity) > 0 ? "BUY" : "SELL"}
+                      </span>
+                      <span className="text-muted-foreground">Qty</span>
+                      <span className="font-semibold">{Math.abs(Number(closeTarget.quantity))}</span>
+                      <span className="text-muted-foreground">Entry Price</span>
+                      <span className="font-semibold">{fmtFeedPrice(closeTarget.avg_price)}</span>
+                      <span className="text-muted-foreground">Current LTP</span>
+                      <span className="font-semibold">{fmtFeedPrice(closeTarget.ltp)}</span>
+                      <span className="text-muted-foreground">Unrealised P&L</span>
+                      <span className={cn("font-semibold", pnlColor(Number(closeTarget.unrealized_pnl ?? 0)))}>
+                        {formatINR(Number(closeTarget.unrealized_pnl ?? 0))}
+                      </span>
+                    </div>
+                    {closeTarget.user_name && (
+                      <p className="mt-2 border-t pt-2 text-xs text-muted-foreground">
+                        User: <span className="font-medium text-foreground">{closeTarget.user_code} · {closeTarget.user_name}</span>
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" onClick={() => setCloseTarget(null)} disabled={closing}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={confirmSquareoff} disabled={closing}>
+              {closing ? "Closing…" : "Close Position"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Edit position / closed trade dialog ───────────────── */}
       <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>
               {editing?.status === "CLOSED" ? "Edit closed trade" : "Edit position"}
             </DialogTitle>
-            <DialogDescription>
-              {editing
-                ? `${editing.symbol} · ${editing.product_type} · qty ${editing.quantity}`
-                : ""}
-              <br />
-              <span className="text-[11px]">
-                {editing?.status === "CLOSED"
-                  ? "Wallet auto-adjusts via REVERSAL when realised P&L changes."
-                  : "User receives a live update — no refresh needed."}
-              </span>
+            <DialogDescription asChild>
+              <div>
+                {editing && (
+                  <div className="rounded-lg border bg-muted/30 p-2.5 text-sm">
+                    <span className="font-semibold">{editing.symbol}</span>
+                    <span className="text-muted-foreground"> · {editing.product_type} · qty {editing.quantity}</span>
+                  </div>
+                )}
+                <p className="mt-1.5 text-[11px]">
+                  {editing?.status === "CLOSED"
+                    ? "Wallet auto-adjusts via REVERSAL when realised P&L changes."
+                    : "User receives a live update — no refresh needed."}
+                </p>
+              </div>
             </DialogDescription>
           </DialogHeader>
 
