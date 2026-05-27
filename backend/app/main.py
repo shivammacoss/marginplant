@@ -379,6 +379,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
             from app.services.zerodha_service import zerodha as _zerodha
 
+            # Capture the event loop early so on_ticks / on_connect
+            # callbacks can publish to Redis from the Twisted thread.
+            try:
+                _zerodha._main_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+
             z_status = await _zerodha.get_status()
             if not z_status.get("isConnected"):
                 return

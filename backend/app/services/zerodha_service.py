@@ -316,7 +316,13 @@ class ZerodhaService:
         try:
             await self.connect_ws(force=True)
         except Exception:
-            logger.warning("zerodha_post_login_ws_connect_giving_up_to_heal_loop")
+            logger.warning(
+                "zerodha_post_login_ws_connect_giving_up_to_heal_loop",
+                exc_info=True,
+            )
+            # Ensure self-heal is armed so the 30-second loop keeps
+            # retrying even though this attempt failed.
+            self._self_heal_paused = False
 
     async def _auto_load_default_subscriptions(self) -> int:
         """Resolve the curated default set against the live Zerodha instruments
@@ -690,7 +696,15 @@ class ZerodhaService:
                 is_active=True,
                 is_tradable=True,
             )
-            await inst.insert()
+            try:
+                await inst.insert()
+            except Exception as _dup_exc:
+                if "E11000" in str(_dup_exc):
+                    # Concurrent insert won the race — row exists, next
+                    # subscribe cycle will update it via the `else` branch.
+                    pass
+                else:
+                    raise
         else:
             existing.symbol = sub.symbol
             existing.trading_symbol = sub.symbol
@@ -1724,6 +1738,18 @@ class ZerodhaService:
         Any explicit connect call un-pauses the self-heal loop so background
         re-arming resumes after a manual reconnect.
         """
+        # Capture the asyncio event loop BEFORE spawning any Twisted
+        # threads. The on_ticks / on_connect callbacks use
+        # asyncio.run_coroutine_threadsafe() which needs a valid loop
+        # reference. Setting it here (not just inside _start_ws_pool)
+        # ensures it's always fresh — even after a daily token rotation
+        # where _start_ws_pool may short-circuit on the "already have
+        # live connections" guard.
+        try:
+            self._main_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+
         # Re-arm self-heal — a fresh connect_ws call means the admin / a
         # fresh login wants the ticker back online, even if they had
         # previously hit Disconnect.
@@ -1930,6 +1956,13 @@ class ZerodhaService:
                         if any(e.get("connected") for e in self._tickers):
                             continue
                     # ERROR or DISCONNECTED with valid auth → try again.
+                    # Refresh the event loop reference — it may have gone
+                    # stale if the prior connect attempt captured a loop
+                    # that was being starved by overlay timeouts.
+                    try:
+                        self._main_loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        pass
                     logger.info(
                         "zerodha_ws_self_heal_triggering",
                         extra={"current_status": s.wsStatus},

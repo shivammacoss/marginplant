@@ -113,6 +113,17 @@ async def _zerodha_overlay(token: str, base_quote: dict[str, Any]) -> dict[str, 
     try:
         from app.services.zerodha_service import zerodha
 
+        # Circuit breaker: if no Zerodha WS connection is alive, skip the
+        # entire overlay.  Without this, every quote request during a WS
+        # outage (daily token rotation, Kite slot release delay) floods
+        # the event loop with 2-second timeouts from DB lookups and REST
+        # fallbacks, starving the self-heal loop and locking the WS in
+        # CONNECTING forever.
+        with zerodha._ticker_lock:
+            _any_connected = any(e.get("connected") for e in zerodha._tickers)
+        if not _any_connected and not zerodha.ticks_by_token:
+            return base_quote
+
         # 1) Direct token lookup — mirrored Zerodha subscriptions store the
         #    Kite instrument_token as Instrument.token, so this is the fast path.
         live: dict[str, Any] | None = None
