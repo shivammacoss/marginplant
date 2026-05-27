@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ClipboardCopy, RotateCcw, Save, Search, X } from "lucide-react";
+import { AlertTriangle, ClipboardCopy, LockKeyhole, RotateCcw, Save, Search, ShieldAlert, Timer, X } from "lucide-react";
 import { RiskAPI, UsersAPI } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -47,12 +47,85 @@ export default function RiskManagementPage() {
     <div className="space-y-6">
       <PageHeader
         title="Risk Management"
-        description="Stop-out levels, exit-only mode, and trade hold timers. Global default + per-user overrides."
+        description="Set automatic protection levels for every user. Global rules apply by default — override individuals when needed."
       />
+
+      {/* Friendly explainer strip — three plain-language tiles so admins
+          who don't speak in stop-out percentages still understand what
+          the three editable groups below actually do. */}
+      <section className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <ExplainerTile
+          icon={<ShieldAlert className="size-4" />}
+          tone="emerald"
+          title="Stop-out"
+          desc="When a user's losses cross this %, all open positions auto-square-off to protect the wallet."
+        />
+        <ExplainerTile
+          icon={<LockKeyhole className="size-4" />}
+          tone="amber"
+          title="Exit-only mode"
+          desc="User can close existing positions but cannot open new trades. Useful during market panic."
+        />
+        <ExplainerTile
+          icon={<Timer className="size-4" />}
+          tone="sky"
+          title="Hold timers"
+          desc="Minimum / maximum time a trade must stay open. Prevents scalping abuse on illiquid scrips."
+        />
+      </section>
+
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <GlobalCard />
         <UserCard />
       </div>
+    </div>
+  );
+}
+
+/**
+ * Compact explainer tile used at the top of /risk-management. Pure
+ * presentation — describes one risk concept in plain language so a
+ * new admin understands what they're editing in the cards below.
+ */
+function ExplainerTile({
+  icon,
+  tone,
+  title,
+  desc,
+}: {
+  icon: React.ReactNode;
+  tone: "emerald" | "amber" | "sky";
+  title: string;
+  desc: string;
+}) {
+  const tones = {
+    emerald: {
+      ring: "ring-emerald-500/30",
+      badge: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
+      gradient: "from-emerald-50 dark:from-emerald-500/10",
+    },
+    amber: {
+      ring: "ring-amber-500/30",
+      badge: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
+      gradient: "from-amber-50 dark:from-amber-500/10",
+    },
+    sky: {
+      ring: "ring-sky-500/30",
+      badge: "bg-sky-500/15 text-sky-600 dark:text-sky-400",
+      gradient: "from-sky-50 dark:from-sky-500/10",
+    },
+  }[tone];
+  return (
+    <div
+      className={`rounded-xl border-0 bg-gradient-to-br ${tones.gradient} via-card to-card p-3 shadow-sm ring-1 ${tones.ring}`}
+    >
+      <div className="flex items-center gap-2">
+        <span className={`inline-flex size-7 items-center justify-center rounded-lg ${tones.badge}`}>
+          {icon}
+        </span>
+        <div className="text-sm font-semibold">{title}</div>
+      </div>
+      <p className="mt-2 text-[11px] leading-snug text-muted-foreground">{desc}</p>
     </div>
   );
 }

@@ -77,20 +77,26 @@ export const useAdminAuthStore = create<AdminAuthState>()(
         }
       },
       logout: async () => {
-        try {
-          const refresh =
-            typeof window !== "undefined"
-              ? window.localStorage.getItem(STORAGE_KEYS.refreshToken) ?? undefined
-              : undefined;
-          await AdminAuthAPI.logout(refresh);
-        } catch {
-          // ignore
-        } finally {
-          clearTokens();
-          // Wipe the cached dashboard snapshot so the next admin to log in
-          // on this device doesn't briefly see the previous admin's stats.
-          clearDashboardSnapshot();
-          set({ admin: null });
+        // INSTANT local logout — clear tokens + admin state synchronously
+        // so the UI redirects right away. The server-side session
+        // invalidation is fired-and-forget so a flaky mobile network
+        // never makes the "Sign out" button feel frozen (operator
+        // complaint: 3-5 s wait on mobile before the page changed).
+        const refresh =
+          typeof window !== "undefined"
+            ? window.localStorage.getItem(STORAGE_KEYS.refreshToken) ?? undefined
+            : undefined;
+        clearTokens();
+        clearDashboardSnapshot();
+        set({ admin: null });
+        // Fire-and-forget — server will also reject the refresh token
+        // on its next use thanks to standard rotation, so worst-case
+        // we end up with one orphaned refresh row that the cleanup
+        // job sweeps away.
+        if (refresh) {
+          AdminAuthAPI.logout(refresh).catch(() => {
+            // Swallow — local logout already completed.
+          });
         }
       },
     }),
