@@ -1229,6 +1229,30 @@ function AdminPositionsInner() {
 // ─────────────────────────────────────────────────────────────────
 // PnL summary card
 // ─────────────────────────────────────────────────────────────────
+/**
+ * Compact INR formatter for the 3-up summary tiles.
+ *
+ * Plain `formatINR` returns strings like "-₹ 13,175.31" which are 13
+ * characters wide — at the 360 px viewport that the operator panel
+ * gets in operator-laptop / phone PWA the three tiles each have
+ * ~100 px of usable width, and the value would truncate to
+ * "₹ 13,175...". By collapsing values into K / L / Cr we keep the
+ * full magnitude visible (₹13.2K, ₹7.18L, ₹1.40Cr) AND drop the .31
+ * paise that aren't useful in a P&L overview.
+ *
+ * Full precision is preserved in the `title` attribute so the desktop
+ * tooltip still shows the audit-grade number.
+ */
+function formatINRCompact(n: number): string {
+  if (!Number.isFinite(n) || n === 0) return "₹0";
+  const abs = Math.abs(n);
+  const sign = n < 0 ? "-" : "";
+  if (abs >= 1_00_00_000) return `${sign}₹${(abs / 1_00_00_000).toFixed(2)}Cr`;
+  if (abs >= 1_00_000) return `${sign}₹${(abs / 1_00_000).toFixed(2)}L`;
+  if (abs >= 1_000) return `${sign}₹${(abs / 1_000).toFixed(1)}K`;
+  return `${sign}₹${abs.toFixed(0)}`;
+}
+
 function PnlCard({
   label,
   value,
@@ -1241,34 +1265,49 @@ function PnlCard({
   icon?: any;
 }) {
   const n = Number(value ?? 0);
+  const fullText = formatINR(n);
+  const compactText = formatINRCompact(n);
   return (
     // Tighter padding on mobile so three cards fit in a phone row;
     // CardHeader + CardContent restore their default p-4 from sm+.
     <Card className="min-w-0">
       <CardHeader className="flex flex-row items-start justify-between gap-1 p-2.5 pb-1 sm:p-4 sm:pb-2">
-        <CardDescription className="text-[11px] leading-tight sm:text-sm">
+        <CardDescription className="text-[10px] uppercase tracking-wider leading-tight sm:text-sm sm:normal-case sm:tracking-normal">
           {label}
         </CardDescription>
         {Icon && (
           <Icon className={cn("hidden size-4 shrink-0 sm:block", pnlColor(n))} />
         )}
       </CardHeader>
-      <CardContent className="space-y-1 p-2.5 pt-0 sm:p-4 sm:pt-0">
+      <CardContent className="p-2.5 pt-0 sm:p-4 sm:pt-0">
+        {/* Mobile: compact "₹13.2K" so the value never truncates on
+            360 px tiles. Desktop+: full Indian-comma value. Both are
+            kept in DOM and toggled via Tailwind's responsive `hidden`
+            so screen readers still pick up the precise number. */}
         <div
           className={cn(
-            // Truncate so a long ₹ value doesn't blow out the column
-            // width on a 360px screen.
-            "truncate font-tabular text-sm font-semibold sm:text-2xl",
-            pnlColor(n)
+            "font-tabular font-bold leading-tight sm:hidden",
+            "text-base",
+            pnlColor(n),
           )}
-          title={formatINR(n)}
+          title={fullText}
+          aria-label={fullText}
         >
-          {formatINR(n)}
+          {compactText}
+        </div>
+        <div
+          className={cn(
+            "hidden font-tabular text-2xl font-semibold sm:block",
+            pnlColor(n),
+          )}
+          title={fullText}
+        >
+          {fullText}
         </div>
         {/* Hint is informative but eats vertical space on phones — hide
             until sm+ where there's room. */}
         {hint && (
-          <div className="hidden text-[11px] text-muted-foreground sm:block">
+          <div className="mt-1 hidden text-[11px] text-muted-foreground sm:block">
             {hint}
           </div>
         )}
