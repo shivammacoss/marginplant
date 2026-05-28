@@ -45,17 +45,21 @@ async def _read_setting(key: str) -> str:
 
 
 async def _resolve_whatsapp_for_user(user: User) -> str:
-    """Walk UP the parent_id chain from `user`, returning the first
-    non-empty `support_whatsapp` found. Stops at the first hit OR when
-    the chain ends (parent_id == None). Self is included so an
-    admin-tier user checking the apk against their own login still sees
+    """Walk UP the assignment chain from `user`, returning the first
+    non-empty `support_whatsapp` found. Self is checked first so an
+    admin/broker hitting the apk against their own login still sees
     their own number.
 
-    Capped at 8 hops as a defensive guard against a corrupted parent
-    chain (cycle, dangling reference) — the longest realistic chain
-    is CLIENT → DEALER → MASTER → BROKER → SUB_BROKER → ADMIN →
-    SUPER_ADMIN which is 7 nodes; 8 leaves headroom for one extra
-    intermediate without ever falling into an infinite walk.
+    Walk order at each hop (most specific first):
+      1. `assigned_broker_id` — direct broker / sub-broker
+      2. `assigned_admin_id`  — admin pool owner
+
+    `parent_id` is NOT used: CLIENT rows are created without it most of
+    the time, which left the cascade stuck at the first node and the
+    number invisible to users.  The assignment fields are what every
+    user actually carries.
+
+    Capped at 8 hops as a defensive guard against a corrupted chain.
     """
     cur: User | None = user
     seen: set[PydanticObjectId] = set()
@@ -67,9 +71,10 @@ async def _resolve_whatsapp_for_user(user: User) -> str:
         val = (cur.support_whatsapp or "").strip()
         if val:
             return val
-        if cur.parent_id is None:
+        next_id = cur.assigned_broker_id or cur.assigned_admin_id
+        if next_id is None or next_id in seen:
             break
-        cur = await User.get(cur.parent_id)
+        cur = await User.get(next_id)
         hops += 1
     return ""
 
