@@ -138,7 +138,21 @@ export function OrderPanel({ instrument, ltp, bid, ask, fxRate }: Props) {
   // through an off-by-one decimal place. Round-up to the next 0.001 to
   // avoid float-precision noise in the input.
   const lotStep = minLot < 1 ? +minLot.toFixed(3) : 1;
-  const defaultLot = minLot;
+  // Default lot when the user clicks a fresh instrument.
+  //   • Indian exchanges (NSE / BSE / MCX / NFO / BFO) — equity, futures
+  //     AND options — always start at 1 lot.  Operator preference, easier
+  //     for users than seeing whatever `min_lot` the segment ended up with.
+  //   • Non-Indian instruments (forex / crypto / spot metals / energy)
+  //     keep the server-resolved minimum so the form opens with a valid
+  //     fractional default (e.g. crypto 0.001, forex 0.01).
+  const exchUpper = String(instrument?.exchange ?? "").toUpperCase();
+  const isIndianExchange =
+    exchUpper === "NSE" ||
+    exchUpper === "BSE" ||
+    exchUpper === "MCX" ||
+    exchUpper === "NFO" ||
+    exchUpper === "BFO";
+  const defaultLot = isIndianExchange ? Math.max(1, minLot) : minLot;
 
   // Reset lot + product when instrument changes OR when we get a fresh
   // server-resolved minimum (so a crypto market correctly starts at 0.001
