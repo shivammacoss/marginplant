@@ -170,13 +170,17 @@ async def adjust(
     #      whatever non-negative value it would normally land on. This
     #      keeps the migration path graceful for any wallet that was
     #      already negative before redeploy.
-    # Withdrawals must NEVER book settlement_outstanding — if the
-    # balance is insufficient the caller should have rejected the
-    # request upfront.  This guard prevents a withdrawal from silently
-    # flooring the wallet and accruing phantom settlement debt.
-    if transaction_type == TransactionType.WITHDRAWAL and after < ZERO:
+    # Withdrawals AND admin manual adjustments must NEVER book
+    # settlement_outstanding — if the balance is insufficient the
+    # caller should have rejected the request upfront.  This guard
+    # prevents these flows from silently flooring the wallet and
+    # accruing phantom settlement debt.
+    if (
+        transaction_type in (TransactionType.WITHDRAWAL, TransactionType.ADJUSTMENT)
+        and after < ZERO
+    ):
         raise InsufficientFundsError(
-            f"Withdrawal of {abs(amt)} exceeds available balance {before}"
+            f"Debit of {abs(amt)} exceeds available balance {before}"
         )
 
     settlement_booked = ZERO

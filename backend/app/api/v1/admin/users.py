@@ -589,6 +589,29 @@ async def wallet_adjust(
     _: None = Depends(require_perm("users", "write")),
 ):
     await assert_user_in_scope(admin, user_id)
+
+    # ── Balance pre-check for debits ─────────────────────────────────
+    # Admin manual deduct must NEVER silently book to settlement_outstanding
+    # when the user's available_balance is insufficient.  Same rule as
+    # withdrawals: if you don't have the money, the action is rejected.
+    from app.models.wallet import Wallet
+    from app.utils.decimal_utils import to_decimal as _to_decimal
+
+    amt = _to_decimal(payload.amount)
+    if amt < 0:
+        wallet = await Wallet.find_one(Wallet.user_id == user_id)
+        if wallet is None:
+            raise HTTPException(status_code=400, detail="User wallet not found")
+        available = _to_decimal(wallet.available_balance)
+        if available + amt < 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Insufficient balance: user has ₹{available:,.2f} available "
+                    f"but you're trying to debit ₹{abs(amt):,.2f}."
+                ),
+            )
+
     txn = await wallet_service.adjust(
         user_id,
         payload.amount,

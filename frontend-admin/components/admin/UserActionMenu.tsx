@@ -9,9 +9,7 @@ import {
   ArrowRightLeft,
   Ban,
   CheckCircle2,
-  CreditCard,
   Eye,
-  IndianRupee,
   LogIn,
   MinusCircle,
   MoreHorizontal,
@@ -42,8 +40,6 @@ type ActionKind =
   | null
   | "addFund"
   | "deductFund"
-  | "giveCredit"
-  | "takeCredit"
   | "ban"
   | "kill"
   | "delete"
@@ -110,32 +106,6 @@ export function UserActionMenu({ user, onChange }: Props) {
       close();
     } catch (e: any) {
       toast.error(e?.response?.data?.error?.message || e.message || "Failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function runCredit(kind: "giveCredit" | "takeCredit") {
-    const num = Number(amount);
-    if (!num || num <= 0) {
-      toast.error("Enter a positive amount");
-      return;
-    }
-    if (!note.trim()) {
-      toast.error("Reason is mandatory");
-      return;
-    }
-    setBusy(true);
-    try {
-      const r = await UsersAPI.creditLimit(user.id, {
-        delta: kind === "giveCredit" ? num : -num,
-        narration: note.trim(),
-      });
-      toast.success(`Credit limit now ₹${r.credit_limit}`);
-      refresh();
-      close();
-    } catch (e: any) {
-      toast.error(e?.response?.data?.detail || e.message || "Failed");
     } finally {
       setBusy(false);
     }
@@ -287,17 +257,6 @@ export function UserActionMenu({ user, onChange }: Props) {
               label="Deduct Fund"
               onClick={() => pick(() => setAction("deductFund"))}
             />
-            <MenuButton
-              icon={<CreditCard className="size-4" />}
-              label="Give Credit"
-              onClick={() => pick(() => setAction("giveCredit"))}
-            />
-            <MenuButton
-              icon={<IndianRupee className="size-4" />}
-              label="Take Credit"
-              onClick={() => pick(() => setAction("takeCredit"))}
-            />
-
             <MenuSeparator />
 
             {/* Transfer User — opens the role-aware destination picker.
@@ -378,34 +337,6 @@ export function UserActionMenu({ user, onChange }: Props) {
         onCancel={close}
         onSubmit={() => runWalletAdjust("deductFund")}
       />
-      <AmountDialog
-        open={action === "giveCredit"}
-        title={`Give credit — ${user.user_code}`}
-        description="Increases the user's credit limit (line of credit)."
-        actionLabel="Give credit"
-        amount={amount}
-        setAmount={setAmount}
-        note={note}
-        setNote={setNote}
-        busy={busy}
-        onCancel={close}
-        onSubmit={() => runCredit("giveCredit")}
-      />
-      <AmountDialog
-        open={action === "takeCredit"}
-        title={`Take credit — ${user.user_code}`}
-        description="Reduces the user's credit limit. Cannot go below zero."
-        actionLabel="Take credit"
-        actionVariant="destructive"
-        amount={amount}
-        setAmount={setAmount}
-        note={note}
-        setNote={setNote}
-        busy={busy}
-        onCancel={close}
-        onSubmit={() => runCredit("takeCredit")}
-      />
-
       {/* Ban / Unblock */}
       <Dialog open={action === "ban"} onOpenChange={(v) => !v && close()}>
         <DialogContent>

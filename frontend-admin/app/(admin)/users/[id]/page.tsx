@@ -294,9 +294,6 @@ export default function UserDetailPage() {
                 className="h-9 w-full rounded-md border border-border bg-background px-2 text-sm"
               >
                 <option value="ADJUSTMENT">Adjustment</option>
-                <option value="BONUS">Bonus (credit)</option>
-                <option value="PENALTY">Penalty (debit)</option>
-                <option value="PROMO">Promo credit</option>
               </select>
               <Input
                 placeholder="Amount (negative to debit)"
