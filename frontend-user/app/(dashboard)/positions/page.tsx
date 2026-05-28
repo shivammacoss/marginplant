@@ -1069,7 +1069,7 @@ export default function PositionsPage() {
           Rejected. Replaces the separate /orders page; every order
           state is one tap away. Horizontal scroll on narrow screens
           so the 5 tabs don't break the layout. */}
-      <div className="-mx-1 flex items-center gap-1.5 overflow-x-auto px-1 pb-1 md:mx-0 md:gap-6 md:border-b md:border-border md:px-0 md:pb-0 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <div className="-mx-1 flex items-center gap-1 overflow-x-auto rounded-xl bg-muted/20 p-1 ring-1 ring-inset ring-border/40 md:mx-0 md:gap-6 md:rounded-none md:bg-transparent md:p-0 md:ring-0 md:border-b md:border-border [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <TabBtn
           active={tab === "position"}
           count={counts.position}
@@ -1310,13 +1310,13 @@ function WalletTile({
   valueClass?: string;
 }) {
   return (
-    <div className="rounded-md border border-border bg-card px-2.5 py-2">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+    <div className="rounded-lg border border-border/70 bg-gradient-to-b from-card to-card/60 px-3 py-2.5 shadow-sm ring-1 ring-inset ring-white/5">
+      <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
         {label}
       </div>
       <div
         className={cn(
-          "mt-0.5 font-tabular text-sm font-semibold tabular-nums",
+          "mt-1 font-tabular text-sm font-bold tabular-nums",
           valueClass,
         )}
       >
@@ -1342,14 +1342,14 @@ function TabBtn({
       type="button"
       onClick={onClick}
       className={cn(
-        // Mobile: rounded-pill segmented control with subtle bg for the
-        // active tab so the row reads as a proper control, not plain text.
-        // Desktop (md+): falls back to the classic underline treatment
-        // which scans better in a wide row.
-        "relative -mb-px flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 text-sm transition-all md:rounded-none md:px-0 md:pb-2 md:pt-1",
+        // Mobile: rounded-pill segmented control inside a tinted track.
+        // Active = solid background pill with primary text. Inactive =
+        // foreground text (not muted) so all tab labels stay readable.
+        // Desktop (md+): falls back to the classic underline treatment.
+        "relative -mb-px flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-1.5 text-sm font-medium transition-all md:rounded-none md:px-0 md:pb-2 md:pt-1 md:font-normal",
         active
-          ? "bg-primary/10 font-semibold text-primary md:bg-transparent md:text-foreground"
-          : "text-muted-foreground hover:bg-muted/40 hover:text-foreground md:hover:bg-transparent",
+          ? "bg-primary/15 font-semibold text-primary shadow-sm md:bg-transparent md:text-foreground md:shadow-none"
+          : "text-foreground/70 hover:bg-muted/40 hover:text-foreground md:hover:bg-transparent md:text-muted-foreground",
       )}
     >
       {children}
