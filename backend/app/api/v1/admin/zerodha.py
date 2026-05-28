@@ -198,6 +198,17 @@ async def clear_instruments(admin: CurrentAdmin):
     return {"success": True, "cleared": removed}
 
 
+@router.post("/instruments/trim")
+async def trim_instruments(payload: dict[str, Any], admin: CurrentAdmin):
+    """LRU-trim subscribed instruments to `keep_count` (default 700).
+    Preserves tokens with open positions and LRU-exempt tokens.
+    Frees the WS pool of stale option-chain mirror subscriptions."""
+    keep_count = int(payload.get("keep_count") or 700)
+    keep_count = max(50, min(3000, keep_count))
+    result = await zerodha.trim_subscriptions_lru(keep_count)
+    return {"success": True, **result}
+
+
 @router.post("/instruments/subscribe")
 async def subscribe_instrument(payload: dict[str, Any], admin: CurrentAdmin):
     inst = payload.get("instrument") or payload

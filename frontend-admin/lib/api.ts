@@ -507,6 +507,10 @@ export const ZerodhaAPI = {
     api.post("/admin/zerodha/instruments/sync").then((r) => r.data),
   clearInstruments: () =>
     api.post("/admin/zerodha/instruments/clear").then((r) => r.data),
+  trimInstruments: (keep_count = 700) =>
+    api
+      .post("/admin/zerodha/instruments/trim", { keep_count })
+      .then((r) => r.data as { kept: number; removed: number; must_keep_added: number }),
   listForExchange: (exchange: string) =>
     api
       .get(`/admin/zerodha/instruments/exchange/${encodeURIComponent(exchange)}`)

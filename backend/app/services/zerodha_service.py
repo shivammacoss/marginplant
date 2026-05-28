@@ -831,6 +831,90 @@ class ZerodhaService:
                 pass
         return len(tokens)
 
+    async def trim_subscriptions_lru(self, keep_count: int = 700) -> dict[str, int]:
+        """Keep only the ``keep_count`` most-recently-used subscriptions plus
+        any tokens currently held in open positions / watchlists / LRU-exempt
+        set.  Removes the rest from both the WS pool and the DB-persisted
+        list so they don't grow unbounded as users browse option chains.
+
+        Returns: ``{"kept": int, "removed": int, "must_keep_added": int}``.
+        """
+        s = await self._get_settings()
+        all_subs = list(s.subscribedInstruments)
+        if len(all_subs) <= keep_count:
+            return {"kept": len(all_subs), "removed": 0, "must_keep_added": 0}
+
+        # Build the must-keep set: open positions + active watchlist items +
+        # LRU-exempt tokens (admin-pinned defaults like NIFTY/BANKNIFTY).
+        must_keep: set[int] = set(self._token_protected)
+        must_keep_added_from_positions = 0
+        try:
+            from app.models.position import Position, PositionStatus
+
+            open_positions = await Position.find(
+                Position.status == PositionStatus.OPEN
+            ).to_list()
+            for pos in open_positions:
+                try:
+                    tok = int(getattr(pos, "instrument_token", 0) or 0)
+                    if tok > 0:
+                        if tok not in must_keep:
+                            must_keep_added_from_positions += 1
+                        must_keep.add(tok)
+                except Exception:
+                    continue
+        except Exception:
+            logger.warning("zerodha_trim_position_lookup_failed", exc_info=True)
+
+        # Sort subscriptions by LRU recency (most-recent first).  Tokens
+        # never touched after subscribe are at the bottom.
+        def _last_used(t: int) -> float:
+            return self._token_last_used.get(t, 0.0)
+
+        sorted_subs = sorted(all_subs, key=lambda i: _last_used(i.token), reverse=True)
+
+        keep: list[SubscribedInstrument] = []
+        evict_tokens: list[int] = []
+        keep_set: set[int] = set()
+        # Always preserve must-keep tokens first.
+        for sub in sorted_subs:
+            if sub.token in must_keep:
+                keep.append(sub)
+                keep_set.add(sub.token)
+        # Fill remaining slots with most-recently-used.
+        for sub in sorted_subs:
+            if sub.token in keep_set:
+                continue
+            if len(keep) < keep_count:
+                keep.append(sub)
+                keep_set.add(sub.token)
+            else:
+                evict_tokens.append(sub.token)
+
+        s.subscribedInstruments = keep
+        await s.save()
+        if evict_tokens:
+            try:
+                self._ws_unsubscribe(evict_tokens)
+            except Exception:
+                logger.warning("zerodha_trim_ws_unsubscribe_failed", exc_info=True)
+            for tok in evict_tokens:
+                self.ticks_by_token.pop(tok, None)
+                self._token_last_used.pop(tok, None)
+        logger.info(
+            "zerodha_subscriptions_trimmed",
+            extra={
+                "kept": len(keep),
+                "removed": len(evict_tokens),
+                "must_keep_added": must_keep_added_from_positions,
+            },
+        )
+        return {
+            "kept": len(keep),
+            "removed": len(evict_tokens),
+            "must_keep_added": must_keep_added_from_positions,
+        }
+
     async def find_instrument_by_symbol(self, symbol: str) -> dict[str, Any] | None:
         """Resolve a tradingsymbol via subscribed → cache → on-demand exchange fetch."""
         sym_u = (symbol or "").strip().upper()

@@ -257,6 +257,32 @@ export default function ZerodhaConnectPage() {
     }
   }
 
+  async function trimSubscriptions() {
+    const input = prompt(
+      "Keep how many most-recently-used subscriptions? (Open positions always preserved)",
+      "700",
+    );
+    if (!input) return;
+    const keep = parseInt(input, 10);
+    if (Number.isNaN(keep) || keep < 50) {
+      toast.error("Enter a number ≥ 50");
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await ZerodhaAPI.trimInstruments(keep);
+      toast.success(
+        `Trimmed: kept ${r.kept}, removed ${r.removed}` +
+          (r.must_keep_added ? ` (${r.must_keep_added} preserved from open positions)` : ""),
+      );
+      refetch();
+    } catch (e: any) {
+      toast.error(e.message || "Trim failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function subscribeAllFromExchange() {
     const exchange = SEGMENT_TO_EXCHANGE[searchSeg];
     if (!exchange) return;
@@ -674,6 +700,9 @@ export default function ZerodhaConnectPage() {
           <CardContent className="flex flex-wrap items-center gap-2">
             <Button variant="outline" onClick={syncCache} loading={busy}>
               <RefreshCw className="size-4" /> Sync cache & remove expired
+            </Button>
+            <Button variant="outline" onClick={trimSubscriptions} loading={busy}>
+              <Eraser className="size-4" /> Trim to N (LRU)
             </Button>
             <Button variant="destructive" onClick={clearAll} loading={busy}>
               <Eraser className="size-4" /> Clear all subscriptions
