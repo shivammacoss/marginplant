@@ -658,7 +658,15 @@ async def wallet_adjust(
 
     amt = _to_decimal(payload.amount)
     if amt < 0:
-        wallet = await Wallet.find_one(Wallet.user_id == user_id)
+        # `user_id` arrives as a string from the path param; the Wallet
+        # row keys on PydanticObjectId, so a string `==` filter never
+        # matches and the lookup silently returns None ("User wallet
+        # not found" toast even when the wallet exists).  Cast first.
+        try:
+            uid = PydanticObjectId(user_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid user id")
+        wallet = await Wallet.find_one(Wallet.user_id == uid)
         if wallet is None:
             raise HTTPException(status_code=400, detail="User wallet not found")
         available = _to_decimal(wallet.available_balance)
