@@ -1069,7 +1069,7 @@ export default function PositionsPage() {
           Rejected. Replaces the separate /orders page; every order
           state is one tap away. Horizontal scroll on narrow screens
           so the 5 tabs don't break the layout. */}
-      <div className="flex items-center gap-6 overflow-x-auto border-b border-border">
+      <div className="-mx-1 flex items-center gap-1.5 overflow-x-auto px-1 pb-1 md:mx-0 md:gap-6 md:border-b md:border-border md:px-0 md:pb-0 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <TabBtn
           active={tab === "position"}
           count={counts.position}
@@ -1342,19 +1342,23 @@ function TabBtn({
       type="button"
       onClick={onClick}
       className={cn(
-        "relative -mb-px flex items-center gap-1.5 pb-2 pt-1 text-sm transition-colors",
+        // Mobile: rounded-pill segmented control with subtle bg for the
+        // active tab so the row reads as a proper control, not plain text.
+        // Desktop (md+): falls back to the classic underline treatment
+        // which scans better in a wide row.
+        "relative -mb-px flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 text-sm transition-all md:rounded-none md:px-0 md:pb-2 md:pt-1",
         active
-          ? "font-semibold text-foreground"
-          : "text-muted-foreground hover:text-foreground",
+          ? "bg-primary/10 font-semibold text-primary md:bg-transparent md:text-foreground"
+          : "text-muted-foreground hover:bg-muted/40 hover:text-foreground md:hover:bg-transparent",
       )}
     >
       {children}
       {count > 0 && (
         <span
           className={cn(
-            "rounded-full border px-1.5 text-[10px] font-semibold",
+            "rounded-full border px-1.5 text-[10px] font-semibold tabular-nums",
             active
-              ? "border-primary/40 bg-primary/10 text-primary"
+              ? "border-primary/40 bg-primary/15 text-primary"
               : "border-border text-muted-foreground",
           )}
         >
@@ -1362,7 +1366,7 @@ function TabBtn({
         </span>
       )}
       {active && (
-        <span className="absolute inset-x-0 -bottom-px h-0.5 rounded-t bg-primary" />
+        <span className="absolute inset-x-0 -bottom-px hidden h-0.5 rounded-t bg-primary md:block" />
       )}
     </button>
   );
@@ -1596,13 +1600,23 @@ function ClosedMobileCard({ row: r }: { row: any }) {
   }
 
   return (
-    <li className="rounded-xl border border-border bg-card p-3 shadow-sm">
+    <li className="group relative overflow-hidden rounded-xl border border-border/70 bg-gradient-to-b from-card to-card/60 p-3.5 shadow-sm ring-1 ring-inset ring-white/5">
+      {/* Subtle accent stripe — BUY = green, SELL = red. Same visual
+          language as Active/Position cards for consistency. */}
+      <span
+        aria-hidden
+        className={cn(
+          "absolute inset-y-0 left-0 w-0.5",
+          side === "BUY" ? "bg-buy/60" : "bg-sell/60",
+        )}
+      />
+
       {/* Top row: BUY/SELL · qty · CLOSED · product */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span
             className={cn(
-              "rounded px-2 py-0.5 text-[10px] font-bold uppercase ring-1 ring-inset",
+              "rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ring-1 ring-inset",
               side === "BUY"
                 ? "bg-buy/10 text-buy ring-buy/30"
                 : "bg-sell/10 text-sell ring-sell/30",
@@ -1611,14 +1625,17 @@ function ClosedMobileCard({ row: r }: { row: any }) {
             {side}
           </span>
           <span className="font-tabular text-xs text-muted-foreground">
-            🛒 {qty}
+            <span className="opacity-70">Qty</span>{" "}
+            <span className="font-semibold tabular-nums text-foreground/80">
+              {qty}
+            </span>
           </span>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="rounded bg-muted/40 px-2 py-0.5 text-[10px] font-bold uppercase text-muted-foreground ring-1 ring-inset ring-border">
+        <div className="flex items-center gap-1.5">
+          <span className="rounded-md bg-muted/40 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-muted-foreground ring-1 ring-inset ring-border/70">
             CLOSED
           </span>
-          <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase">
+          <span className="rounded-md border border-border/70 bg-muted/30 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
             {r.product_type}
           </span>
         </div>
@@ -1879,17 +1896,27 @@ function ActiveMobileCard({
   return (
     <li
       className={cn(
-        "rounded-xl border border-border bg-card p-3 shadow-sm",
-        cardOpensTrade && "cursor-pointer transition-colors hover:bg-muted/20",
+        "group relative overflow-hidden rounded-xl border border-border/70 bg-gradient-to-b from-card to-card/60 p-3.5 shadow-sm ring-1 ring-inset ring-white/5",
+        cardOpensTrade && "cursor-pointer transition-all hover:border-primary/40 hover:shadow-md active:scale-[0.997]",
       )}
       onClick={cardOpensTrade ? () => onTrade!(tradeToken) : undefined}
     >
+      {/* Subtle accent stripe on the left edge — BUY = green, SELL = red.
+          Reads at a glance without occupying horizontal space. */}
+      <span
+        aria-hidden
+        className={cn(
+          "absolute inset-y-0 left-0 w-0.5",
+          side === "BUY" ? "bg-buy/70" : "bg-sell/70",
+        )}
+      />
+
       {/* Top row: BUY/SELL · qty · NRML/MIS · time */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span
             className={cn(
-              "rounded px-2 py-0.5 text-[10px] font-bold uppercase ring-1 ring-inset",
+              "rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ring-1 ring-inset",
               side === "BUY"
                 ? "bg-buy/10 text-buy ring-buy/30"
                 : "bg-sell/10 text-sell ring-sell/30",
@@ -1898,14 +1925,17 @@ function ActiveMobileCard({
             {side}
           </span>
           <span className="font-tabular text-xs text-muted-foreground">
-            🛒 {qty}
+            <span className="opacity-70">Qty</span>{" "}
+            <span className="font-semibold tabular-nums text-foreground/80">
+              {qty}
+            </span>
           </span>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase">
+        <div className="flex items-center gap-1.5">
+          <span className="rounded-md border border-border/70 bg-muted/30 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
             {r.product_type}
           </span>
-          <span className="rounded border border-border px-1.5 py-0.5 font-tabular text-[10px] text-muted-foreground">
+          <span className="rounded-md border border-border/70 bg-muted/20 px-1.5 py-0.5 font-tabular text-[10px] text-muted-foreground">
             {timeOnly(ts)}
           </span>
         </div>
@@ -2073,12 +2103,19 @@ function PendingOrderCard({
   const ts = o?.created_at ?? o?.placed_at ?? null;
   const status = String(o?.status ?? "").toUpperCase();
   return (
-    <li className="rounded-xl border border-border bg-card p-3 shadow-sm">
+    <li className="group relative overflow-hidden rounded-xl border border-border/70 bg-gradient-to-b from-card to-card/60 p-3.5 shadow-sm ring-1 ring-inset ring-white/5">
+      <span
+        aria-hidden
+        className={cn(
+          "absolute inset-y-0 left-0 w-0.5",
+          side === "BUY" ? "bg-buy/60" : "bg-sell/60",
+        )}
+      />
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span
             className={cn(
-              "rounded px-2 py-0.5 text-[10px] font-bold uppercase ring-1 ring-inset",
+              "rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ring-1 ring-inset",
               side === "BUY"
                 ? "bg-buy/10 text-buy ring-buy/30"
                 : "bg-sell/10 text-sell ring-sell/30",
@@ -2087,13 +2124,16 @@ function PendingOrderCard({
             {side}
           </span>
           <span className="font-tabular text-xs text-muted-foreground">
-            🛒 {qty || lots}
+            <span className="opacity-70">Qty</span>{" "}
+            <span className="font-semibold tabular-nums text-foreground/80">
+              {qty || lots}
+            </span>
           </span>
-          <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase">
+          <span className="rounded-md border border-border/70 bg-muted/30 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
             {orderType || "—"}
           </span>
         </div>
-        <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase text-amber-600">
+        <span className="rounded-md bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-500 ring-1 ring-inset ring-amber-500/30">
           {status || "PENDING"}
         </span>
       </div>
