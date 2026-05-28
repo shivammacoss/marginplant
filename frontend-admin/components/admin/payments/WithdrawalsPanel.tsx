@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Check, Copy, X } from "lucide-react";
@@ -18,6 +19,7 @@ import {
 } from "@/components/ui/dialog";
 import { cn, formatINR } from "@/lib/utils";
 import { OwnerBadge } from "@/components/admin/OwnerBadge";
+import { LedgerSheet } from "@/components/admin/LedgerSheet";
 import { useAdminAuthStore } from "@/stores/authStore";
 import { canEdit } from "@/lib/permissions";
 
@@ -92,6 +94,9 @@ export function WithdrawalsPanel() {
   const pageSize = 15;
   const [approving, setApproving] = useState<{ id: string; utr: string } | null>(null);
   const [rejecting, setRejecting] = useState<{ id: string; reason: string } | null>(null);
+  // Ledger drawer target — pops the LedgerSheet from the per-row L
+  // button so admin can review wallet timeline before approving.
+  const [ledgerUser, setLedgerUser] = useState<{ id: string; user_code?: string; full_name?: string } | null>(null);
 
   function changeStatus(next: string) {
     setStatus(next);
@@ -210,6 +215,46 @@ export function WithdrawalsPanel() {
       ),
     },
     { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
+    {
+      key: "ledger",
+      header: "LEDGER",
+      align: "center",
+      render: (r: any) => (
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7 w-7 p-0 font-mono font-semibold border-primary/50 text-primary hover:bg-primary hover:text-primary-foreground"
+          title="View ledger / Adjust wallet"
+          onClick={(e) => {
+            e.stopPropagation();
+            setLedgerUser({
+              id: r.user_id,
+              user_code: r.user_code,
+              full_name: r.user_name,
+            });
+          }}
+        >
+          L
+        </Button>
+      ),
+    },
+    {
+      key: "positions",
+      header: "POSITION",
+      align: "center",
+      render: (r: any) => (
+        <Button
+          asChild
+          size="sm"
+          variant="outline"
+          className="h-7 w-7 p-0 font-mono font-semibold border-atm/50 text-atm hover:bg-atm hover:text-atm-foreground"
+          title="View positions"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <Link href={`/positions?user_id=${r.user_id}`}>P</Link>
+        </Button>
+      ),
+    },
     {
       key: "actions",
       header: "",
@@ -372,6 +417,15 @@ export function WithdrawalsPanel() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* User ledger drawer — same component as the Users list / Deposits
+          panel so admin can review wallet history before approving a
+          payout. */}
+      <LedgerSheet
+        open={!!ledgerUser}
+        user={ledgerUser}
+        onClose={() => setLedgerUser(null)}
+      />
     </div>
   );
 }
