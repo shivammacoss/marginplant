@@ -68,7 +68,12 @@ def _ser(u: User) -> dict:
 
 async def _enrich_admin_broker_names(rows: list[dict]) -> None:
     """Resolve the parent admin / broker name for each row so the table
-    can show 'Broker: Acme Trades' (or 'Sub-broker: …') instead of an id."""
+    can show 'Broker: Acme Trades' (or 'Sub-broker: …') instead of an id.
+
+    When the assigned broker is itself a sub-broker, also resolve and
+    emit `parent_broker_id` + `parent_broker_name` so the UI can render
+    the full chain 'Sub-broker: X → Broker: Y'.
+    """
     admin_ids = list({r["assigned_admin_id"] for r in rows if r.get("assigned_admin_id")})
     broker_ids = list({r["assigned_broker_id"] for r in rows if r.get("assigned_broker_id")})
     admin_oids = [PydanticObjectId(i) for i in admin_ids]
@@ -79,11 +84,32 @@ async def _enrich_admin_broker_names(rows: list[dict]) -> None:
     broker_name = {str(b.id): b.full_name for b in brokers}
     # A broker is a sub-broker iff it itself sits under another broker.
     broker_is_sub = {str(b.id): bool(b.assigned_broker_id) for b in brokers}
+    # Sub-broker → parent broker id mapping; the UI shows the parent
+    # name alongside the sub-broker chip so it's obvious who the
+    # downline reports to.
+    sub_to_parent_id: dict[str, str] = {
+        str(b.id): str(b.assigned_broker_id)
+        for b in brokers
+        if b.assigned_broker_id
+    }
+    parent_oids = [PydanticObjectId(pid) for pid in set(sub_to_parent_id.values())]
+    parent_brokers = (
+        await User.find({"_id": {"$in": parent_oids}}).to_list()
+        if parent_oids
+        else []
+    )
+    parent_broker_name = {str(b.id): b.full_name for b in parent_brokers}
     for r in rows:
         r["assigned_admin_name"] = admin_name.get(r.get("assigned_admin_id") or "")
         r["assigned_broker_name"] = broker_name.get(r.get("assigned_broker_id") or "")
         r["assigned_broker_is_sub"] = broker_is_sub.get(
             r.get("assigned_broker_id") or "", False
+        )
+        sub_broker_id = r.get("assigned_broker_id") or ""
+        parent_id = sub_to_parent_id.get(sub_broker_id)
+        r["parent_broker_id"] = parent_id
+        r["parent_broker_name"] = (
+            parent_broker_name.get(parent_id) if parent_id else None
         )
 
 
