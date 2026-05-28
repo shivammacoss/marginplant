@@ -1716,6 +1716,24 @@ class ZerodhaService:
                     entry["ticker"].close()
                 except Exception:
                     pass
+                # Also try to force-close the underlying Twisted transport
+                # so the TCP FIN is sent immediately rather than waiting
+                # for the WS close handshake to complete. Without this,
+                # Kite's gateway can keep the old slot warm for 30+ s
+                # after our `close()` call returns.
+                try:
+                    t = entry["ticker"]
+                    if hasattr(t, "ws") and t.ws is not None:
+                        if hasattr(t.ws, "transport") and t.ws.transport is not None:
+                            try:
+                                t.ws.transport.abortConnection()
+                            except Exception:
+                                try:
+                                    t.ws.transport.loseConnection()
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
             self._tickers.clear()
             self._token_to_ws.clear()
             self._token_last_used.clear()
@@ -1776,86 +1794,67 @@ class ZerodhaService:
             )
         self._stop_ticker()
         await self._async_set_status(WsStatus.CONNECTING, error=None)
+        # After token rotation Kite's gateway keeps the OLD session
+        # cached for ~15-30 s.  Reconnecting before that window expires
+        # gets a 403.  15 s covers the common case; self_heal (20 s
+        # cadence) keeps retrying when the slot is held longer.
         if force and had_live:
-            await asyncio.sleep(5)
+            await asyncio.sleep(15)
 
-        # Try the connect, and if it fails (typical: still 403 because the
-        # old slot hasn't been released yet), back off and retry several
-        # times before bubbling up. The retry budget is generous because
-        # Kite's gateway can hold a slot for 60-90 s after the previous
-        # holder process exits — most "WS won't connect" reports turn out
-        # to be a stale slot from a prior deploy / a co-running local
-        # backend, and the only fix is patience. 23 s (the old budget)
-        # was too tight; ~3 minutes is enough for every real-world case.
+        # SINGLE-SHOT connect. The inner 8-attempt × 7-min backoff that
+        # used to live here was the root cause of the daily 07:00 hang:
+        # every self_heal cycle blocked for ~7 minutes, so we got 8
+        # tries per hour instead of 180 (3 per minute).  Now the retry
+        # cadence is driven entirely by `ws_self_heal_loop` (20 s) so
+        # if Kite's slot releases at minute 4, we catch it within 20 s
+        # instead of waiting for the 70 s-into-cycle attempt.
         last_error: Exception | None = None
         last_close_reason: str = ""
-        for attempt, wait in enumerate((0, 10, 20, 35, 50, 70, 90, 120)):
-            if wait:
-                logger.info(
-                    "zerodha_ws_retry_backoff",
-                    extra={"attempt": attempt + 1, "wait_sec": wait},
-                )
-                await asyncio.sleep(wait)
-            try:
-                await self._start_ws_pool()
-                # Connection enters "connecting" — verify it actually opened
-                # within a short window. KiteTicker fires on_connect within
-                # ~1-2 s on success; longer means the upgrade was rejected
-                # and on_close already pruned the entry.
-                for _ in range(32):  # 32 × 0.25 s = 8 s
-                    await asyncio.sleep(0.25)
-                    with self._ticker_lock:
-                        if any(e.get("connected") for e in self._tickers):
-                            break
+        try:
+            await self._start_ws_pool()
+            # KiteTicker fires on_connect within ~1-2 s on success;
+            # longer means the upgrade was rejected and on_close
+            # already pruned the entry.
+            for _ in range(32):  # 32 × 0.25 s = 8 s
+                await asyncio.sleep(0.25)
                 with self._ticker_lock:
                     if any(e.get("connected") for e in self._tickers):
-                        last_error = None
                         break
-                last_error = RuntimeError(
-                    f"WS upgrade did not complete on attempt {attempt + 1}"
-                )
-                # Surface the most recent close reason from the rejected
-                # entry so the admin sees WHAT Kite said, not just "didn't
-                # complete". We capture this before `_stop_ticker()` clears
-                # the list below.
+            with self._ticker_lock:
+                connected_now = any(e.get("connected") for e in self._tickers)
+            if not connected_now:
+                last_error = RuntimeError("WS upgrade did not complete")
                 with self._ticker_lock:
                     for e in self._tickers:
                         reason = e.get("last_close_reason")
                         if reason:
                             last_close_reason = str(reason)
                             break
-            except Exception as e:  # noqa: BLE001
-                last_error = e
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+
+        if last_error is not None:
             self._stop_ticker()
             logger.warning(
                 "zerodha_ws_attempt_failed",
                 extra={
-                    "attempt": attempt + 1,
-                    "error": str(last_error)[:200] if last_error else None,
+                    "error": str(last_error)[:200],
                     "close_reason": last_close_reason[:200],
                 },
             )
-
-        if last_error is not None:
-            # Tailor the message: if Kite explicitly closed with 403, name
-            # the duplicate-process cause. Other close codes (network / 5xx /
-            # malformed token) get a more open-ended hint so the operator
-            # doesn't go re-authing when the real fix is a network retry.
             reason_l = last_close_reason.lower()
             looks_like_403 = "403" in reason_l or "forbidden" in reason_l or "1006" in reason_l
             if looks_like_403:
                 msg = (
-                    "Kite rejected the WebSocket after 5 retries (~3 min). "
-                    "Another process is still holding the slot for this "
-                    "access_token — check for a duplicate backend instance "
-                    "(prod + local both running?), or click Disconnect "
-                    "Zerodha + Login again to mint a fresh token."
+                    "Kite rejected the WebSocket (slot held). Self-heal "
+                    "will retry every 20 s. If this persists past 2 min, "
+                    "click Disconnect + reconnect Zerodha."
                 )
             else:
                 msg = (
-                    "WebSocket connect failed after 5 retries. Last close "
-                    f"reason: {last_close_reason[:180] or '(none)'}. "
-                    "Click Disconnect Zerodha + Login if this persists."
+                    "WebSocket connect failed. Last close reason: "
+                    f"{last_close_reason[:180] or '(none)'}. Self-heal "
+                    "will retry every 20 s."
                 )
             await self._async_set_status(WsStatus.ERROR, error=msg)
             raise RuntimeError(str(last_error))
@@ -1919,7 +1918,7 @@ class ZerodhaService:
     _self_heal_paused: bool = False
     _self_heal_running: bool = False
 
-    async def ws_self_heal_loop(self, interval_sec: float = 30.0) -> None:
+    async def ws_self_heal_loop(self, interval_sec: float = 20.0) -> None:
         """Background task — periodically nudge a stuck WebSocket back
         online. Skipped when:
           - admin explicitly disconnected (`_self_heal_paused` flag)

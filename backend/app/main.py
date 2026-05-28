@@ -415,7 +415,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     zerodha_heal_task: _asyncio.Task = _asyncio.create_task(
         _supervise(
             "zerodha_ws_self_heal",
-            _partial(_zerodha_heal.ws_self_heal_loop, interval_sec=30.0),
+            _partial(_zerodha_heal.ws_self_heal_loop, interval_sec=20.0),
         )
     )
     setattr(app, "_zerodha_self_heal_task", zerodha_heal_task)
