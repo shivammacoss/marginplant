@@ -605,7 +605,7 @@ export const BrokerMgmtAPI = {
 
   // Broker CRUD (admin/super-admin creates; broker can create sub-broker
   // when broker_permissions.sub_brokers == EDIT)
-  list: (params?: { q?: string; status?: string; page?: number; page_size?: number }) =>
+  list: (params?: { q?: string; status?: string; page?: number; page_size?: number; include_sub?: boolean }) =>
     unwrap<{ items: any[]; meta: any }>(api.get("/admin/management/brokers", { params })),
   get: (id: string) => unwrap<any>(api.get(`/admin/management/brokers/${id}`)),
   create: (body: {

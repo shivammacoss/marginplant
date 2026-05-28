@@ -62,12 +62,18 @@ export default function NewUserPage() {
     },
   });
 
-  // Brokers + sub-brokers in the caller's scope. Backend scopes the list
-  // by role automatically (admin → their brokers/sub-brokers, broker →
-  // their sub-brokers, super-admin → all).
+  // Brokers + sub-brokers in the caller's scope. `include_sub=true`
+  // drops the "top brokers only" filter so the dropdown also lists every
+  // sub-broker under the caller — admins can place a new client directly
+  // under any descendant, brokers can pick any of their downline.
   const brokersQuery = useQuery({
-    queryKey: ["admin", "brokers", "active"],
-    queryFn: () => BrokerMgmtAPI.list({ status: "ACTIVE", page_size: 200 }),
+    queryKey: ["admin", "brokers", "active-with-sub"],
+    queryFn: () =>
+      BrokerMgmtAPI.list({
+        status: "ACTIVE",
+        page_size: 200,
+        include_sub: true,
+      }),
   });
 
   const brokerOptions = (brokersQuery.data?.items ?? []).filter((b: any) => {

@@ -414,6 +414,7 @@ async def list_brokers_for(
     page: int = 1,
     page_size: int = 20,
     admin_id: PydanticObjectId | None = None,
+    include_sub: bool = False,
 ) -> tuple[list[User], int]:
     """Returns brokers visible to the actor.
 
@@ -422,6 +423,12 @@ async def list_brokers_for(
       - ADMIN       → brokers in their pool (assigned_admin_id == admin.id)
         and NO parent broker (top brokers under the admin). `admin_id` arg ignored.
       - BROKER      → their direct sub-brokers (assigned_broker_id == self.id)
+
+    When ``include_sub=True`` the assigned_broker_id filter is dropped
+    so the result includes the full subtree (top brokers + every
+    sub-broker under them). Used by the create-user dropdown so admins
+    can place a new client directly under any broker / sub-broker in
+    their pool, and brokers can pick any descendant.
     """
     query: dict[str, Any] = {"role": UserRole.BROKER.value}
 
@@ -430,12 +437,19 @@ async def list_brokers_for(
             query["assigned_admin_id"] = admin_id
         else:
             query["assigned_admin_id"] = None
-        query["assigned_broker_id"] = None
+        if not include_sub:
+            query["assigned_broker_id"] = None
     elif actor.role == UserRole.ADMIN:
         query["assigned_admin_id"] = actor.id
-        query["assigned_broker_id"] = None
+        if not include_sub:
+            query["assigned_broker_id"] = None
     elif actor.role == UserRole.BROKER:
-        query["assigned_broker_id"] = actor.id
+        if include_sub:
+            # Full subtree under this broker — match anyone whose
+            # broker_ancestry chain includes us.
+            query["broker_ancestry"] = actor.id
+        else:
+            query["assigned_broker_id"] = actor.id
     else:
         return [], 0
 

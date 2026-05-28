@@ -127,6 +127,7 @@ async def list_brokers(
     page: int = 1,
     page_size: int = 20,
     admin_id: PydanticObjectId | None = None,
+    include_sub: bool = False,
 ):
     # Permission gate inline. Super-admin always passes; admin needs
     # admin_permissions.brokers; broker needs broker_permissions.sub_brokers >= VIEW.
@@ -153,6 +154,7 @@ async def list_brokers(
         page=page,
         page_size=page_size,
         admin_id=effective_admin_id,
+        include_sub=include_sub,
     )
     items = [await _ser_broker(b) for b in rows]
     return APIResponse(
