@@ -91,26 +91,25 @@ export function TopBar() {
         </span>
       </Link>
 
-      {/* Notification bell — visible on mobile + desktop. The only mobile
-          shortcut kept in the header; everything else lives behind the
-          Profile tab (bottom nav) so the bar doesn't overflow on small
-          phones. */}
+      {/* Notification bell — visible on mobile + desktop. */}
       <Button variant="ghost" size="icon" aria-label="Notifications" asChild>
         <Link href="/notifications">
           <Bell className="size-4" />
         </Link>
       </Button>
 
+      {/* WhatsApp support — visible on mobile + desktop. Renders nothing
+          when admin hasn't saved a WhatsApp number, so the bar stays
+          clean.  Promoted out of the desktop-only cluster on user
+          request: mobile clients couldn't reach their broker from the
+          header before this. */}
+      <SupportShortcut />
+
       {/* ── Desktop-only cluster ────────────────────────────────
-         ThemeToggle / Support / Profile / Logout used to ALL render on
-         mobile too, which crowded the 14-row header and overlapped the
-         wallet pill on narrow screens (user-reported). On mobile the
-         Profile tab in the bottom nav now hosts theme + sign-out +
-         support so the header stays clean. Sidebar already covers
-         these affordances on desktop. */}
+         ThemeToggle / Profile / Logout. Mobile users get these from
+         the Profile bottom-nav tab so the header stays uncluttered. */}
       <div className="hidden items-center gap-1 md:flex">
         <ThemeToggle />
-        <SupportShortcut />
         <Button variant="ghost" size="icon" aria-label="Profile" asChild>
           <Link href="/profile">
             <UserIcon className="size-4" />
