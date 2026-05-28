@@ -241,9 +241,15 @@ function TradeDetailSheetInner({ token, open, onClose, onSwap }: Props) {
   // (every 30 s) and the resolver re-emitted the same min value with a
   // different Number reference, which manifested as "I can't change the
   // lots on mobile".
+  // Indian exchanges always open at 1 lot (operator preference);
+  // forex / crypto fall back to the fractional segment minimum.
+  const isIndianExchange =
+    exch === "NSE" || exch === "BSE" || exch === "MCX" || exch === "NFO" || exch === "BFO";
+  const defaultLot = isIndianExchange ? Math.max(1, minLot) : minLot;
+
   useEffect(() => {
     if (!open) return;
-    setLots(minLot);
+    setLots(defaultLot);
     setStopLoss("");
     setTarget("");
     setLimitPrice("");
