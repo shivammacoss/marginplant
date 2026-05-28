@@ -406,19 +406,52 @@ async def create_user(
     assigned_broker_id: PydanticObjectId | None = None
     broker_ancestry_for_new: list[PydanticObjectId] = []
 
+    # Optional "Place user under <broker>" selector from the create form.
+    # When set, the new user is placed inside that broker's subtree
+    # instead of directly under the caller.  Scope is enforced — admins
+    # can only target brokers in their pool, brokers can only target
+    # sub-brokers under them.
+    target_broker: User | None = None
+    if payload.assign_to_broker_id:
+        target_broker = await assert_user_in_scope(admin, payload.assign_to_broker_id)
+        if target_broker.role != UserRole.BROKER:
+            raise HTTPException(
+                status_code=400,
+                detail="assign_to_broker_id must reference a broker / sub-broker user.",
+            )
+
     if admin.role == UserRole.SUPER_ADMIN:
-        pass  # all None / empty
+        if target_broker is not None:
+            # Super-admin placing user under a specific broker/sub-broker.
+            assigned_admin_id = target_broker.assigned_admin_id
+            assigned_broker_id = target_broker.id
+            broker_ancestry_for_new = (
+                list(target_broker.broker_ancestry or []) + [target_broker.id]
+            )
     elif admin.role == UserRole.BROKER:
         if payload.parent_id:
             await assert_user_in_scope(admin, payload.parent_id)
         assigned_admin_id = admin.assigned_admin_id  # inherit broker's top admin
-        assigned_broker_id = admin.id
-        broker_ancestry_for_new = list(admin.broker_ancestry or []) + [admin.id]
+        if target_broker is not None:
+            # Broker placing user under one of their sub-brokers.
+            assigned_broker_id = target_broker.id
+            broker_ancestry_for_new = (
+                list(target_broker.broker_ancestry or []) + [target_broker.id]
+            )
+        else:
+            assigned_broker_id = admin.id
+            broker_ancestry_for_new = list(admin.broker_ancestry or []) + [admin.id]
     else:
         # ADMIN
         if payload.parent_id:
             await assert_user_in_scope(admin, payload.parent_id)
         assigned_admin_id = admin.id
+        if target_broker is not None:
+            # Admin placing user under one of their brokers/sub-brokers.
+            assigned_broker_id = target_broker.id
+            broker_ancestry_for_new = (
+                list(target_broker.broker_ancestry or []) + [target_broker.id]
+            )
 
     user = await user_service.create_user(
         email=payload.email,

@@ -14,10 +14,14 @@ class CreateUserRequest(BaseModel):
     password: str = Field(min_length=8)
     role: str = "CLIENT"
     parent_id: str | None = None
+    # Broker / sub-broker to place this user under.  When the caller is
+    # an ADMIN, this can be any broker/sub-broker in their pool.  When
+    # the caller is a BROKER, this can be any sub-broker under them.
+    # `null` = "Self" (keep the user directly under the caller).
+    assign_to_broker_id: str | None = None
     is_demo: bool = False
     initial_balance: float = 0
     credit_limit: float = 0
-    pan: str | None = None
 
 
 class WalletAdjustRequest(BaseModel):

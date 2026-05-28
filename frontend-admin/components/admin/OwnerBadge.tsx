@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRightLeft } from "lucide-react";
+import { ArrowRightLeft, ChevronRight } from "lucide-react";
 import type { AdminUser } from "@/types";
 
 type Row = {
@@ -11,6 +11,12 @@ type Row = {
   // True when assigned_broker is itself a sub-broker (sits under another
   // broker). Drives the chip label "Sub-broker: <name>" vs. "Broker: <name>".
   assigned_broker_is_sub?: boolean | null;
+  // Parent broker of the assigned broker (only when assigned_broker is a
+  // sub-broker). Lets the badge show the full hierarchy chain
+  // "Sub-broker: <sub> → Broker: <parent>" so the admin can tell at a
+  // glance whose downline this user belongs to.
+  parent_broker_id?: string | null;
+  parent_broker_name?: string | null;
   // Stamped every time a Transfer User action lands the row in someone's
   // pool. Non-null means this user reached the current viewer's
   // dashboard via reassignment (not direct creation). Drives the small
@@ -58,7 +64,7 @@ export function OwnerBadge({
     const cls = isSub
       ? "bg-indigo-500/10 text-indigo-400 ring-indigo-500/30"
       : "bg-blue-500/10 text-blue-400 ring-blue-500/30";
-    ownerChip = (
+    const subChip = (
       <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset ${cls}`}>
         <span className="text-[10px] uppercase tracking-wide opacity-70">
           {isSub ? "Sub-broker" : "Broker"}
@@ -66,6 +72,23 @@ export function OwnerBadge({
         <span>{label}</span>
       </span>
     );
+    // When the assigned broker is itself a sub-broker, also surface the
+    // parent broker chip so the admin sees the full chain at a glance.
+    if (isSub && row.parent_broker_id) {
+      const parentLabel = row.parent_broker_name || `…${row.parent_broker_id.slice(-6)}`;
+      ownerChip = (
+        <span className="inline-flex flex-wrap items-center gap-1">
+          {subChip}
+          <ChevronRight className="size-3 text-muted-foreground" />
+          <span className="inline-flex items-center gap-1 rounded-full bg-blue-500/10 px-2 py-0.5 text-[11px] font-medium text-blue-400 ring-1 ring-inset ring-blue-500/30">
+            <span className="text-[10px] uppercase tracking-wide opacity-70">Broker</span>
+            <span>{parentLabel}</span>
+          </span>
+        </span>
+      );
+    } else {
+      ownerChip = subChip;
+    }
   } else if (me?.role === "SUPER_ADMIN" && row.assigned_admin_id) {
     const label = row.assigned_admin_name || `…${row.assigned_admin_id.slice(-6)}`;
     ownerChip = (

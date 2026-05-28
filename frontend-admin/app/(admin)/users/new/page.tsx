@@ -7,7 +7,9 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
 import { Eye, EyeOff } from "lucide-react";
-import { UsersAPI } from "@/lib/api";
+import { useQuery } from "@tanstack/react-query";
+import { BrokerMgmtAPI, UsersAPI } from "@/lib/api";
+import { useAdminAuthStore } from "@/stores/authStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -31,7 +33,9 @@ const schema = z
     is_demo: z.boolean(),
     initial_balance: z.coerce.number().min(0).default(0),
     credit_limit: z.coerce.number().min(0).default(0),
-    pan: z.string().optional(),
+    // "" = Self (keep user directly under caller).  Otherwise a broker /
+    // sub-broker id to place the user inside that broker's subtree.
+    assign_to_broker_id: z.string().optional(),
   })
   .refine((v) => v.password === v.confirm_password, {
     path: ["confirm_password"],
@@ -42,6 +46,7 @@ type Values = z.infer<typeof schema>;
 export default function NewUserPage() {
   const router = useRouter();
   const [showPassword, setShowPassword] = useState(false);
+  const admin = useAdminAuthStore((s) => s.admin);
   const form = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: {
@@ -53,24 +58,46 @@ export default function NewUserPage() {
       is_demo: false,
       initial_balance: 0,
       credit_limit: 0,
-      pan: "",
+      assign_to_broker_id: "",
     },
+  });
+
+  // Brokers + sub-brokers in the caller's scope. Backend scopes the list
+  // by role automatically (admin → their brokers/sub-brokers, broker →
+  // their sub-brokers, super-admin → all).
+  const brokersQuery = useQuery({
+    queryKey: ["admin", "brokers", "active"],
+    queryFn: () => BrokerMgmtAPI.list({ status: "ACTIVE", page_size: 200 }),
+  });
+
+  const brokerOptions = (brokersQuery.data?.items ?? []).filter((b: any) => {
+    // Hide the caller themselves from the dropdown — "Self" handles that.
+    return String(b.id) !== String(admin?.id ?? "");
   });
 
   async function onSubmit(v: Values) {
     // confirm_password is a client-only guard — strip before the POST so
     // the backend's CreateUserRequest schema (which doesn't know about
     // this field) doesn't reject the request as `extra=forbid`.
-    const { confirm_password: _confirm, ...payload } = v;
+    const { confirm_password: _confirm, assign_to_broker_id, ...rest } = v;
     void _confirm;
+    const payload: any = { ...rest, role: "CLIENT" };
+    if (assign_to_broker_id) payload.assign_to_broker_id = assign_to_broker_id;
     try {
-      const created = await UsersAPI.create({ ...payload, role: "CLIENT" });
+      const created = await UsersAPI.create(payload);
       toast.success(`Created ${created.user_code}`);
       router.push(`/users/${created.id}`);
     } catch (e: any) {
       toast.error(e.message || "Failed to create");
     }
   }
+
+  const selfLabel =
+    admin?.role === "BROKER"
+      ? "Self (this broker)"
+      : admin?.role === "ADMIN"
+        ? "Self (this admin)"
+        : "Self (platform)";
 
   return (
     <div className="space-y-6">
@@ -119,18 +146,42 @@ export default function NewUserPage() {
                 {...form.register("confirm_password")}
               />
             </Field>
-            <Field label="PAN (optional)">
-              <Input className="uppercase" maxLength={10} {...form.register("pan")} />
-            </Field>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
             <CardTitle>Access &amp; balances</CardTitle>
-            <CardDescription>Opening balance + credit limit</CardDescription>
+            <CardDescription>Placement + opening balance + credit limit</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
+            <Field
+              label="Place user under"
+              error={form.formState.errors.assign_to_broker_id?.message}
+            >
+              <select
+                {...form.register("assign_to_broker_id")}
+                className="h-9 w-full rounded-md border border-border bg-background px-2 text-sm"
+                disabled={brokersQuery.isLoading}
+              >
+                <option value="">{selfLabel}</option>
+                {brokerOptions.map((b: any) => {
+                  const isSub = !!b.assigned_broker_id;
+                  const label = `${isSub ? "Sub-broker" : "Broker"} · ${
+                    b.full_name || b.user_code
+                  }${b.user_code ? ` (${b.user_code})` : ""}`;
+                  return (
+                    <option key={b.id} value={b.id}>
+                      {label}
+                    </option>
+                  );
+                })}
+              </select>
+              <p className="text-[11px] text-muted-foreground">
+                Choose the broker / sub-broker this user belongs under. Default is
+                Self.
+              </p>
+            </Field>
             <Field label="Initial balance (₹)">
               <Input type="number" step="0.01" {...form.register("initial_balance")} />
             </Field>

@@ -50,6 +50,20 @@ async def build_owner_map(user_ids: list) -> dict[str, dict]:
     broker_is_sub = {
         str(b.id): bool(b.assigned_broker_id) for b in brokers
     }
+    # Map sub-broker → parent broker so the UI can show the full chain
+    # "Sub-broker: <sub> → Broker: <parent>" for nested cases.
+    sub_to_parent_id = {
+        str(b.id): str(b.assigned_broker_id)
+        for b in brokers
+        if b.assigned_broker_id
+    }
+    parent_broker_oids = list({PydanticObjectId(pid) for pid in sub_to_parent_id.values()})
+    parent_brokers = (
+        await User.find({"_id": {"$in": parent_broker_oids}}).to_list()
+        if parent_broker_oids
+        else []
+    )
+    parent_broker_name = {str(b.id): b.full_name for b in parent_brokers}
 
     return {
         str(u.id): {
@@ -66,6 +80,16 @@ async def build_owner_map(user_ids: list) -> dict[str, dict]:
             "assigned_broker_is_sub": broker_is_sub.get(str(u.assigned_broker_id), False)
             if u.assigned_broker_id
             else False,
+            "parent_broker_id": (
+                sub_to_parent_id.get(str(u.assigned_broker_id))
+                if u.assigned_broker_id
+                else None
+            ),
+            "parent_broker_name": (
+                parent_broker_name.get(sub_to_parent_id.get(str(u.assigned_broker_id), ""))
+                if u.assigned_broker_id
+                else None
+            ),
         }
         for u in users
     }
@@ -83,6 +107,8 @@ def owner_fields(info: dict | None) -> dict:
             "assigned_broker_id": None,
             "assigned_broker_name": None,
             "assigned_broker_is_sub": False,
+            "parent_broker_id": None,
+            "parent_broker_name": None,
         }
     return {k: info.get(k) for k in (
         "user_name",
@@ -92,4 +118,6 @@ def owner_fields(info: dict | None) -> dict:
         "assigned_broker_id",
         "assigned_broker_name",
         "assigned_broker_is_sub",
+        "parent_broker_id",
+        "parent_broker_name",
     )}
