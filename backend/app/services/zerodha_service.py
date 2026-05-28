@@ -1800,24 +1800,6 @@ class ZerodhaService:
                     entry["ticker"].close()
                 except Exception:
                     pass
-                # Also try to force-close the underlying Twisted transport
-                # so the TCP FIN is sent immediately rather than waiting
-                # for the WS close handshake to complete. Without this,
-                # Kite's gateway can keep the old slot warm for 30+ s
-                # after our `close()` call returns.
-                try:
-                    t = entry["ticker"]
-                    if hasattr(t, "ws") and t.ws is not None:
-                        if hasattr(t.ws, "transport") and t.ws.transport is not None:
-                            try:
-                                t.ws.transport.abortConnection()
-                            except Exception:
-                                try:
-                                    t.ws.transport.loseConnection()
-                                except Exception:
-                                    pass
-                except Exception:
-                    pass
             self._tickers.clear()
             self._token_to_ws.clear()
             self._token_last_used.clear()
