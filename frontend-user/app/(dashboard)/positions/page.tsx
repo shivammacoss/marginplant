@@ -1599,6 +1599,17 @@ function ClosedMobileCard({ row: r }: { row: any }) {
     return parts.length > 1 ? parts.slice(1).join(", ") : full;
   }
 
+  // Compact "DD Mon" date prefix for the timing row.  Closed cards
+  // span multiple trading days once the user has any history, so the
+  // earlier time-only render left ambiguity ("09:15 → 09:32" — but
+  // which day?).
+  function dateOnly(v: string | null | undefined): string {
+    if (!v) return "";
+    const full = formatIST(v, { withSeconds: false });
+    const parts = full.split(", ");
+    return parts.length > 1 ? parts[0] : "";
+  }
+
   return (
     <li className="group relative overflow-hidden rounded-xl border border-border/70 bg-gradient-to-b from-card to-card/60 p-3.5 shadow-sm ring-1 ring-inset ring-white/5">
       {/* Subtle accent stripe — BUY = green, SELL = red. Same visual
@@ -1643,11 +1654,11 @@ function ClosedMobileCard({ row: r }: { row: any }) {
 
       {/* Symbol + sub-line on the left, P&L / brokerage on the right */}
       <div className="mt-2 flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="truncate text-base font-bold leading-tight">
+        <div className="min-w-0 flex-1">
+          <div className="break-all text-[13px] font-bold leading-tight sm:text-sm">
             {r.symbol}
           </div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] uppercase tracking-wide text-muted-foreground">
+          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
             <span className="truncate">{subLine}</span>
             {expiry ? (
               <span className="rounded bg-primary/10 px-1.5 py-0.5 font-semibold text-primary">
@@ -1675,10 +1686,14 @@ function ClosedMobileCard({ row: r }: { row: any }) {
         </div>
       </div>
 
-      {/* Order kind + timing */}
-      <div className="mt-1.5 flex items-baseline justify-between gap-2 text-[10px] text-muted-foreground">
+      {/* Order kind + timing.  Date prefix added so user can spot
+          'kab ye trade lagaya tha' on cards from earlier days — was
+          showing time-only which was confusing once the same symbol
+          had multiple closes across days. */}
+      <div className="mt-1.5 flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
         <span className="uppercase tracking-wider">Market → Market</span>
         <span className="whitespace-nowrap font-tabular">
+          <span className="text-muted-foreground/80">{dateOnly(r.opened_at)}</span>{" "}
           {timeOnly(r.opened_at)} → {timeOnly(r.closed_at)}
         </span>
       </div>
@@ -1941,13 +1956,18 @@ function ActiveMobileCard({
         </div>
       </div>
 
-      {/* Symbol + sub-line on left, live P&L + price transition on right */}
+      {/* Symbol + sub-line on left, live P&L + price transition on right.
+          Long option symbols like NIFTY2660224000CE need to wrap rather
+          than truncate so the strike isn't hidden behind an ellipsis.
+          `break-all` lets the symbol fold mid-token; size shrinks to
+          [13px] which fits most chains on a 360 dp phone without
+          breaking the 2-line ceiling. */}
       <div className="mt-2 flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="truncate text-base font-bold leading-tight">
+        <div className="min-w-0 flex-1">
+          <div className="break-all text-[13px] font-bold leading-tight sm:text-sm">
             {r.symbol}
           </div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] uppercase tracking-wide text-muted-foreground">
+          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
             <span className="truncate">{subLine}</span>
             {expiry ? (
               <span className="rounded bg-primary/10 px-1.5 py-0.5 font-semibold text-primary">
