@@ -1265,20 +1265,29 @@ function WalletStatusStrip({
   wallet: any;
   m2m: number;
   cfRequired: number;
-  /** Drop the CF Required tile when false — used on the Position tab
-   *  so the trader sees a clean 4-tile wallet row. Active tab keeps it
-   *  on (5 tiles) because that's where carry-forward planning lives. */
+  /** Drop the CF Required + CF Extra tiles when false — used on the
+   *  Position tab so the wallet row stays at 4 tiles. Active tab keeps
+   *  both on (6 tiles) because that's where carry-forward planning
+   *  lives. */
   showCfRequired?: boolean;
 }) {
   const available = Number(wallet?.available_balance ?? 0);
   const used = Number(wallet?.used_margin ?? 0);
   const balance = available + used;
   const equity = balance + m2m;
+  // CF Extra Needed — the shortfall the trader has to top up before
+  // their MIS positions can roll into NRML overnight.  Computed
+  // against the LIVE equity (balance + M2M) rather than just
+  // available_balance: if today's M2M is +50k, the trader effectively
+  // has more cushion to carry; if it's -34k, the cushion shrinks.
+  // Floored at zero — no negative "extra" when the wallet already
+  // covers the carry requirement.
+  const cfExtraNeeded = Math.max(0, cfRequired - equity);
   return (
     <div
       className={cn(
         "grid grid-cols-2 gap-2 sm:grid-cols-3",
-        showCfRequired ? "lg:grid-cols-5" : "lg:grid-cols-4",
+        showCfRequired ? "lg:grid-cols-6" : "lg:grid-cols-4",
       )}
     >
       <WalletTile label="Balance" value={formatINR(balance)} />
@@ -1290,11 +1299,18 @@ function WalletStatusStrip({
       />
       <WalletTile label="Used Margin" value={formatINR(used)} />
       {showCfRequired && (
-        <WalletTile
-          label="CF Required"
-          value={formatINR(cfRequired)}
-          valueClass={cfRequired > available ? "text-red-500" : undefined}
-        />
+        <>
+          <WalletTile
+            label="CF Required"
+            value={formatINR(cfRequired)}
+            valueClass={cfRequired > available ? "text-red-500" : undefined}
+          />
+          <WalletTile
+            label="CF Extra Needed"
+            value={formatINR(cfExtraNeeded)}
+            valueClass={cfExtraNeeded > 0 ? "text-red-500" : "text-emerald-500"}
+          />
+        </>
       )}
     </div>
   );
