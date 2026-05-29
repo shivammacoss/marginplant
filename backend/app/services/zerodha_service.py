@@ -259,6 +259,75 @@ class ZerodhaService:
             raise RuntimeError("Zerodha token has expired (08:00 IST daily). Re-authenticate.")
         return self._kite(s.apiKey, s.accessToken), s
 
+    async def probe_and_clear_invalid_token(self) -> bool:
+        """REST-probe the stored access token via ``kite.profile()``.
+
+        Returns True if the token is alive. Returns False (and CLEARS the
+        token from DB so self-heal / WS-connect stop hammering it) when
+        Kite responds with TokenException / 403 / 401.
+
+        Why this exists
+        ---------------
+        Operator reported a recurring issue: "key DB me save rehta hai
+        backend restart se hi hatti hai". Kite can invalidate a token
+        BEFORE its nominal 08:00 IST expiry (e.g. login from another
+        device, Kite-side rotation, IP block). Our `tokenExpiry` says
+        future, but every WS upgrade now returns 403. The self-heal
+        loop then loops endlessly with the dead token, holding the
+        Kite-side WS slot warm and preventing fresh logins from
+        succeeding cleanly.
+
+        With this probe + auto-clear, the moment Kite says "this token
+        is dead" we wipe accessToken from DB. The next loop iteration
+        sees `not s.accessToken`, skips, and the auto-login scheduler
+        (or admin click) gets a clean slate. No restart needed.
+        """
+        s = await self._get_settings()
+        if not s.apiKey or not s.accessToken:
+            return False
+        try:
+            kc = self._kite(s.apiKey, s.accessToken)
+            await asyncio.to_thread(kc.profile)
+            return True
+        except Exception as exc:
+            msg = str(exc).lower()
+            # Kite's TokenException / "incorrect api_key or access_token" /
+            # bare 403 / 401 all mean: this token will never work again.
+            # Anything else (network blip, 5xx) we DO NOT clear — those
+            # are transient and clearing would force an unnecessary
+            # re-login.
+            looks_invalid = (
+                "tokenexception" in msg
+                or "token" in msg and "expired" in msg
+                or "incorrect" in msg and ("token" in msg or "api_key" in msg)
+                or "403" in msg
+                or "401" in msg
+                or "invalid" in msg and "token" in msg
+            )
+            if not looks_invalid:
+                logger.warning(
+                    "zerodha_token_probe_transient_error",
+                    extra={"error": str(exc)[:200]},
+                )
+                return True  # assume alive — don't punish transient errors
+            logger.warning(
+                "zerodha_token_probe_invalid_clearing_db",
+                extra={"error": str(exc)[:200]},
+            )
+            try:
+                s.accessToken = None
+                s.refreshToken = None
+                s.tokenExpiry = None
+                s.isConnected = False
+                s.wsStatus = WsStatus.DISCONNECTED
+                s.wsLastError = "Token invalidated by Kite — cleared, awaiting re-login."
+                await s.save()
+            except Exception:
+                logger.exception("zerodha_token_probe_db_clear_failed")
+            # Also drop any in-memory tickers that were trying to use it.
+            self._stop_ticker()
+            return False
+
     # ── OAuth login flow ─────────────────────────────────────────────
     async def get_login_url(self) -> str:
         s = await self._get_settings()
@@ -1803,12 +1872,48 @@ class ZerodhaService:
                             pass
 
     def _stop_ticker(self) -> None:
+        """Tear down every live ticker AND neuter their callbacks so that
+        any in-flight on_connect / on_close / on_error / on_ticks that
+        fires AFTER we've already given up doesn't mutate the next
+        connection's state.
+
+        Why the noop-callback dance matters
+        -----------------------------------
+        KiteTicker uses Twisted under the hood — every `connect()` spawns
+        a reactor thread. When we call `.close()` the underlying socket
+        starts a TCP teardown, but the reactor thread continues running
+        for some milliseconds and may still fire callbacks. Without this
+        neutering, a stale on_connect from a dying ticker can flip
+        `entry["connected"] = True` on the NEW ticker's entry (same dict
+        identity if Python recycles it), giving a false "connected"
+        reading that disappears seconds later — exactly the kind of
+        flapping that confused the self-heal loop into never settling.
+        """
         with self._ticker_lock:
             for entry in self._tickers:
+                ticker = entry.get("ticker")
+                if ticker is None:
+                    continue
+                # Neuter callbacks first — once these are no-ops, any
+                # straggling event from the Twisted thread becomes a
+                # silent no-op instead of polluting state.
                 try:
-                    entry["ticker"].close()
+                    ticker.on_connect = lambda *a, **k: None
+                    ticker.on_close = lambda *a, **k: None
+                    ticker.on_error = lambda *a, **k: None
+                    ticker.on_ticks = lambda *a, **k: None
+                    ticker.on_reconnect = lambda *a, **k: None
+                    ticker.on_noreconnect = lambda *a, **k: None
                 except Exception:
                     pass
+                try:
+                    ticker.close()
+                except Exception:
+                    pass
+                # Mark the entry dead so any view of it during the
+                # race window sees the right state.
+                entry["connected"] = False
+                entry["connecting"] = False
             self._tickers.clear()
             self._token_to_ws.clear()
             self._token_last_used.clear()
@@ -2060,16 +2165,43 @@ class ZerodhaService:
                     s = await self._get_settings()
                     if not s.apiKey or not s.accessToken:
                         # No auth yet — admin hasn't logged in. Self-heal
-                        # has nothing to do.
+                        # has nothing to do. Try to trigger auto-login if
+                        # creds + toggle are configured.
+                        await self._maybe_trigger_auto_login_when_token_missing()
                         continue
-                    # Auth token expired? Skip — admin needs to re-login.
+                    # Auth token expired (nominal 08:00 IST clock)? Clear
+                    # and try auto-login.
                     expiry = _ensure_aware_utc(s.tokenExpiry)
                     if expiry and now_utc() >= expiry:
+                        logger.info("zerodha_ws_self_heal_token_expired_clearing")
+                        try:
+                            s.accessToken = None
+                            s.refreshToken = None
+                            s.tokenExpiry = None
+                            s.isConnected = False
+                            s.wsStatus = WsStatus.DISCONNECTED
+                            await s.save()
+                        except Exception:
+                            logger.exception("zerodha_ws_self_heal_expired_clear_failed")
+                        await self._maybe_trigger_auto_login_when_token_missing()
                         continue
                     # Already alive? Nothing to do.
                     with self._ticker_lock:
                         if any(e.get("connected") for e in self._tickers):
                             continue
+                    # Token nominally valid but WS dead. REST-probe before
+                    # spawning yet another KiteTicker — if Kite has secretly
+                    # invalidated the token (duplicate login from another
+                    # device, IP block, server-side rotation), the probe
+                    # clears the DB token and we skip until next login.
+                    # This is the fix for "WS keeps failing for hours until
+                    # backend restart" — restart was masking the dead token
+                    # by forcing a fresh login path.
+                    token_alive = await self.probe_and_clear_invalid_token()
+                    if not token_alive:
+                        logger.warning("zerodha_ws_self_heal_token_dead_skipping")
+                        await self._maybe_trigger_auto_login_when_token_missing()
+                        continue
                     # ERROR or DISCONNECTED with valid auth → try again.
                     # Refresh the event loop reference — it may have gone
                     # stale if the prior connect attempt captured a loop
@@ -2110,6 +2242,41 @@ class ZerodhaService:
 
     def stop_ws_self_heal(self) -> None:
         self._self_heal_running = False
+
+    # Rate-limit auto-login retries triggered from the self-heal loop so
+    # we don't spawn 100 Playwright runs if Kite stays unresponsive.
+    _last_auto_login_trigger_at: float = 0.0
+    _AUTO_LOGIN_MIN_GAP_SEC = 300  # 5 minutes between auto-login attempts
+
+    async def _maybe_trigger_auto_login_when_token_missing(self) -> None:
+        """Self-heal helper: when the DB token is missing/dead AND the
+        admin has configured auto-login + enabled it, kick off a fresh
+        Playwright login. Rate-limited to one attempt every 5 minutes.
+
+        This is what makes the system self-healing across restarts —
+        previously the admin had to manually click "Login to Kite"
+        whenever the token died mid-day.
+        """
+        try:
+            import time as _time
+            now = _time.monotonic()
+            if now - self._last_auto_login_trigger_at < self._AUTO_LOGIN_MIN_GAP_SEC:
+                return
+            # Lazy import to avoid circular dependency at module load.
+            from app.services.zerodha_auto_login import zerodha_auto_login
+            if not await zerodha_auto_login.is_enabled():
+                return
+            self._last_auto_login_trigger_at = now
+            logger.info("zerodha_ws_self_heal_triggering_auto_login")
+            # Fire-and-forget — refresh_now is slow (~6 s Playwright run)
+            # and we don't want to block the self-heal tick. The callback
+            # will save the new token and kick off the WS via the existing
+            # post-login flow.
+            asyncio.create_task(
+                zerodha_auto_login.refresh_now(triggered_by="self_heal_token_missing")
+            )
+        except Exception:
+            logger.exception("zerodha_ws_self_heal_auto_login_trigger_failed")
 
     def get_ws_pool_info(self) -> dict[str, Any]:
         """Return current WebSocket pool status for admin diagnostics."""
