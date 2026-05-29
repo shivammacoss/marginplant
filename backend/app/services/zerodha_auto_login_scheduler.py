@@ -112,7 +112,7 @@ _LIVENESS_LOG_EVERY_N_TICKS = 20  # ≈ every 10 minutes at 30-s tick
 # another Playwright run — it just re-spawns the KiteTicker with the
 # existing fresh token. If even that fails, we fall back to a full
 # Layer-3 refresh_now() (new token + new WS spawn).
-_VERIFY_TIMEOUT_SEC = 30
+_VERIFY_TIMEOUT_SEC = 60
 _VERIFY_POLL_INTERVAL_SEC = 2
 
 _stop_flag = False

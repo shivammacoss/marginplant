@@ -111,6 +111,15 @@ class ZerodhaService:
         # Each entry: {"ticker": KiteTicker, "tokens": set[int], "connected": bool}
         self._tickers: list[dict[str, Any]] = []
         self._ticker_lock = threading.Lock()
+        # Serialises every connect_ws() entry. Without this, the scheduler's
+        # Layer-2/3 paths can race the post-login WS kickoff (both call
+        # connect_ws within 1 s of each other), causing _stop_ticker() to
+        # kill a ticker that's mid-handshake and producing the perpetual
+        # "WS upgrade did not complete" loop.
+        self._ws_connect_lock: asyncio.Lock | None = None
+        # Tracks back-to-back self-heal failures so we can ramp the retry
+        # interval (Kite throttles a key that's hammering the WS endpoint).
+        self._ws_consecutive_heal_failures: int = 0
 
         # Reverse lookup: token → ticker index
         self._token_to_ws: dict[int, int] = {}
@@ -1834,6 +1843,18 @@ class ZerodhaService:
         except RuntimeError:
             pass
 
+        # Lazily create the connect-lock on the current event loop. Cannot
+        # do this in __init__ because there's no running loop there.
+        if self._ws_connect_lock is None:
+            self._ws_connect_lock = asyncio.Lock()
+
+        # Serialise — if another caller is mid-connect (e.g. post-login
+        # kickoff still running), wait for them instead of racing and
+        # killing their in-flight ticker.
+        async with self._ws_connect_lock:
+            await self._connect_ws_locked(force=force)
+
+    async def _connect_ws_locked(self, *, force: bool) -> None:
         # Re-arm self-heal — a fresh connect_ws call means the admin / a
         # fresh login wants the ticker back online, even if they had
         # previously hit Disconnect.
@@ -1878,13 +1899,26 @@ class ZerodhaService:
         last_close_reason: str = ""
         try:
             await self._start_ws_pool()
-            # KiteTicker fires on_connect within ~1-2 s on success;
-            # longer means the upgrade was rejected and on_close
-            # already pruned the entry.
-            for _ in range(32):  # 32 × 0.25 s = 8 s
+            # KiteTicker fires on_connect within ~1-2 s on a clean run,
+            # but during morning rush + post-token-rotation the handshake
+            # can take 10-20 s while Kite releases the prior slot.
+            # 8 s was too aggressive — declared failure mid-handshake,
+            # then _stop_ticker() killed a ticker that was about to
+            # connect, producing the perpetual "WS upgrade did not
+            # complete" loop observed overnight (~1500 self-heal
+            # attempts, zero successes). 25 s gives the upgrade time
+            # to actually complete OR on_close to fire with a real
+            # error reason. Break early on success so the happy path
+            # is still ~1-2 s.
+            for _ in range(100):  # 100 × 0.25 s = 25 s
                 await asyncio.sleep(0.25)
                 with self._ticker_lock:
                     if any(e.get("connected") for e in self._tickers):
+                        break
+                    # If on_close already fired with a definitive reason
+                    # (e.g. 403), no point waiting the full 25 s — the
+                    # ticker is gone and the loop should exit fast.
+                    if not self._tickers:
                         break
             with self._ticker_lock:
                 connected_now = any(e.get("connected") for e in self._tickers)
@@ -1984,7 +2018,16 @@ class ZerodhaService:
     _self_heal_paused: bool = False
     _self_heal_running: bool = False
 
-    async def ws_self_heal_loop(self, interval_sec: float = 20.0) -> None:
+    # Self-heal backoff caps. Base interval is the caller's value
+    # (defaults to 30 s in main.py). Each consecutive failure DOUBLES
+    # the next sleep up to `_SELF_HEAL_MAX_INTERVAL_SEC` (5 min) so
+    # an unresponsive Kite endpoint isn't hammered every 20 s — that
+    # was the "1500 attempts overnight, zero success" pattern. A single
+    # success resets the counter so the next outage starts at the base
+    # cadence again.
+    _SELF_HEAL_MAX_INTERVAL_SEC = 300
+
+    async def ws_self_heal_loop(self, interval_sec: float = 30.0) -> None:
         """Background task — periodically nudge a stuck WebSocket back
         online. Skipped when:
           - admin explicitly disconnected (`_self_heal_paused` flag)
@@ -2004,7 +2047,14 @@ class ZerodhaService:
         try:
             while self._self_heal_running:
                 try:
-                    await asyncio.sleep(interval_sec)
+                    # Exponential backoff: double the wait per consecutive
+                    # failure, cap at _SELF_HEAL_MAX_INTERVAL_SEC. Resets
+                    # to base on the first successful connect.
+                    sleep_for = min(
+                        interval_sec * (2 ** self._ws_consecutive_heal_failures),
+                        float(self._SELF_HEAL_MAX_INTERVAL_SEC),
+                    )
+                    await asyncio.sleep(sleep_for)
                     if self._self_heal_paused:
                         continue
                     s = await self._get_settings()
@@ -2034,11 +2084,23 @@ class ZerodhaService:
                     )
                     try:
                         await self.connect_ws(force=True)
+                        self._ws_consecutive_heal_failures = 0
                         logger.info("zerodha_ws_self_heal_succeeded")
                     except Exception as e:
+                        self._ws_consecutive_heal_failures = min(
+                            self._ws_consecutive_heal_failures + 1, 6
+                        )
                         logger.warning(
                             "zerodha_ws_self_heal_attempt_failed",
-                            extra={"error": str(e)[:200]},
+                            extra={
+                                "error": str(e)[:200],
+                                "consecutive_failures": self._ws_consecutive_heal_failures,
+                                "next_sleep_sec": min(
+                                    interval_sec
+                                    * (2 ** self._ws_consecutive_heal_failures),
+                                    float(self._SELF_HEAL_MAX_INTERVAL_SEC),
+                                ),
+                            },
                         )
                 except Exception:
                     logger.exception("zerodha_ws_self_heal_tick_failed")
