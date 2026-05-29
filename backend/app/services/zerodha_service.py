@@ -1563,6 +1563,11 @@ class ZerodhaService:
             self._update_ws_status(WsStatus.ERROR, error=f"{ws_label}: {str(reason or '')[:150]}")
 
         def on_ticks(ws, ticks):
+            # Capture once per batch — monotonic so it's immune to NTP
+            # adjustments that could turn `now - received_at` negative
+            # and silently bypass the tick-staleness order-validator guard.
+            import time as _stdtime
+            received_at_mono = _stdtime.monotonic()
             for tick in ticks or []:
                 token = int(tick.get("instrument_token") or 0)
                 if not token:
@@ -1588,6 +1593,11 @@ class ZerodhaService:
                     "close": float(ohlc.get("close") or 0),
                     "volume": int(tick.get("volume_traded") or 0),
                     "change": float(tick.get("change") or 0),
+                    # Monotonic clock — read by order_validator to reject
+                    # orders when this instrument's last tick is stale
+                    # (late market open, mid-session halt, exchange feed
+                    # outage). See `get_last_tick_age_sec` below.
+                    "received_at": received_at_mono,
                 }
                 sym_info = self._symbol_by_token.get(token)
                 if sym_info:
@@ -2277,6 +2287,37 @@ class ZerodhaService:
             )
         except Exception:
             logger.exception("zerodha_ws_self_heal_auto_login_trigger_failed")
+
+    def get_last_tick_age_sec(self, token: int | str) -> float | None:
+        """Seconds since the last tick payload landed for this token.
+
+        Returns
+        -------
+        float
+            Age of the most recent tick in seconds (monotonic delta).
+        None
+            We have never received a tick for this token in the current
+            process lifetime, OR the token is unparseable.
+
+        Used by the order validator to reject orders when an instrument's
+        live feed is stale — catches late market opens, mid-session
+        halts, and exchange feed outages that the static market-hours
+        config doesn't know about (e.g. 28-May 2026 MCX opened at 17:00
+        IST instead of 09:00; orders went through at zero/stale prices
+        for 8 hours costing the admin real money).
+        """
+        try:
+            tok = int(token)
+        except (TypeError, ValueError):
+            return None
+        payload = self.ticks_by_token.get(tok)
+        if not payload:
+            return None
+        received_at = payload.get("received_at")
+        if received_at is None:
+            return None
+        import time as _t
+        return _t.monotonic() - float(received_at)
 
     def get_ws_pool_info(self) -> dict[str, Any]:
         """Return current WebSocket pool status for admin diagnostics."""

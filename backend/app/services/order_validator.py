@@ -806,6 +806,49 @@ async def validate(
                 if not (open_t <= ist.time() <= close_t):
                     raise MarketClosedError("Market is closed. Place AMO instead.")
 
+        # ── 11b) Live-tick sanity (catches late opens / mid-session halts)
+        #
+        # The static clock-based checks above can't catch the case where
+        # the exchange schedule SAYS the market is open but the session
+        # hasn't actually started (or has stopped mid-day for a halt).
+        # 28-May 2026: MCX was scheduled 09:00 IST but the exchange
+        # didn't release the feed until 17:00; orders went through at
+        # zero/stale prices for 8 hours, costing the admin real money.
+        #
+        # This guard belts-and-braces the wall-clock check by requiring
+        # at least one fresh tick from Zerodha for THIS specific
+        # instrument within the last `_TICK_MAX_AGE_SEC` seconds. During
+        # an active session Kite streams continuously, so a 60-second
+        # gap is a strong "session not live" signal. The threshold is
+        # generous enough to tolerate brief WS hiccups without false-
+        # rejecting legitimate orders.
+        #
+        # Exemptions match the static check above — AMO is for queueing
+        # outside hours, squareoff must always work (admin / risk auto-
+        # flatten), crypto is 24×7 + Infoway-fed (Zerodha never ticks
+        # it), forex / metals / energy are 24×5 + Infoway-fed.
+        _TICK_MAX_AGE_SEC = 60
+        try:
+            from app.services.zerodha_service import zerodha as _zerodha_for_tick_check
+            _tick_age = _zerodha_for_tick_check.get_last_tick_age_sec(
+                instrument.token
+            )
+        except Exception:
+            # Never let a probe error block a legitimate trade — fail
+            # open here, the static window check above is the primary
+            # gate. The tick check is additional protection only.
+            _tick_age = 0.0
+        # `None` → token never received a tick this process lifetime.
+        # During a live session that's the strongest possible "closed"
+        # signal (Zerodha streams every subscribed token continuously).
+        if _tick_age is None or _tick_age > _TICK_MAX_AGE_SEC:
+            raise MarketClosedError(
+                f"No live prices for {instrument.symbol} in the last "
+                f"{_TICK_MAX_AGE_SEC}s — exchange session appears closed "
+                f"or feed is down. Try again once prices resume, or "
+                f"place an AMO order."
+            )
+
     # Build snapshot for the order document
     settings_snapshot = {
         "segment_type": segment_type,
