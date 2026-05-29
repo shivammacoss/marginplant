@@ -434,17 +434,42 @@ async def create_user(
 
     # Optional "Place user under <broker>" selector from the create form.
     # When set, the new user is placed inside that broker's subtree
-    # instead of directly under the caller.  Scope is enforced — admins
-    # can only target brokers in their pool, brokers can only target
-    # sub-brokers under them.
+    # instead of directly under the caller.
+    #
+    # Scope check is custom here because `assert_user_in_scope` rejects
+    # admin/broker targets outright ("Cannot operate on an admin/broker
+    # user via this endpoint") — that guard exists so non-admin
+    # endpoints can't mutate elevated rows.  Placement is different:
+    # we're not mutating the broker, just stamping a new client under
+    # them.  Enforce scope manually:
+    #   - SUPER_ADMIN can target any broker
+    #   - ADMIN can target brokers/sub-brokers in their pool
+    #   - BROKER can target their own subtree
     target_broker: User | None = None
     if payload.assign_to_broker_id:
-        target_broker = await assert_user_in_scope(admin, payload.assign_to_broker_id)
-        if target_broker.role != UserRole.BROKER:
+        try:
+            tb_oid = PydanticObjectId(payload.assign_to_broker_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid assign_to_broker_id")
+        target_broker = await User.get(tb_oid)
+        if target_broker is None or target_broker.role != UserRole.BROKER:
             raise HTTPException(
                 status_code=400,
                 detail="assign_to_broker_id must reference a broker / sub-broker user.",
             )
+        if admin.role == UserRole.ADMIN:
+            if target_broker.assigned_admin_id != admin.id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="That broker is not in your pool.",
+                )
+        elif admin.role == UserRole.BROKER:
+            ancestry = [str(a) for a in (target_broker.broker_ancestry or [])]
+            if target_broker.id == admin.id or str(admin.id) not in ancestry:
+                raise HTTPException(
+                    status_code=403,
+                    detail="That broker is not in your downline.",
+                )
 
     if admin.role == UserRole.SUPER_ADMIN:
         if target_broker is not None:

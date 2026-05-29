@@ -1,12 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
-import { Eye, EyeOff } from "lucide-react";
+import { Check, ChevronDown, Eye, EyeOff, Search, X } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { BrokerMgmtAPI, UsersAPI } from "@/lib/api";
 import { useAdminAuthStore } from "@/stores/authStore";
@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/common/PageHeader";
+import { cn } from "@/lib/utils";
 
 // This page creates regular trading users (CLIENT). Sub-admins are minted
 // from /management/sub-admins (super-admin only) — role is therefore not
@@ -165,24 +166,15 @@ export default function NewUserPage() {
               label="Place user under"
               error={form.formState.errors.assign_to_broker_id?.message}
             >
-              <select
-                {...form.register("assign_to_broker_id")}
-                className="h-9 w-full rounded-md border border-border bg-background px-2 text-sm"
-                disabled={brokersQuery.isLoading}
-              >
-                <option value="">{selfLabel}</option>
-                {brokerOptions.map((b: any) => {
-                  const isSub = !!b.assigned_broker_id;
-                  const label = `${isSub ? "Sub-broker" : "Broker"} · ${
-                    b.full_name || b.user_code
-                  }${b.user_code ? ` (${b.user_code})` : ""}`;
-                  return (
-                    <option key={b.id} value={b.id}>
-                      {label}
-                    </option>
-                  );
-                })}
-              </select>
+              <BrokerCombobox
+                value={form.watch("assign_to_broker_id") || ""}
+                onChange={(v) =>
+                  form.setValue("assign_to_broker_id", v, { shouldValidate: true })
+                }
+                selfLabel={selfLabel}
+                options={brokerOptions}
+                loading={brokersQuery.isLoading}
+              />
               <p className="text-[11px] text-muted-foreground">
                 Choose the broker / sub-broker this user belongs under. Default is
                 Self.
@@ -220,6 +212,173 @@ function Field({ label, error, children }: { label: string; error?: string; chil
       <Label>{label}</Label>
       {children}
       {error && <p className="text-xs text-destructive">{error}</p>}
+    </div>
+  );
+}
+
+/** Searchable broker / sub-broker picker. Native <select> can't filter
+ *  as you type, so admins with 50+ brokers had no way to find a name
+ *  short of scrolling. This combobox shows a search input on focus and
+ *  filters the list by name / user_code substring. */
+function BrokerCombobox({
+  value,
+  onChange,
+  selfLabel,
+  options,
+  loading,
+}: {
+  value: string;
+  onChange: (id: string) => void;
+  selfLabel: string;
+  options: any[];
+  loading: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  // Close on outside click — without this the menu stays open after the
+  // user picks something elsewhere on the form.
+  useEffect(() => {
+    if (!open) return;
+    function onDoc(e: MouseEvent) {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  useEffect(() => {
+    if (open) inputRef.current?.focus();
+  }, [open]);
+
+  const selected = useMemo(
+    () => options.find((b: any) => String(b.id) === value),
+    [options, value],
+  );
+
+  const selectedLabel = selected
+    ? `${selected.assigned_broker_id ? "Sub-broker" : "Broker"} · ${
+        selected.full_name || selected.user_code
+      }${selected.user_code ? ` (${selected.user_code})` : ""}`
+    : selfLabel;
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter((b: any) => {
+      const name = String(b.full_name ?? "").toLowerCase();
+      const code = String(b.user_code ?? "").toLowerCase();
+      return name.includes(q) || code.includes(q);
+    });
+  }, [options, query]);
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        disabled={loading}
+        className="flex h-9 w-full items-center justify-between gap-2 rounded-md border border-border bg-background px-2 text-left text-sm disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <span className={cn("truncate", !selected && "text-muted-foreground")}>
+          {loading ? "Loading…" : selectedLabel}
+        </span>
+        <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+      </button>
+
+      {open && (
+        <div className="absolute z-50 mt-1 w-full overflow-hidden rounded-md border border-border bg-popover shadow-lg">
+          <div className="flex items-center gap-2 border-b border-border px-2">
+            <Search className="size-3.5 shrink-0 text-muted-foreground" />
+            <Input
+              ref={inputRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search by name or code…"
+              className="h-8 border-0 px-0 focus-visible:ring-0"
+            />
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                aria-label="Clear search"
+                className="grid size-5 place-items-center rounded text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+              >
+                <X className="size-3" />
+              </button>
+            )}
+          </div>
+
+          <ul className="max-h-64 overflow-y-auto py-1">
+            <li>
+              <button
+                type="button"
+                onClick={() => {
+                  onChange("");
+                  setOpen(false);
+                  setQuery("");
+                }}
+                className={cn(
+                  "flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm hover:bg-muted/40",
+                  !value && "bg-primary/10",
+                )}
+              >
+                <Check className={cn("size-3.5", !value ? "opacity-100" : "opacity-0")} />
+                <span>{selfLabel}</span>
+              </button>
+            </li>
+            {filtered.length === 0 && query && (
+              <li className="px-2.5 py-2 text-center text-xs text-muted-foreground">
+                No matches for &ldquo;{query}&rdquo;
+              </li>
+            )}
+            {filtered.map((b: any) => {
+              const isSub = !!b.assigned_broker_id;
+              const isPicked = String(b.id) === value;
+              return (
+                <li key={b.id}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onChange(String(b.id));
+                      setOpen(false);
+                      setQuery("");
+                    }}
+                    className={cn(
+                      "flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm hover:bg-muted/40",
+                      isPicked && "bg-primary/10",
+                    )}
+                  >
+                    <Check className={cn("size-3.5", isPicked ? "opacity-100" : "opacity-0")} />
+                    <span
+                      className={cn(
+                        "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider",
+                        isSub
+                          ? "bg-indigo-500/10 text-indigo-500 ring-1 ring-inset ring-indigo-500/30"
+                          : "bg-blue-500/10 text-blue-500 ring-1 ring-inset ring-blue-500/30",
+                      )}
+                    >
+                      {isSub ? "Sub-broker" : "Broker"}
+                    </span>
+                    <span className="truncate font-medium">
+                      {b.full_name || b.user_code}
+                    </span>
+                    {b.user_code && (
+                      <span className="ml-auto font-mono text-[10px] text-muted-foreground">
+                        {b.user_code}
+                      </span>
+                    )}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
