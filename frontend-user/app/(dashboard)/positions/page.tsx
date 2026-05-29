@@ -1275,14 +1275,20 @@ function WalletStatusStrip({
   const used = Number(wallet?.used_margin ?? 0);
   const balance = available + used;
   const equity = balance + m2m;
-  // CF Extra Needed — the shortfall the trader has to top up before
-  // their MIS positions can roll into NRML overnight.  Computed
-  // against the LIVE equity (balance + M2M) rather than just
-  // available_balance: if today's M2M is +50k, the trader effectively
-  // has more cushion to carry; if it's -34k, the cushion shrinks.
-  // Floored at zero — no negative "extra" when the wallet already
-  // covers the carry requirement.
-  const cfExtraNeeded = Math.max(0, cfRequired - equity);
+  // CF Extra Needed — the ADDITIONAL margin that will be locked when
+  // MIS positions roll into NRML overnight, on top of whatever is
+  // already held by used_margin for the intraday side.  Operator
+  // preference: "kitna extra block hoga rollover pe" — not a cash
+  // shortfall calculation against equity, which always read as 0
+  // whenever the wallet was healthy and made the tile feel broken.
+  //   Used Margin = ₹1,686  (intraday MIS lock)
+  //   CF Required = ₹12,044 (overnight NRML lock)
+  //   CF Extra    = ₹10,358 (delta that will move from available
+  //                          → used_margin at EOD)
+  // Floored at zero — if the carry requirement is somehow lower than
+  // the intraday lock the tile reads 0.00 rather than a misleading
+  // negative number.
+  const cfExtraNeeded = Math.max(0, cfRequired - used);
   return (
     <div
       className={cn(
